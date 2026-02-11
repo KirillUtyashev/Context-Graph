@@ -1,0 +1,47 @@
+# Terraform working directory
+**/.terraform/
+
+# Terraform state
+**/*.tfstate
+**/*.tfstate.*
+
+# Terraform plans
+**/*.tfplan
+**/*.plan
+
+# Crash logs
+crash.log
+crash.*.log
+
+# CLI config files
+.terraformrc
+terraform.rc
+
+# Override files (local-only)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Variable files that commonly contain secrets
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Local secrets
+*.secret.tfvars
+*.secret.tfvars.json
+
+# Lambda build artifacts produced by archive_file in stacks (module writes to path.root)
+stacks/**/.lambda_build_*.zip
+
+# Editor/OS noise
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/*~
+
+# Keys/certs
+**/*.pem
+**/*.key
+**/*.p12
+**/*.crt
