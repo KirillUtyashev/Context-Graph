@@ -8,6 +8,8 @@ data "aws_ami" "al2023" {
   }
 }
 
+data "aws_region" "current" {}
+
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -122,6 +124,26 @@ resource "aws_iam_role_policy" "artifacts_read" {
   })
 }
 
+resource "aws_iam_role_policy" "invoke_retrieve_lambda" {
+  name = "${var.name}-mcp-invoke-retrieve"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "InvokeRetrieveLambda"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = [
+          "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.name}-retrieve",
+          "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.name}-retrieve:*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "this" {
   name = "${var.name}-mcp-ec2-profile"
   role = aws_iam_role.ssm.name
@@ -164,6 +186,8 @@ resource "aws_instance" "this" {
     Group=mcp
     WorkingDirectory=/opt/mcp_server/current
     Environment=PORT=${var.ingress_port}
+    Environment=AWS_REGION=${data.aws_region.current.name}
+    Environment=RETRIEVE_LAMBDA_NAME=${var.name}-retrieve
     ExecStart=/opt/mcp_server/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${var.ingress_port}
     Restart=on-failure
     RestartSec=2
