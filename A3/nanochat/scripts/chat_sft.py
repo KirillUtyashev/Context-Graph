@@ -29,6 +29,8 @@ from scripts.chat_eval import run_chat_eval
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
 from tasks.mmlu import MMLU
+from tasks.numinamath import NuminaMathCoT
+from tasks.orca_math import OrcaMath
 from tasks.smoltalk import SmolTalk
 from tasks.customjson import CustomJSON
 from tasks.spellingbee import SimpleSpelling, SpellingBee
@@ -67,6 +69,19 @@ parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max pro
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
+parser.add_argument("--smoltalk-train-rows", type=int, default=-1, help="number of SmolTalk train rows to include (-1 = full split)")
+parser.add_argument("--mmlu-train-rows", type=int, default=-1, help="number of MMLU train rows to include in total (-1 = use --mmlu-epochs)")
+parser.add_argument("--gsm8k-train-rows", type=int, default=-1, help="number of GSM8K train rows to include in total (-1 = use --gsm8k-epochs)")
+parser.add_argument("--simple-spelling-train-rows", type=int, default=200000, help="number of SimpleSpelling train rows to include")
+parser.add_argument("--spellingbee-train-rows", type=int, default=80000, help="number of SpellingBee train rows to include")
+parser.add_argument("--identity-train-copies", type=int, default=2, help="how many copies of the identity conversations to include")
+parser.add_argument("--orca-math-train-rows", type=int, default=0, help="number of Orca-Math train rows to include")
+parser.add_argument("--numinamath-train-rows", type=int, default=0, help="number of NuminaMath train rows to include")
+parser.add_argument("--smoltalk-val-rows", type=int, default=-1, help="number of SmolTalk validation rows to include (-1 = full test split)")
+parser.add_argument("--mmlu-val-rows", type=int, default=5200, help="number of MMLU validation rows to include")
+parser.add_argument("--gsm8k-val-rows", type=int, default=420, help="number of GSM8K validation rows to include")
+parser.add_argument("--orca-math-val-rows", type=int, default=0, help="number of Orca-Math validation rows to include")
+parser.add_argument("--numinamath-val-rows", type=int, default=0, help="number of NuminaMath validation rows to include")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -157,23 +172,69 @@ for group in optimizer.param_groups:
     group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
+def maybe_slice(task_ctor, rows):
+    """Build zero or one task instance depending on the requested row budget."""
+    if rows == 0:
+        return []
+    if rows < 0:
+        return [task_ctor()]
+    return [task_ctor(stop=rows)]
+
+def repeat_to_rows(task_ctor, rows):
+    """Repeat/slice a task until we hit the requested total number of rows."""
+    if rows == 0:
+        return []
+    first_task = task_ctor()
+    full_len = len(first_task)
+    if rows < 0:
+        return [first_task]
+    tasks = []
+    remaining = rows
+    use_first = True
+    while remaining > 0:
+        if remaining >= full_len:
+            tasks.append(first_task if use_first else task_ctor())
+            remaining -= full_len
+        else:
+            tasks.append(task_ctor(stop=remaining))
+            remaining = 0
+        use_first = False
+    return tasks
+
+def grouped_counts(tasks):
+    counts = {}
+    for task in tasks:
+        name = type(task).__name__
+        counts[name] = counts.get(name, 0) + len(task)
+    return counts
+
 identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
+resolved_mmlu_rows = args.mmlu_train_rows if args.mmlu_train_rows >= 0 else args.mmlu_epochs * len(MMLU(subset="auxiliary_train", split="train"))
+resolved_gsm8k_rows = args.gsm8k_train_rows if args.gsm8k_train_rows >= 0 else args.gsm8k_epochs * len(GSM8K(subset="main", split="train"))
 train_tasks = [
-    SmolTalk(split="train"), # 460K rows of general conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
-    *[MMLU(subset="auxiliary_train", split="train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
-    *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
-    SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+    *maybe_slice(lambda **kwargs: SmolTalk(split="train", **kwargs), args.smoltalk_train_rows),
+    *[CustomJSON(filepath=identity_conversations_filepath) for _ in range(args.identity_train_copies)],
+    *repeat_to_rows(lambda **kwargs: MMLU(subset="auxiliary_train", split="train", **kwargs), resolved_mmlu_rows),
+    *repeat_to_rows(lambda **kwargs: GSM8K(subset="main", split="train", **kwargs), resolved_gsm8k_rows),
+    *maybe_slice(lambda **kwargs: OrcaMath(split="train", **kwargs), args.orca_math_train_rows),
+    *maybe_slice(lambda **kwargs: NuminaMathCoT(split="train", **kwargs), args.numinamath_train_rows),
+    SimpleSpelling(size=args.simple_spelling_train_rows, split="train"),
+    SpellingBee(size=args.spellingbee_train_rows, split="train"),
 ]
 train_dataset = TaskMixture(train_tasks)
-print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
+train_counts = grouped_counts(train_tasks)
+print0(f"Training mixture: {len(train_dataset):,} rows")
+print0("Train rows by task: " + ", ".join(f"{name}={count:,}" for name, count in sorted(train_counts.items())))
 val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 14K + 1.32K ~= 39K rows
+    *maybe_slice(lambda **kwargs: SmolTalk(split="test", **kwargs), args.smoltalk_val_rows),
+    *maybe_slice(lambda **kwargs: MMLU(subset="all", split="test", **kwargs), args.mmlu_val_rows),
+    *maybe_slice(lambda **kwargs: GSM8K(subset="main", split="test", **kwargs), args.gsm8k_val_rows),
+    *maybe_slice(lambda **kwargs: OrcaMath(split="test", **kwargs), args.orca_math_val_rows),
+    *maybe_slice(lambda **kwargs: NuminaMathCoT(split="test", **kwargs), args.numinamath_val_rows),
+])
+val_counts = grouped_counts(val_dataset.tasks)
+print0(f"Validation mixture: {len(val_dataset):,} rows")
+print0("Val rows by task: " + ", ".join(f"{name}={count:,}" for name, count in sorted(val_counts.items())))
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
