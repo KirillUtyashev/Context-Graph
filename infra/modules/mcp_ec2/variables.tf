@@ -25,3 +25,13 @@ variable "ingress_cidr" {
   default = "0.0.0.0/0"
 }
 
+variable "enable_bedrock" {
+  type    = bool
+  default = true
+}
+
+# Optional IAM tightening: if set non-empty, only allow invoking these model IDs/ARNs
+variable "bedrock_allowed_model_ids" {
+  type    = list(string)
+  default = []
+}
