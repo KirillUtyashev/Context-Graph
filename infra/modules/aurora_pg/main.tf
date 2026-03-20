@@ -13,7 +13,8 @@ data "aws_rds_engine_version" "aurora_pg" {
 }
 
 resource "aws_secretsmanager_secret" "db_master" {
-  name = "${var.name}/aurora/master"
+  name                    = "${var.name}/aurora/master"
+  recovery_window_in_days = 0
 
   tags = merge(var.tags, {
     Name = "${var.name}-aurora-master-secret"

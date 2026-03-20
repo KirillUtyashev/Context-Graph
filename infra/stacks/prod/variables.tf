@@ -28,6 +28,27 @@ variable "mcp_ingress_cidr" {
   default = "0.0.0.0/0"
 }
 
+variable "enable_bedrock" {
+  type    = bool
+  default = true
+}
+
+variable "bedrock_allowed_model_ids" {
+  type    = list(string)
+  default = ["anthropic.claude-sonnet-4-6", "anthropic.claude-opus-4-6-v1"]
+}
+
+variable "bedrock_public_proxy_basic_auth_username" {
+  type    = string
+  default = "bedrock"
+}
+
+variable "bedrock_public_proxy_basic_auth_password" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
 variable "aurora_min_acu" {
   type    = number
   default = 0.5
@@ -45,6 +66,6 @@ variable "neptune_min_capacity" {
 
 variable "neptune_max_capacity" {
   type    = number
-  default = 4
+  default = 2
 }
 

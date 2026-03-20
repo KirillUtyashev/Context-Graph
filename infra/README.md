@@ -8,6 +8,8 @@ This directory provisions AWS infrastructure for the Context Graph.
   - Public subnets (EC2, NAT gateway)
   - Private subnets (Aurora, Neptune, Lambdas)
   - 1 NAT Gateway (so VPC Lambdas can reach GitHub / internet)
+- Bedrock Runtime Interface VPC Endpoint (PrivateLink)
+  - Lets EC2/Lambdas call `bedrock-runtime` privately inside the VPC
 - Aurora PostgreSQL (Serverless v2)
   - For storing context resources
 - Neptune (Gremlin) inside the VPC
@@ -18,6 +20,8 @@ This directory provisions AWS infrastructure for the Context Graph.
 - 2 AWS Lambda functions with Lambda Function URLs (no API Gateway)
   - `augment`: GitHub webhook receiver / augmentation entrypoint
   - `retrieve`: Called by the tool to traverse the graph
+  - `bedrock-proxy`: Public internet endpoint that calls Bedrock with HTTP Basic Auth
+    - Mostly for manual calling
 
 ## Lambda source code location + deployment
 
@@ -25,6 +29,7 @@ Lambda source lives outside `infra/`:
 
 - `lambda_augment/`
 - `lambda_retrieve/`
+- `lambda_bedrock_proxy/`
 
 Terraform packages these directories when you run `terraform apply`.
 
@@ -84,6 +89,78 @@ terraform apply
 ```bash
 cd infra/stacks/prod
 terraform apply
+```
+
+## Bedrock (Claude Sonnet 4.6, on‑demand)
+
+This stack gives the MCP EC2 instance IAM permissions to call Amazon Bedrock Runtime using on‑demand pricing (no provisioned throughput).
+
+The endpoint can also be called manually using basic auth.
+
+Terraform settings (per stack `terraform.tfvars`):
+
+- `bedrock_allowed_model_ids`: allowed `modelId` values (defaults to Claude Sonnet 4.6 + Claude Opus 4.6)
+- `bedrock_public_proxy_basic_auth_username`: username for the public Bedrock proxy Function URL
+- `bedrock_public_proxy_basic_auth_password`: password for the public Bedrock proxy Function URL (if empty, Terraform generates one)
+
+### Call the model
+
+From within the VPC (like on the EC2) you can run:
+
+```python
+import json
+import boto3
+
+MODEL_ID = "global.anthropic.claude-sonnet-4-6"  # or an inference profile ID/ARN
+REGION = "ca-central-1"
+
+brt = boto3.client("bedrock-runtime", region_name=REGION)
+
+resp = brt.converse(
+    modelId=MODEL_ID,
+    messages=[
+        {"role": "user", "content": [{"text": "Explain on-demand pricing in one sentence."}]}
+    ],
+    inferenceConfig={"maxTokens": 128, "temperature": 0.2},
+)
+
+print(json.dumps(resp["output"]["message"], indent=2))
+```
+
+Alternatively, you can call it through the AWS CLI:
+
+```bash
+aws bedrock-runtime converse \
+  --region <bedrock-region> \
+  --model-id "global.anthropic.claude-sonnet-4-6" \
+  --messages '[{"role":"user","content":[{"text":"Write a haiku about graphs."}]}]' \
+  --inference-config '{"maxTokens":256,"temperature":0.7}'
+```
+
+Or, you can call the model via the public proxy (curl + Basic Auth)
+
+After `terraform apply`, read these outputs from your stack:
+
+- `bedrock_public_proxy_function_url`
+- `bedrock_public_proxy_basic_auth_username`
+- `bedrock_public_proxy_basic_auth_password`
+
+Example request (uses the proxy's `DEFAULT_MODEL_ID` if `model_id` is omitted):
+
+```bash
+curl -u "<user>:<pass>" \
+  -H "content-type: application/json" \
+  -d '{"prompt":"Write a haiku about graphs.","inferenceConfig":{"maxTokens":128,"temperature":0.7}}' \
+  "<function_url>/"
+```
+
+You can also pass through a Bedrock `converse` call directly:
+
+```bash
+curl -u "<user>:<pass>" \
+  -H "content-type: application/json" \
+  -d '{"model_id":"anthropic.claude-sonnet-4-6","converse":{"messages":[{"role":"user","content":[{"text":"Say hello."}]}],"inferenceConfig":{"maxTokens":64,"temperature":0.2}}}' \
+  "<function_url>/"
 ```
 
 ## Notes

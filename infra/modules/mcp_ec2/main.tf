@@ -18,7 +18,8 @@ locals {
 }
 
 resource "aws_s3_bucket" "artifacts" {
-  bucket = local.artifacts_bucket_name
+  bucket        = local.artifacts_bucket_name
+  force_destroy = true
 
   tags = merge(var.tags, { Name = local.artifacts_bucket_name })
 }
@@ -139,6 +140,61 @@ resource "aws_iam_role_policy" "invoke_retrieve_lambda" {
           "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.name}-retrieve",
           "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.name}-retrieve:*"
         ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "bedrock_invoke" {
+  count = var.enable_bedrock ? 1 : 0
+
+  name = "${var.name}-mcp-bedrock-invoke"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "InvokeBedrockOnDemand"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:CountTokens"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "bedrock_invoke_restrict_models" {
+  count = (var.enable_bedrock && length(var.bedrock_allowed_model_ids) > 0) ? 1 : 0
+
+  name = "${var.name}-mcp-bedrock-invoke-restrict-models"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "RestrictBedrockModelIds"
+        Effect = "Deny"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:CountTokens"
+        ]
+        Resource = "*"
+        Condition = {
+          "StringNotEquals" = {
+            "bedrock:ModelId" = var.bedrock_allowed_model_ids
+          }
+        }
       }
     ]
   })

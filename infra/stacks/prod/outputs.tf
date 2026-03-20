@@ -10,6 +10,14 @@ output "mcp_artifacts_bucket" {
   value = module.mcp.artifacts_bucket_name
 }
 
+output "bedrock_runtime_vpc_endpoint_id" {
+  value = module.bedrock_runtime_endpoint.vpc_endpoint_id
+}
+
+output "bedrock_runtime_vpc_endpoint_dns_entries" {
+  value = module.bedrock_runtime_endpoint.dns_entries
+}
+
 output "aurora_endpoint" {
   value = module.aurora.cluster_endpoint
 }
@@ -28,4 +36,21 @@ output "augment_function_url" {
 
 output "retrieve_function_url" {
   value = module.retrieve_lambda.function_url
+}
+
+output "bedrock_public_proxy_function_url" {
+  value = module.bedrock_public_proxy_lambda.function_url
+}
+
+output "bedrock_public_proxy_basic_auth_username" {
+  value = var.bedrock_public_proxy_basic_auth_username
+}
+
+output "bedrock_public_proxy_basic_auth_password" {
+  value     = local.bedrock_public_proxy_password
+  sensitive = true
+}
+
+output "bedrock_public_proxy_default_model_id" {
+  value = local.bedrock_public_proxy_default_model_id
 }

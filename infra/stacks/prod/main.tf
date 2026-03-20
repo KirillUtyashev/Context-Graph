@@ -4,6 +4,10 @@ locals {
     Project = var.project_name
     Env     = var.env
   }
+
+  bedrock_public_proxy_username         = var.bedrock_public_proxy_basic_auth_username
+  bedrock_public_proxy_password         = var.bedrock_public_proxy_basic_auth_password != "" ? var.bedrock_public_proxy_basic_auth_password : random_password.bedrock_public_proxy_password[0].result
+  bedrock_public_proxy_default_model_id = try(var.bedrock_allowed_model_ids[0], "")
 }
 
 module "network" {
@@ -14,13 +18,15 @@ module "network" {
 }
 
 module "mcp" {
-  source       = "../../modules/mcp_ec2"
-  name         = local.name
-  vpc_id       = module.network.vpc_id
-  subnet_id    = module.network.public_subnet_ids[0]
-  ingress_port = var.mcp_ingress_port
-  ingress_cidr = var.mcp_ingress_cidr
-  tags         = local.tags
+  source                    = "../../modules/mcp_ec2"
+  name                      = local.name
+  vpc_id                    = module.network.vpc_id
+  subnet_id                 = module.network.public_subnet_ids[0]
+  ingress_port              = var.mcp_ingress_port
+  ingress_cidr              = var.mcp_ingress_cidr
+  enable_bedrock            = var.enable_bedrock
+  bedrock_allowed_model_ids = var.bedrock_allowed_model_ids
+  tags                      = local.tags
 }
 
 resource "aws_security_group" "lambda" {
@@ -36,6 +42,21 @@ resource "aws_security_group" "lambda" {
   }
 
   tags = merge(local.tags, { Name = "${local.name}-lambda-sg" })
+}
+
+resource "random_password" "bedrock_public_proxy_password" {
+  count   = var.bedrock_public_proxy_basic_auth_password == "" ? 1 : 0
+  length  = 32
+  special = false
+}
+
+module "bedrock_runtime_endpoint" {
+  source         = "../../modules/bedrock_runtime_endpoint"
+  name           = local.name
+  vpc_id         = module.network.vpc_id
+  subnet_ids     = [module.network.public_subnet_ids[0]]
+  allowed_sg_ids = [module.mcp.security_group_id, aws_security_group.lambda.id]
+  tags           = local.tags
 }
 
 module "aurora" {
@@ -86,5 +107,75 @@ module "retrieve_lambda" {
     ENV              = var.env
   }
   tags = local.tags
+}
+
+module "bedrock_public_proxy_lambda" {
+  source     = "../../modules/lambda_url"
+  name       = "${local.name}-bedrock-proxy"
+  source_dir = abspath("${path.root}/../../../lambda_bedrock_proxy")
+
+  environment = {
+    BASIC_AUTH_USERNAME = local.bedrock_public_proxy_username
+    BASIC_AUTH_PASSWORD = local.bedrock_public_proxy_password
+    DEFAULT_MODEL_ID    = local.bedrock_public_proxy_default_model_id
+    ALLOWED_MODEL_IDS   = join(",", var.bedrock_allowed_model_ids)
+  }
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy" "bedrock_public_proxy_invoke" {
+  count = var.enable_bedrock ? 1 : 0
+
+  name = "${local.name}-bedrock-proxy-invoke"
+  role = module.bedrock_public_proxy_lambda.role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "InvokeBedrockOnDemand"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:CountTokens"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "bedrock_public_proxy_invoke_restrict_models" {
+  count = (var.enable_bedrock && length(var.bedrock_allowed_model_ids) > 0) ? 1 : 0
+
+  name = "${local.name}-bedrock-proxy-invoke-restrict-models"
+  role = module.bedrock_public_proxy_lambda.role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "RestrictBedrockModelIds"
+        Effect = "Deny"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:CountTokens"
+        ]
+        Resource = "*"
+        Condition = {
+          "StringNotEquals" = {
+            "bedrock:ModelId" = var.bedrock_allowed_model_ids
+          }
+        }
+      }
+    ]
+  })
 }
 
