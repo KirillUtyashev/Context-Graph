@@ -26,6 +26,7 @@ module "mcp" {
   ingress_cidr              = var.mcp_ingress_cidr
   enable_bedrock            = var.enable_bedrock
   bedrock_allowed_model_ids = var.bedrock_allowed_model_ids
+  neptune_endpoint          = module.neptune.endpoint
   tags                      = local.tags
 }
 
@@ -170,7 +171,7 @@ resource "aws_iam_role_policy" "bedrock_public_proxy_invoke_restrict_models" {
         ]
         Resource = "*"
         Condition = {
-          "StringNotEquals" = {
+          "StringNotEqualsIfExists" = {
             "bedrock:ModelId" = var.bedrock_allowed_model_ids
           }
         }

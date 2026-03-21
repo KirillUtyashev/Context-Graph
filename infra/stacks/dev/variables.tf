@@ -35,7 +35,7 @@ variable "enable_bedrock" {
 
 variable "bedrock_allowed_model_ids" {
   type    = list(string)
-  default = ["anthropic.claude-sonnet-4-6", "anthropic.claude-opus-4-6-v1"]
+  default = ["anthropic.claude-sonnet-4-6", "anthropic.claude-opus-4-6-v1", "cohere.embed-english-v3", "us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-opus-4-6-v1", "amazon.titan-embed-text-v2:0"]
 }
 
 variable "bedrock_public_proxy_basic_auth_username" {

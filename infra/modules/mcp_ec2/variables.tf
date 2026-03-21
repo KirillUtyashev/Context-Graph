@@ -30,6 +30,12 @@ variable "enable_bedrock" {
   default = true
 }
 
+variable "neptune_endpoint" {
+  type        = string
+  description = "Neptune cluster endpoint (without protocol prefix). Injected as NEPTUNE_HOST=neptune-db://<endpoint> in the systemd unit."
+  default     = ""
+}
+
 # Optional IAM tightening: if set non-empty, only allow invoking these model IDs/ARNs
 variable "bedrock_allowed_model_ids" {
   type    = list(string)

@@ -224,7 +224,7 @@ async def edge_fulltext_search(
 
     if driver.provider == GraphProvider.NEPTUNE:
         res = driver.run_aoss_query('edge_name_and_fact', query)  # pyright: ignore reportAttributeAccessIssue
-        if res['hits']['total']['value'] > 0:
+        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             input_ids = []
             for r in res['hits']['hits']:
                 input_ids.append({'id': r['_source']['uuid'], 'score': r['_score']})
@@ -611,7 +611,7 @@ async def node_fulltext_search(
 
     if driver.provider == GraphProvider.NEPTUNE:
         res = driver.run_aoss_query('node_name_and_summary', query, limit=limit)  # pyright: ignore reportAttributeAccessIssue
-        if res['hits']['total']['value'] > 0:
+        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             input_ids = []
             for r in res['hits']['hits']:
                 input_ids.append({'id': r['_source']['uuid'], 'score': r['_score']})
@@ -908,7 +908,7 @@ async def episode_fulltext_search(
 
     if driver.provider == GraphProvider.NEPTUNE:
         res = driver.run_aoss_query('episode_content', query, limit=limit)  # pyright: ignore reportAttributeAccessIssue
-        if res['hits']['total']['value'] > 0:
+        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             input_ids = []
             for r in res['hits']['hits']:
                 input_ids.append({'id': r['_source']['uuid'], 'score': r['_score']})
@@ -1000,7 +1000,7 @@ async def community_fulltext_search(
 
     if driver.provider == GraphProvider.NEPTUNE:
         res = driver.run_aoss_query('community_name', query, limit=limit)  # pyright: ignore reportAttributeAccessIssue
-        if res['hits']['total']['value'] > 0:
+        if res.get('hits', {}).get('total', {}).get('value', 0) > 0:
             # Calculate Cosine similarity then return the edge ids
             input_ids = []
             for r in res['hits']['hits']:

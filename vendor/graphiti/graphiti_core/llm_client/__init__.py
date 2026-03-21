@@ -27,4 +27,10 @@ __all__ = [
     'RateLimitError',
     'TokenUsage',
     'TokenUsageTracker',
+    'BedrockLLMClient',
 ]
+
+try:
+    from .bedrock_client import BedrockLLMClient
+except ImportError:
+    pass

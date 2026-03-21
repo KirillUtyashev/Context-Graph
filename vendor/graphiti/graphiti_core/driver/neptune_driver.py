@@ -138,13 +138,17 @@ aoss_indices = [
 
 class NeptuneDriver(GraphDriver):
     provider: GraphProvider = GraphProvider.NEPTUNE
+    _database: str = ''
 
-    def __init__(self, host: str, aoss_host: str, port: int = 8182, aoss_port: int = 443):
+    def __init__(
+        self, host: str, aoss_host: str | None = None, port: int = 8182, aoss_port: int = 443
+    ):
         """This initializes a NeptuneDriver for use with Neptune as a backend
 
         Args:
             host (str): The Neptune Database or Neptune Analytics host
-            aoss_host (str): The OpenSearch host value
+            aoss_host (str | None, optional): The OpenSearch Serverless host value. When None,
+                BM25/keyword search is disabled but semantic and graph traversal search still work.
             port (int, optional): The Neptune Database port, ignored for Neptune Analytics. Defaults to 8182.
             aoss_port (int, optional): The OpenSearch port. Defaults to 443.
         """
@@ -166,20 +170,25 @@ class NeptuneDriver(GraphDriver):
                 'You must provide an endpoint to create a NeptuneDriver as either neptune-db://<endpoint> or neptune-graph://<graphid>'
             )
 
-        if not aoss_host:
-            raise ValueError('You must provide an AOSS endpoint to create an OpenSearch driver.')
-
-        session = boto3.Session()
-        self.aoss_client = OpenSearch(
-            hosts=[{'host': aoss_host, 'port': aoss_port}],
-            http_auth=Urllib3AWSV4SignerAuth(
-                session.get_credentials(), session.region_name, 'aoss'
-            ),
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=Urllib3HttpConnection,
-            pool_maxsize=20,
-        )
+        if aoss_host:
+            session = boto3.Session()
+            self.aoss_client: OpenSearch | None = OpenSearch(
+                hosts=[{'host': aoss_host, 'port': aoss_port}],
+                http_auth=Urllib3AWSV4SignerAuth(
+                    session.get_credentials(), session.region_name, 'aoss'
+                ),
+                use_ssl=True,
+                verify_certs=True,
+                connection_class=Urllib3HttpConnection,
+                pool_maxsize=20,
+            )
+            logger.debug('AOSS client created for %s', aoss_host)
+        else:
+            self.aoss_client = None
+            logger.warning(
+                'No AOSS host provided — BM25/keyword search disabled. '
+                'Use SearchConfig with only cosine_similarity and bfs methods.'
+            )
 
         # Instantiate Neptune operations
         self._entity_node_ops = NeptuneEntityNodeOperations()
@@ -280,7 +289,20 @@ class NeptuneDriver(GraphDriver):
     async def execute_query(
         self, cypher_query_, **kwargs: Any
     ) -> tuple[list[dict[str, Any]], None, None]:
-        params = dict(kwargs)
+        # If a `params` kwarg is provided (as used by search_utils.py for Neptune),
+        # use it as the base Cypher parameter dict.
+        # Also merge in `limit` since Neptune queries use $limit as a parameter.
+        # Strip graphiti-internal hints that are never used in queries.
+        _INTERNAL_KWARGS = {'routing_', 'search_vector', 'min_score'}
+        if 'params' in kwargs:
+            params = dict(kwargs['params'])
+        else:
+            params = {k: v for k, v in kwargs.items() if k not in _INTERNAL_KWARGS and k != 'params'}
+
+        # Always include `limit` if provided separately and not already in params
+        if 'limit' in kwargs and 'limit' not in params:
+            params['limit'] = kwargs['limit']
+
         if isinstance(cypher_query_, list):
             result: list[dict[str, Any]] = []
             for q in cypher_query_:
@@ -289,10 +311,33 @@ class NeptuneDriver(GraphDriver):
         else:
             return self._run_query(cypher_query_, params)
 
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        """JSON encoder fallback: convert numpy scalars and other non-serializable types."""
+        try:
+            import numpy as np  # noqa: PLC0415
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
+
     def _run_query(self, cypher_query_, params):
+        import json as _json
         cypher_query_ = str(self._sanitize_parameters(cypher_query_, params))
         try:
-            result = self.client.query(cypher_query_, params=params)
+            # langchain_aws NeptuneGraph.query() ignores the params dict — it calls
+            # execute_open_cypher_query without the parameters arg. We call the underlying
+            # boto3 client directly to pass params as a JSON string.
+            kwargs: dict = {'openCypherQuery': cypher_query_}
+            if params:
+                kwargs['parameters'] = _json.dumps(params, default=self._json_default)
+            raw = self.client.client.execute_open_cypher_query(**kwargs)
+            result = raw['results']
         except Exception as e:
             logger.error('Query: %s', cypher_query_)
             logger.error('Parameters: %s', params)
@@ -318,6 +363,9 @@ class NeptuneDriver(GraphDriver):
         return self.delete_aoss_indices()
 
     async def create_aoss_indices(self):
+        if self.aoss_client is None:
+            logger.debug('Skipping AOSS index creation — no AOSS client configured')
+            return
         for index in aoss_indices:
             index_name = index['index_name']
             client = self.aoss_client
@@ -327,6 +375,9 @@ class NeptuneDriver(GraphDriver):
         await asyncio.sleep(60)
 
     async def delete_aoss_indices(self):
+        if self.aoss_client is None:
+            logger.debug('Skipping AOSS index deletion — no AOSS client configured')
+            return
         for index in aoss_indices:
             index_name = index['index_name']
             client = self.aoss_client
@@ -340,6 +391,8 @@ class NeptuneDriver(GraphDriver):
         await self.create_aoss_indices()
 
     def run_aoss_query(self, name: str, query_text: str, limit: int = 10) -> dict[str, Any]:
+        if self.aoss_client is None:
+            return {}
         for index in aoss_indices:
             if name.lower() == index['index_name']:
                 index['query']['query']['multi_match']['query'] = query_text
@@ -349,6 +402,8 @@ class NeptuneDriver(GraphDriver):
         return {}
 
     def save_to_aoss(self, name: str, data: list[dict]) -> int:
+        if self.aoss_client is None:
+            return 0
         for index in aoss_indices:
             if name.lower() == index['index_name']:
                 to_index = []

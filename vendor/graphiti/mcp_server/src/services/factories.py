@@ -42,6 +42,13 @@ except ImportError:
     HAS_VOYAGE_EMBEDDER = False
 
 try:
+    from graphiti_core.embedder.bedrock import BedrockEmbedder, BedrockEmbedderConfig
+
+    HAS_BEDROCK_EMBEDDER = True
+except ImportError:
+    HAS_BEDROCK_EMBEDDER = False
+
+try:
     from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
 
     HAS_AZURE_LLM = True
@@ -68,6 +75,13 @@ try:
     HAS_GROQ = True
 except ImportError:
     HAS_GROQ = False
+
+try:
+    from graphiti_core.llm_client.bedrock_client import BedrockLLMClient
+
+    HAS_BEDROCK = True
+except ImportError:
+    HAS_BEDROCK = False
 
 
 def _validate_api_key(provider_name: str, api_key: str | None, logger) -> str:
@@ -242,6 +256,22 @@ class LLMClientFactory:
                 )
                 return GroqClient(config=llm_config)
 
+            case 'bedrock':
+                if not HAS_BEDROCK:
+                    raise ValueError(
+                        'BedrockLLMClient not available — ensure boto3 is installed '
+                        '(included with graphiti-core[neptune])'
+                    )
+                logger.info('Creating Bedrock client (IAM auth — no API key required)')
+
+                llm_config = GraphitiLLMConfig(
+                    model=config.model,
+                    small_model=config.model,
+                    temperature=config.temperature if config.temperature is not None else 1.0,
+                    max_tokens=config.max_tokens,
+                )
+                return BedrockLLMClient(config=llm_config)
+
             case _:
                 raise ValueError(f'Unsupported LLM provider: {provider}')
 
@@ -354,6 +384,40 @@ class EmbedderFactory:
                 )
                 return VoyageAIEmbedder(config=voyage_config)
 
+            case 'bedrock_cohere':
+                if not HAS_BEDROCK_EMBEDDER:
+                    raise ValueError(
+                        'BedrockEmbedder not available — ensure boto3 is installed '
+                        '(included with graphiti-core[neptune])'
+                    )
+                from config.schema import BedrockEmbedderProviderConfig
+
+                logger.info('Creating Bedrock Cohere embedder (IAM auth — no API key required)')
+                bedrock_provider_cfg = config.providers.bedrock or BedrockEmbedderProviderConfig()
+                embedder_config = BedrockEmbedderConfig(
+                    embedding_model=config.model or 'cohere.embed-english-v3',
+                    embedding_dim=config.dimensions or 1024,
+                    region_name=bedrock_provider_cfg.region_name,
+                    input_type=bedrock_provider_cfg.input_type,
+                )
+                return BedrockEmbedder(config=embedder_config)
+
+            case 'bedrock_titan':
+                if not HAS_BEDROCK_EMBEDDER:
+                    raise ValueError(
+                        'BedrockTitanEmbedder not available — ensure boto3 is installed '
+                        '(included with graphiti-core[neptune])'
+                    )
+                from graphiti_core.embedder.bedrock import BedrockTitanEmbedder, BedrockTitanEmbedderConfig
+
+                logger.info('Creating Bedrock Titan embedder (IAM auth — no API key or Marketplace subscription required)')
+                titan_config = BedrockTitanEmbedderConfig(
+                    embedding_model=config.model or 'amazon.titan-embed-text-v2:0',
+                    embedding_dim=config.dimensions or 1024,
+                    region_name=getattr(config.providers, 'bedrock', None) and config.providers.bedrock.region_name or None,
+                )
+                return BedrockTitanEmbedder(config=titan_config)
+
             case _:
                 raise ValueError(f'Unsupported Embedder provider: {provider}')
 
@@ -429,6 +493,30 @@ class DatabaseDriverFactory:
                     'port': port,
                     'password': password,
                     'database': falkor_config.database,
+                }
+
+            case 'neptune':
+                import os
+
+                host = os.environ.get(
+                    'NEPTUNE_HOST',
+                    config.providers.neptune.host if config.providers.neptune else '',  # type: ignore[union-attr]
+                )
+                aoss_host = os.environ.get(
+                    'AOSS_HOST',
+                    config.providers.neptune.aoss_host if config.providers.neptune else None,  # type: ignore[union-attr]
+                ) or None
+
+                if not host:
+                    raise ValueError(
+                        'Neptune host is required. Set NEPTUNE_HOST env var or configure '
+                        'database.providers.neptune.host in the config file.'
+                    )
+
+                return {
+                    'driver': 'neptune',
+                    'host': host,
+                    'aoss_host': aoss_host,
                 }
 
             case _:

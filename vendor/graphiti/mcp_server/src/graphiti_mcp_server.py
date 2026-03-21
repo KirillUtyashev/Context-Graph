@@ -18,6 +18,7 @@ from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -226,6 +227,22 @@ class GraphitiService:
                         graph_driver=falkor_driver,
                         llm_client=llm_client,
                         embedder=embedder_client,
+                        max_coroutines=self.semaphore_limit,
+                    )
+                elif self.config.database.provider.lower() == 'neptune':
+                    from graphiti_core.cross_encoder.noop_reranker import NoOpCrossEncoder
+                    from graphiti_core.driver.neptune_driver import NeptuneDriver
+
+                    neptune_driver = NeptuneDriver(
+                        host=db_config['host'],
+                        aoss_host=db_config.get('aoss_host'),
+                    )
+
+                    self.client = Graphiti(
+                        graph_driver=neptune_driver,
+                        llm_client=llm_client,
+                        embedder=embedder_client,
+                        cross_encoder=NoOpCrossEncoder(),
                         max_coroutines=self.semaphore_limit,
                     )
                 else:
@@ -731,12 +748,11 @@ async def get_status() -> StatusResponse:
     try:
         client = await graphiti_service.get_client()
 
-        # Test database connection with a simple query
-        async with client.driver.session() as session:
-            result = await session.run('MATCH (n) RETURN count(n) as count')
-            # Consume the result to verify query execution
-            if result:
-                _ = [record async for record in result]
+        # Test database connection with a simple query.
+        # NeptuneDriver.execute_query returns a (list, None, None) tuple directly;
+        # Neo4j/FalkorDB return async-iterable results via session.run().
+        # Using execute_query is safe for both because all drivers implement it.
+        await client.driver.execute_query('MATCH (n) RETURN count(n) AS count LIMIT 1')
 
         # Use the provider from the service's config, not the global
         provider_name = graphiti_service.config.database.provider
@@ -768,13 +784,13 @@ async def initialize_server() -> ServerConfig:
     )
 
     # Configuration file argument
-    # Default to config/config.yaml relative to the mcp_server directory
-    default_config = Path(__file__).parent.parent / 'config' / 'config.yaml'
+    # Default is None — the server reads CONFIG_PATH env var (set by systemd unit).
+    # Pass --config <path> to override explicitly.
     parser.add_argument(
         '--config',
         type=Path,
-        default=default_config,
-        help='Path to YAML configuration file (default: config/config.yaml)',
+        default=None,
+        help='Path to YAML configuration file (default: $CONFIG_PATH env var, or config/config.yaml)',
     )
 
     # Transport arguments
@@ -806,7 +822,7 @@ async def initialize_server() -> ServerConfig:
     )
     parser.add_argument(
         '--database-provider',
-        choices=['neo4j', 'falkordb'],
+        choices=['neo4j', 'falkordb', 'neptune'],
         help='Database provider to use',
     )
 
@@ -898,6 +914,13 @@ async def initialize_server() -> ServerConfig:
     # Set MCP server settings
     if config.server.host:
         mcp.settings.host = config.server.host
+        # When binding to 0.0.0.0 (all interfaces), disable the localhost-only DNS
+        # rebinding protection that FastMCP enables by default.  Access is already
+        # restricted by the EC2 security group, so this is safe.
+        if config.server.host == '0.0.0.0':
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            )
     if config.server.port:
         mcp.settings.port = config.server.port
 

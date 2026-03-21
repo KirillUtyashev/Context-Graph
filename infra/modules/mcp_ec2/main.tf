@@ -191,7 +191,7 @@ resource "aws_iam_role_policy" "bedrock_invoke_restrict_models" {
         ]
         Resource = "*"
         Condition = {
-          "StringNotEquals" = {
+          "StringNotEqualsIfExists" = {
             "bedrock:ModelId" = var.bedrock_allowed_model_ids
           }
         }
@@ -216,9 +216,10 @@ resource "aws_instance" "this" {
     #!/bin/bash
     set -euo pipefail
 
-    # Base runtime only. App code is deployed out-of-band via GitHub Actions + SSM.
+    # Base runtime. graphiti-core requires Python >=3.10; AL2023 default is 3.9.
+    # Do NOT install 'curl' — it conflicts with curl-minimal on AL2023.
     dnf update -y
-    dnf install -y python3 python3-pip curl awscli tar
+    dnf install -y python3.11 python3.11-pip awscli tar
 
     # Directories for the deployed app
     mkdir -p /opt/mcp_server/current
@@ -228,11 +229,13 @@ resource "aws_instance" "this" {
     id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
     chown -R mcp:mcp /opt/mcp_server
 
-    # Systemd unit to run the FastAPI server.
-    # Note: we do NOT enable/start it here because code isn't present yet.
-    cat > /etc/systemd/system/mcp-server.service <<'UNIT'
+    # Systemd unit — written with python and printf to avoid heredoc indentation
+    # issues caused by the outer <<-EOF stripping leading tabs but not spaces.
+    python3 -c "
+import textwrap, pathlib
+unit = textwrap.dedent('''
     [Unit]
-    Description=Context Graph MCP Server (FastAPI)
+    Description=Context Graph MCP Server
     After=network-online.target
     Wants=network-online.target
 
@@ -243,54 +246,60 @@ resource "aws_instance" "this" {
     WorkingDirectory=/opt/mcp_server/current
     Environment=PORT=${var.ingress_port}
     Environment=AWS_REGION=${data.aws_region.current.name}
+    Environment=AWS_DEFAULT_REGION=${data.aws_region.current.name}
     Environment=RETRIEVE_LAMBDA_NAME=${var.name}-retrieve
-    ExecStart=/opt/mcp_server/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${var.ingress_port}
+    Environment=NEPTUNE_HOST=neptune-db://${var.neptune_endpoint}
+    Environment=CONFIG_PATH=/opt/mcp_server/current/config/config-neptune-bedrock.yaml
+    ExecStart=/opt/mcp_server/venv/bin/python /opt/mcp_server/current/main.py
     Restart=on-failure
     RestartSec=2
 
     [Install]
     WantedBy=multi-user.target
-    UNIT
-
-    # Deployment script invoked by the GitHub Actions workflow (via SSM).
-    # The instance has an IAM role that can read s3://.../mcp-server/* from the artifacts bucket.
-    cat > /usr/local/bin/deploy-mcp-server.sh <<'SCRIPT'
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    usage() {
-      echo "Usage: deploy-mcp-server.sh <artifacts-bucket> <sha>" >&2
-      exit 2
-    }
-
-    bucket="$${1:-}"
-    sha="$${2:-}"
-    [[ -n "$${bucket}" && -n "$${sha}" ]] || usage
-
-    key="mcp-server/$${sha}.tar.gz"
-    release_dir="/opt/mcp_server/releases/$${sha}"
-
-    mkdir -p /opt/mcp_server/releases
-    rm -rf "$${release_dir}"
-    mkdir -p "$${release_dir}"
-
-    aws s3 cp "s3://$${bucket}/$${key}" /tmp/mcp_server.tar.gz
-    tar -xzf /tmp/mcp_server.tar.gz -C "$${release_dir}"
-
-    rm -rf /opt/mcp_server/current
-    ln -sfn "$${release_dir}" /opt/mcp_server/current
-
-    id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
-    chown -R mcp:mcp /opt/mcp_server
-
-    python3 -m venv /opt/mcp_server/venv
-    /opt/mcp_server/venv/bin/pip install --upgrade pip
-    /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt
+''').lstrip()
+pathlib.Path('/etc/systemd/system/mcp-server.service').write_text(unit)
+"
 
     systemctl daemon-reload
-    systemctl enable --now mcp-server.service
-    systemctl restart mcp-server.service
-    SCRIPT
+
+    # deploy-mcp-server.sh is downloaded from S3 by the GitHub Actions workflow before invocation.
+    # Write a placeholder that prints a clear error if called before the real script is deployed.
+    cat > /usr/local/bin/deploy-mcp-server.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+usage() { echo "Usage: deploy-mcp-server.sh <artifacts-bucket> <sha>" >&2; exit 2; }
+bucket="$${1:-}"; sha="$${2:-}"
+[[ -n "$${bucket}" && -n "$${sha}" ]] || usage
+key="mcp-server/$${sha}.tar.gz"
+release_dir="/opt/mcp_server/releases/$${sha}"
+mkdir -p /opt/mcp_server/releases
+rm -rf "$${release_dir}"; mkdir -p "$${release_dir}"
+aws s3 cp "s3://$${bucket}/$${key}" /tmp/mcp_server.tar.gz
+tar -xzf /tmp/mcp_server.tar.gz -C "$${release_dir}"
+rm -rf /opt/mcp_server/current
+ln -sfn "$${release_dir}" /opt/mcp_server/current
+id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
+chown -R mcp:mcp /opt/mcp_server
+PYTHON_BIN="python3"; for py in python3.12 python3.11; do command -v $py &>/dev/null && PYTHON_BIN=$py && break; done
+echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
+$PYTHON_BIN -m venv /opt/mcp_server/venv
+/opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
+GRAPHITI_SRC="/opt/mcp_server/current/graphiti_core_src"
+if [ -d "$${GRAPHITI_SRC}" ]; then
+  echo "==> Installing vendored graphiti-core[neptune]..."
+  /opt/mcp_server/venv/bin/pip install -e "$${GRAPHITI_SRC}[neptune]" --quiet
+  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
+    echo "$${GRAPHITI_SRC}" > "$${SP}/_graphiti_core_src.pth" 2>/dev/null || true
+  done
+fi
+/opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
+/opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
+systemctl daemon-reload
+systemctl enable --now mcp-server.service
+systemctl restart mcp-server.service
+echo "==> Deployment complete"
+systemctl status mcp-server.service --no-pager -l | tail -n 20
+SCRIPT
     chmod 0755 /usr/local/bin/deploy-mcp-server.sh
 
     systemctl daemon-reload

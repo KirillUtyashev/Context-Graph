@@ -4,7 +4,8 @@ on:
   push:
     branches: ["main"]
     paths:
-     - "mcp_server/**"
+      - "vendor/graphiti/mcp_server/**"
+      - "vendor/graphiti/graphiti_core/**"
   workflow_dispatch:
     inputs:
       env:
@@ -87,8 +88,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -d mcp_server
-          tar -czf /tmp/mcp_server.tar.gz -C mcp_server .
+          MCP_DIR="vendor/graphiti/mcp_server"
+          GRAPHITI_DIR="vendor/graphiti"
+          test -d "${MCP_DIR}"
+
+          STAGING_DIR="/tmp/mcp_server_staging"
+          mkdir -p "${STAGING_DIR}"
+          cp -a "${MCP_DIR}/." "${STAGING_DIR}/"
+
+          # Bundle graphiti-core source so EC2 can install it as an editable dep
+          mkdir -p "${STAGING_DIR}/graphiti_core_src"
+          rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
+            --exclude='mcp_server' --exclude='uv.lock' --exclude='.venv' \
+            "${GRAPHITI_DIR}/" "${STAGING_DIR}/graphiti_core_src/"
+
+          tar -czf /tmp/mcp_server.tar.gz -C "${STAGING_DIR}" .
 
       - name: Upload artifact to S3
         shell: bash
@@ -100,6 +114,8 @@ jobs:
           aws s3 cp /tmp/mcp_server.tar.gz "s3://${bucket}/mcp-server/${sha}.tar.gz"
           # Convenience pointer for quick manual deploys.
           aws s3 cp /tmp/mcp_server.tar.gz "s3://${bucket}/mcp-server/latest.tar.gz"
+          # Upload the deploy script itself so EC2 gets the latest version
+          aws s3 cp scripts/deploy-mcp.sh "s3://${bucket}/mcp-server/deploy-mcp-server.sh" 2>/dev/null || true
 
       - name: Deploy via SSM Run Command
         shell: bash
@@ -113,8 +129,12 @@ jobs:
             --instance-ids "${instance_id}" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy MCP server ${sha}" \
-            --parameters commands="/usr/local/bin/deploy-mcp-server.sh ${bucket} ${sha}
-            systemctl status mcp-server.service --no-pager -l | tail -n 50" \
+            --parameters "commands=[
+              \"aws s3 cp s3://${bucket}/mcp-server/deploy-mcp-server.sh /usr/local/bin/deploy-mcp-server.sh || true\",
+              \"chmod +x /usr/local/bin/deploy-mcp-server.sh\",
+              \"/usr/local/bin/deploy-mcp-server.sh ${bucket} ${sha}\",
+              \"systemctl status mcp-server.service --no-pager -l | tail -n 50\"
+            ]" \
             --query "Command.CommandId" \
             --output text)"
 

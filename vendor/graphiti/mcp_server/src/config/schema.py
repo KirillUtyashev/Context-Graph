@@ -133,6 +133,13 @@ class VoyageProviderConfig(BaseModel):
     model: str = 'voyage-3'
 
 
+class BedrockEmbedderProviderConfig(BaseModel):
+    """AWS Bedrock embedder provider configuration (IAM auth, no API key)."""
+
+    region_name: str | None = None
+    input_type: str = 'search_document'
+
+
 class LLMProvidersConfig(BaseModel):
     """LLM providers configuration."""
 
@@ -162,6 +169,7 @@ class EmbedderProvidersConfig(BaseModel):
     azure_openai: AzureOpenAIProviderConfig | None = None
     gemini: GeminiProviderConfig | None = None
     voyage: VoyageProviderConfig | None = None
+    bedrock: BedrockEmbedderProviderConfig | None = None
 
 
 class EmbedderConfig(BaseModel):
@@ -191,11 +199,24 @@ class FalkorDBProviderConfig(BaseModel):
     database: str = 'default_db'
 
 
+class NeptuneProviderConfig(BaseModel):
+    """Amazon Neptune provider configuration."""
+
+    host: str = Field(
+        description='Neptune endpoint prefixed with neptune-db:// or neptune-graph://'
+    )
+    aoss_host: str | None = Field(
+        default=None,
+        description='Amazon OpenSearch Serverless host. Optional — omit to disable BM25 search.',
+    )
+
+
 class DatabaseProvidersConfig(BaseModel):
     """Database providers configuration."""
 
     neo4j: Neo4jProviderConfig | None = None
     falkordb: FalkorDBProviderConfig | None = None
+    neptune: NeptuneProviderConfig | None = None
 
 
 class DatabaseConfig(BaseModel):
