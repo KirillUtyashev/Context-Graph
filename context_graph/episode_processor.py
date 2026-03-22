@@ -15,6 +15,12 @@ from .episodes import (
 from .graph_read import GraphReadRepository
 from .graph_sinks import BaseCypherGraphSink, CypherStatement
 from .graphiti_adapter import GraphitiAdapter
+from .profile_vectors import ProfileVectorIndexer
+from .profiles import (
+    ProfileRecord,
+    profile_deactivation_from_fact_invalidation,
+    semantic_fact_profile_from_fact,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +43,12 @@ class EpisodeProcessor:
         graph_sink: BaseCypherGraphSink,
         read_repository: GraphReadRepository,
         adapter: GraphitiAdapter | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
     ) -> None:
         self.graph_sink = graph_sink
         self.read_repository = read_repository
         self.adapter = adapter or GraphitiAdapter()
+        self.profile_indexer = profile_indexer
 
     def plan_episode(
         self,
@@ -115,6 +123,15 @@ class EpisodeProcessor:
             _merge_fact_metadata(fact)
             for fact in extraction.facts
         )
+        node_lookup = {node.node_id: node for node in candidate_nodes}
+        profiles = tuple(
+            self._build_profile(fact, node_lookup=node_lookup)
+            for fact in facts
+        )
+        profile_deactivations = tuple(
+            profile_deactivation_from_fact_invalidation(invalidation)
+            for invalidation in extraction.invalidations
+        )
 
         statements = [
             *self.graph_sink.plan_upsert_episodes([episode]),
@@ -141,6 +158,8 @@ class EpisodeProcessor:
             mentions=mention_records,
             facts=facts,
             invalidations=extraction.invalidations,
+            profiles=profiles,
+            profile_deactivations=profile_deactivations,
             statements=tuple(statements),
             created_context_nodes=_dedupe_nodes(created_context_nodes),
         )
@@ -173,10 +192,42 @@ class EpisodeProcessor:
                 )
 
         executed = self.graph_sink.execute(statements) if execute and statements else 0
+        if execute and results:
+            profile_deactivations = [
+                deactivation
+                for result in results
+                for deactivation in result.profile_deactivations
+            ]
+            profiles = [
+                profile
+                for result in results
+                for profile in result.profiles
+            ]
+            if profile_deactivations:
+                self.read_repository.metadata_store.deactivate_profiles(profile_deactivations)
+            if profiles:
+                self.read_repository.metadata_store.upsert_profiles(profiles)
+            if self.profile_indexer is not None and (profiles or profile_deactivations):
+                self.profile_indexer.apply_profile_updates(
+                    profiles=profiles,
+                    deactivations=profile_deactivations,
+                )
         return EpisodeBatchResult(
             results=tuple(results),
             statements=tuple(statements),
             statements_executed=executed,
+        )
+
+    def _build_profile(
+        self,
+        fact: FactRecord,
+        *,
+        node_lookup: Mapping[str, ContextNodeRef],
+    ) -> ProfileRecord:
+        return semantic_fact_profile_from_fact(
+            fact,
+            source=node_lookup.get(fact.source_node_id),
+            target=node_lookup.get(fact.target_node_id),
         )
 
 

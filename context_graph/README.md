@@ -247,6 +247,39 @@ For semantic fact edges, the stored relationship type is generic (`RELATES_TO`) 
 - `invalid_at`
 - `episode_ids_json`
 
+### Retrieval profiles
+
+We now persist a first LightRAG-style retrieval profile layer in the metadata store.
+
+Current scope:
+
+- only semantic `RELATES_TO` facts produce profiles
+- structural edges like `CALLS`, `DEFINES`, `TOUCHES`, `HAS_COMMIT`, and `ON` do **not** produce profiles
+
+This keeps the split clean:
+
+- low-level structural retrieval stays graph-native
+- high-level semantic retrieval can later use relation profiles derived from `RELATES_TO`
+
+Current profile kind:
+
+- `semantic_fact_profile`
+
+Each profile is keyed off one semantic fact edge and stores:
+
+- the fact edge id as the profile target
+- relation metadata like `relation_type`, source/target node ids and kinds
+- deterministic `value_text`
+- deterministic `keys_json`
+
+The current implementation persists these profiles during episode ingestion after semantic fact extraction succeeds.
+
+We also now have a first pgvector-backed retrieval path for those profiles:
+
+- active semantic fact profiles can be embedded into Aurora/local Postgres `pgvector`
+- retrieval queries can be parsed into deterministic anchors plus high-level keywords
+- profile search currently targets only semantic fact profiles, not low-level structural edges
+
 ## How the Current Update Flow Works
 
 Today, the update flow is:

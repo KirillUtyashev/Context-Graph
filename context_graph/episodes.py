@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .models import canonical_json
+
+if TYPE_CHECKING:
+    from .profiles import ProfileDeactivation, ProfileRecord
 
 
 def episode_node_id(repo_id: str, episode_id: str) -> str:
@@ -138,6 +141,8 @@ class EpisodeProcessingResult:
     facts: tuple[FactRecord, ...]
     invalidations: tuple[FactInvalidation, ...]
     statements: tuple[Any, ...]
+    profiles: tuple[ProfileRecord, ...] = ()
+    profile_deactivations: tuple[ProfileDeactivation, ...] = ()
     created_context_nodes: tuple[ContextNodeRef, ...] = ()
 
 

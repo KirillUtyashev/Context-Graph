@@ -10,6 +10,7 @@ from typing import Any, Iterable, Iterator, Optional, Sequence
 
 from .episodes import ContextNodeRef
 from .models import GraphSnapshot, canonical_json, utc_now_iso
+from .profiles import ProfileDeactivation, ProfileRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,23 @@ class MetadataStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def load_profiles(
+        self,
+        repo_id: str,
+        *,
+        active_only: bool = False,
+    ) -> tuple[ProfileRecord, ...]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def deactivate_profiles(self, deactivations: Sequence[ProfileDeactivation]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     @contextmanager
     def repo_lock(self, repo_key: str) -> Iterator[None]:
         raise NotImplementedError
@@ -104,6 +122,7 @@ class InMemoryMetadataStore(MetadataStore):
         self._repo_states: dict[str, RepoIndexState] = {}
         self._repo_sources: dict[str, RepoSourceState] = {}
         self._context_nodes: dict[str, dict[str, ContextNodeRef]] = {}
+        self._profiles: dict[str, dict[str, ProfileRecord]] = {}
         self._runs: list[dict[str, Any]] = []
 
     def bootstrap(self) -> None:
@@ -146,6 +165,71 @@ class InMemoryMetadataStore(MetadataStore):
         for node in nodes:
             bucket[node.node_id] = node
 
+    def load_profiles(
+        self,
+        repo_id: str,
+        *,
+        active_only: bool = False,
+    ) -> tuple[ProfileRecord, ...]:
+        profiles = tuple(self._profiles.get(repo_id, {}).values())
+        if active_only:
+            profiles = tuple(profile for profile in profiles if profile.is_active)
+        return tuple(sorted(profiles, key=lambda profile: profile.profile_id))
+
+    def upsert_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
+        if not profiles:
+            return
+        for profile in profiles:
+            self._profiles.setdefault(profile.repo_id, {})[profile.profile_id] = profile
+
+    def deactivate_profiles(self, deactivations: Sequence[ProfileDeactivation]) -> None:
+        if not deactivations:
+            return
+        by_repo: dict[str, list[ProfileDeactivation]] = {}
+        for deactivation in deactivations:
+            by_repo.setdefault(deactivation.repo_id, []).append(deactivation)
+        for repo_id, repo_deactivations in by_repo.items():
+            bucket = self._profiles.get(repo_id, {})
+            if not bucket:
+                continue
+            for deactivation in repo_deactivations:
+                for profile_id, profile in list(bucket.items()):
+                    if not profile.is_active:
+                        continue
+                    if profile.profile_kind != deactivation.profile_kind:
+                        continue
+                    if profile.relation_type != deactivation.relation_type:
+                        continue
+                    if profile.source_node_id != deactivation.source_node_id:
+                        continue
+                    if profile.target_node_id != deactivation.target_node_id:
+                        continue
+                    if (
+                        deactivation.replacement_profile_id
+                        and profile.profile_id == deactivation.replacement_profile_id
+                    ):
+                        continue
+                    bucket[profile_id] = ProfileRecord(
+                        profile_id=profile.profile_id,
+                        repo_id=profile.repo_id,
+                        profile_kind=profile.profile_kind,
+                        profile_target_kind=profile.profile_target_kind,
+                        profile_target_id=profile.profile_target_id,
+                        relation_type=profile.relation_type,
+                        source_node_id=profile.source_node_id,
+                        source_node_kind=profile.source_node_kind,
+                        target_node_id=profile.target_node_id,
+                        target_node_kind=profile.target_node_kind,
+                        target_revision_id=profile.target_revision_id,
+                        value_text=profile.value_text,
+                        keys=profile.keys,
+                        metadata=dict(profile.metadata),
+                        is_active=False,
+                        valid_from_revision=profile.valid_from_revision,
+                        valid_to_revision=profile.valid_to_revision or deactivation.valid_to_revision,
+                        updated_at=deactivation.observed_at,
+                    )
+
     @contextmanager
     def repo_lock(self, repo_key: str) -> Iterator[None]:
         _ = repo_key
@@ -173,10 +257,12 @@ class InMemoryMetadataStore(MetadataStore):
         snapshot_deleted = 1 if repo_id in self._repo_states or repo_id in self._snapshots else 0
         source_deleted = 1 if repo_id in self._repo_sources else 0
         context_deleted = len(self._context_nodes.get(repo_id, {}))
+        profile_deleted = len(self._profiles.get(repo_id, {}))
         self._snapshots.pop(repo_id, None)
         self._repo_states.pop(repo_id, None)
         self._repo_sources.pop(repo_id, None)
         self._context_nodes.pop(repo_id, None)
+        self._profiles.pop(repo_id, None)
         before_runs = len(self._runs)
         self._runs = [run for run in self._runs if run["repo_id"] != repo_id]
         return {
@@ -185,7 +271,7 @@ class InMemoryMetadataStore(MetadataStore):
             "current_nodes": 0,
             "current_edges": 0,
             "context_nodes": context_deleted,
-            "profiles": 0,
+            "profiles": profile_deleted,
             "index_runs": before_runs - len(self._runs),
         }
 
@@ -629,6 +715,155 @@ class _DbApiMetadataStore(MetadataStore):
         self._executemany(sql, rows)
         self.connection.commit()
 
+    def load_profiles(
+        self,
+        repo_id: str,
+        *,
+        active_only: bool = False,
+    ) -> tuple[ProfileRecord, ...]:
+        self.bootstrap()
+        sql = f"""
+            SELECT
+                profile_id,
+                repo_id,
+                profile_kind,
+                profile_target_kind,
+                profile_target_id,
+                relation_type,
+                source_node_id,
+                source_node_kind,
+                target_node_id,
+                target_node_kind,
+                target_revision_id,
+                value_text,
+                keys_json,
+                metadata_json,
+                is_active,
+                valid_from_revision,
+                valid_to_revision,
+                updated_at
+            FROM cg_profiles
+            WHERE repo_id = {self.placeholder}
+        """
+        params: list[Any] = [repo_id]
+        if active_only:
+            sql += " AND is_active = 1"
+        sql += " ORDER BY profile_id"
+        rows = self._execute(sql, tuple(params)).fetchall()
+        return tuple(_profile_from_row(row) for row in rows)
+
+    def upsert_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
+        if not profiles:
+            return
+        self.bootstrap()
+        sql = f"""
+            INSERT INTO cg_profiles (
+                profile_id,
+                repo_id,
+                profile_kind,
+                profile_target_kind,
+                profile_target_id,
+                relation_type,
+                source_node_id,
+                source_node_kind,
+                target_node_id,
+                target_node_kind,
+                target_revision_id,
+                value_text,
+                keys_json,
+                metadata_json,
+                is_active,
+                valid_from_revision,
+                valid_to_revision,
+                updated_at
+            )
+            VALUES (
+                {self.placeholder}, {self.placeholder}, {self.placeholder}, {self.placeholder},
+                {self.placeholder}, {self.placeholder}, {self.placeholder}, {self.placeholder},
+                {self.placeholder}, {self.placeholder}, {self.placeholder}, {self.placeholder},
+                {self.placeholder}, {self.placeholder}, {self.placeholder}, {self.placeholder},
+                {self.placeholder}, {self.placeholder}
+            )
+            ON CONFLICT (profile_id) DO UPDATE SET
+                repo_id = excluded.repo_id,
+                profile_kind = excluded.profile_kind,
+                profile_target_kind = excluded.profile_target_kind,
+                profile_target_id = excluded.profile_target_id,
+                relation_type = excluded.relation_type,
+                source_node_id = excluded.source_node_id,
+                source_node_kind = excluded.source_node_kind,
+                target_node_id = excluded.target_node_id,
+                target_node_kind = excluded.target_node_kind,
+                target_revision_id = excluded.target_revision_id,
+                value_text = excluded.value_text,
+                keys_json = excluded.keys_json,
+                metadata_json = excluded.metadata_json,
+                is_active = excluded.is_active,
+                valid_from_revision = excluded.valid_from_revision,
+                valid_to_revision = excluded.valid_to_revision,
+                updated_at = excluded.updated_at
+        """
+        rows = [
+            (
+                profile.profile_id,
+                profile.repo_id,
+                profile.profile_kind,
+                profile.profile_target_kind,
+                profile.profile_target_id,
+                profile.relation_type,
+                profile.source_node_id,
+                profile.source_node_kind,
+                profile.target_node_id,
+                profile.target_node_kind,
+                profile.target_revision_id,
+                profile.value_text,
+                profile.keys_json(),
+                profile.metadata_json(),
+                1 if profile.is_active else 0,
+                profile.valid_from_revision,
+                profile.valid_to_revision,
+                profile.updated_at,
+            )
+            for profile in profiles
+        ]
+        self._executemany(sql, rows)
+        self.connection.commit()
+
+    def deactivate_profiles(self, deactivations: Sequence[ProfileDeactivation]) -> None:
+        if not deactivations:
+            return
+        self.bootstrap()
+        sql = f"""
+            UPDATE cg_profiles
+            SET
+                is_active = 0,
+                valid_to_revision = COALESCE(valid_to_revision, {self.placeholder}),
+                updated_at = {self.placeholder}
+            WHERE repo_id = {self.placeholder}
+              AND profile_kind = {self.placeholder}
+              AND relation_type = {self.placeholder}
+              AND source_node_id = {self.placeholder}
+              AND target_node_id = {self.placeholder}
+              AND is_active = 1
+              AND ({self.placeholder} IS NULL OR profile_id <> {self.placeholder})
+        """
+        rows = [
+            (
+                deactivation.valid_to_revision,
+                deactivation.observed_at,
+                deactivation.repo_id,
+                deactivation.profile_kind,
+                deactivation.relation_type,
+                deactivation.source_node_id,
+                deactivation.target_node_id,
+                deactivation.replacement_profile_id,
+                deactivation.replacement_profile_id,
+            )
+            for deactivation in deactivations
+        ]
+        self._executemany(sql, rows)
+        self.connection.commit()
+
     @contextmanager
     def repo_lock(self, repo_key: str) -> Iterator[None]:
         _ = repo_key
@@ -773,4 +1008,27 @@ def _context_node_from_payload(payload: dict[str, Any]) -> ContextNodeRef:
         file_path=payload.get("file_path"),
         aliases=tuple(payload.get("aliases") or ()),
         metadata=dict(payload.get("metadata") or {}),
+    )
+
+
+def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:
+    return ProfileRecord(
+        profile_id=str(row[0]),
+        repo_id=str(row[1]),
+        profile_kind=str(row[2]),
+        profile_target_kind=str(row[3]),
+        profile_target_id=str(row[4]),
+        relation_type=row[5],
+        source_node_id=row[6],
+        source_node_kind=row[7],
+        target_node_id=row[8],
+        target_node_kind=row[9],
+        target_revision_id=row[10],
+        value_text=str(row[11]),
+        keys=tuple(json.loads(row[12] or "[]")),
+        metadata=dict(json.loads(row[13] or "{}")),
+        is_active=bool(row[14]),
+        valid_from_revision=row[15],
+        valid_to_revision=row[16],
+        updated_at=str(row[17]),
     )

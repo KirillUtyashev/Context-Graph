@@ -8,6 +8,7 @@ import sys
 from typing import Sequence
 
 from .commit_indexer import CommitIndexer
+from .embeddings import load_embedding_settings, make_embedding_provider
 from .episode_processor import EpisodeProcessor, EpisodeWorkItem
 from .episodes import EpisodeRecord
 from .graph_read import GraphReadRepository
@@ -17,6 +18,8 @@ from .graph_sinks import NeptuneGraphSink, Neo4jGraphSink
 from .hosted_indexer import HostedIndexRequest, HostedIndexer
 from .llm import load_episode_llm_settings, make_episode_llm_client
 from .metadata import MetadataStore, PostgresMetadataStore, SQLiteMetadataStore
+from .profile_vectors import AuroraProfileVectorStore, ProfileSearchService, ProfileVectorIndexer
+from .query_parser import QueryParser
 from .repo_cache import RepoCacheManager
 from .snapshot_builder import CodebaseMemorySnapshotProducer
 
@@ -102,6 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Neptune Bolt port",
     )
     _add_llm_args(latest_commit_parser)
+    _add_embed_args(latest_commit_parser)
 
     commit_parser = subparsers.add_parser(
         "apply-commit",
@@ -185,6 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Neptune Bolt port",
     )
     _add_llm_args(commit_parser)
+    _add_embed_args(commit_parser)
 
     hosted_parser = subparsers.add_parser(
         "hosted-index",
@@ -281,6 +286,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Neptune Bolt port",
     )
     _add_llm_args(hosted_parser)
+    _add_embed_args(hosted_parser)
 
     episode_parser = subparsers.add_parser(
         "ingest-episode",
@@ -344,6 +350,57 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Neptune Bolt port",
     )
     _add_llm_args(episode_parser)
+    _add_embed_args(episode_parser)
+
+    parse_query_parser = subparsers.add_parser(
+        "parse-query",
+        help="Parse a retrieval query into anchors, high-level keywords, and intent tags",
+    )
+    parse_query_parser.add_argument("--query", required=True, help="Natural-language retrieval query")
+    _add_llm_args(parse_query_parser)
+
+    sync_vectors_parser = subparsers.add_parser(
+        "sync-profile-vectors",
+        help="Embed active profiles into the Aurora pgvector index",
+    )
+    sync_vectors_parser.add_argument("--repo-id", required=True, help="Stable repository identifier")
+    sync_vectors_parser.add_argument(
+        "--metadata-backend",
+        choices=("sqlite", "postgres"),
+        default="postgres",
+        help="Metadata backend used to load profiles",
+    )
+    sync_vectors_parser.add_argument("--metadata-db", default=":memory:")
+    sync_vectors_parser.add_argument("--metadata-dsn", help="PostgreSQL DSN used when --metadata-backend=postgres")
+    _add_embed_args(sync_vectors_parser)
+
+    search_profiles_parser = subparsers.add_parser(
+        "search-profiles",
+        help="Parse a query and search semantic relation profiles through Aurora pgvector",
+    )
+    search_profiles_parser.add_argument("--repo-id", required=True, help="Stable repository identifier")
+    search_profiles_parser.add_argument("--query", required=True, help="Natural-language retrieval query")
+    search_profiles_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Maximum number of profile hits to return",
+    )
+    search_profiles_parser.add_argument(
+        "--include-inactive",
+        action="store_true",
+        help="Include inactive historical profiles in the result set",
+    )
+    search_profiles_parser.add_argument(
+        "--metadata-backend",
+        choices=("sqlite", "postgres"),
+        default="postgres",
+        help="Metadata backend used to load profiles",
+    )
+    search_profiles_parser.add_argument("--metadata-db", default=":memory:")
+    search_profiles_parser.add_argument("--metadata-dsn", help="PostgreSQL DSN used when --metadata-backend=postgres")
+    _add_llm_args(search_profiles_parser)
+    _add_embed_args(search_profiles_parser)
 
     reset_parser = subparsers.add_parser(
         "reset-context",
@@ -448,6 +505,31 @@ def _add_llm_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_embed_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--embed-provider",
+        choices=("openai", "bedrock"),
+        help="Enable profile-key embeddings with the selected provider",
+    )
+    parser.add_argument(
+        "--embed-model",
+        help="Embedding model id",
+    )
+    parser.add_argument(
+        "--embed-dimensions",
+        type=int,
+        help="Embedding dimension for pgvector storage",
+    )
+    parser.add_argument(
+        "--embed-base-url",
+        help="Optional OpenAI-compatible embeddings base URL",
+    )
+    parser.add_argument(
+        "--embed-api-key",
+        help="Optional API key override for embeddings",
+    )
+
+
 def _make_episode_processor(
     args,
     *,
@@ -459,10 +541,12 @@ def _make_episode_processor(
     llm_settings = load_episode_llm_settings(args)
     llm_client = make_episode_llm_client(llm_settings)
     adapter = GraphitiAdapter(llm_client=llm_client)
+    profile_indexer = _make_profile_indexer(args, metadata=metadata)
     return EpisodeProcessor(
         graph_sink=graph_sink,
         read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=graph_sink),
         adapter=adapter,
+        profile_indexer=profile_indexer,
     )
 
 
@@ -491,6 +575,41 @@ def _make_metadata_store(args) -> MetadataStore:
         return PostgresMetadataStore.from_dsn(dsn)
 
     return SQLiteMetadataStore(args.metadata_db)
+
+
+def _make_query_parser(args) -> QueryParser:
+    llm_settings = load_episode_llm_settings(args)
+    llm_client = make_episode_llm_client(llm_settings)
+    return QueryParser(llm_client=llm_client)
+
+
+def _make_profile_vector_store(args, *, metadata: MetadataStore):
+    settings = load_embedding_settings(args)
+    embedding_dim = settings.dimensions if settings is not None else 1024
+    return _make_profile_vector_store_from_metadata(metadata, embedding_dim=embedding_dim)
+
+
+def _make_profile_vector_store_from_metadata(metadata: MetadataStore, *, embedding_dim: int = 1024):
+    if not isinstance(metadata, PostgresMetadataStore):
+        return None
+    return AuroraProfileVectorStore.from_metadata_store(metadata, embedding_dim=embedding_dim)
+
+
+def _make_profile_indexer(args, *, metadata: MetadataStore):
+    embedding_settings = load_embedding_settings(args)
+    embedding_provider = make_embedding_provider(embedding_settings)
+    if embedding_provider is None:
+        return None
+    vector_store = _make_profile_vector_store_from_metadata(
+        metadata,
+        embedding_dim=embedding_settings.dimensions,
+    )
+    if vector_store is None:
+        return None
+    return ProfileVectorIndexer(
+        vector_store=vector_store,
+        embedding_provider=embedding_provider,
+    )
 
 
 def _make_github_api(args) -> GitHubApiClient | None:
@@ -839,6 +958,107 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         return _emit_json(payload)
 
+    if args.command == "parse-query":
+        parser_service = _make_query_parser(args)
+        result = parser_service.parse(args.query, llm_enabled=True)
+        payload = {
+            "raw_query": result.raw_query,
+            "anchors": [
+                {"kind": anchor.kind, "value": anchor.value}
+                for anchor in result.anchors
+            ],
+            "high_level_keywords": list(result.high_level_keywords),
+            "intent_tags": list(result.intent_tags),
+        }
+        return _emit_json(payload)
+
+    if args.command == "sync-profile-vectors":
+        metadata = _make_metadata_store(args)
+        embedding_settings = load_embedding_settings(args)
+        embedding_provider = make_embedding_provider(embedding_settings)
+        if embedding_provider is None:
+            raise RuntimeError(
+                "sync-profile-vectors requires embedding config via --embed-provider or CONTEXT_GRAPH_EMBED_PROVIDER"
+            )
+        vector_store = _make_profile_vector_store(args, metadata=metadata)
+        if vector_store is None:
+            raise RuntimeError("sync-profile-vectors requires --metadata-backend=postgres")
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=embedding_provider,
+        )
+        indexed = indexer.sync_repo(repo_id=args.repo_id, metadata_store=metadata)
+        payload = {
+            "repo_id": args.repo_id,
+            "indexed_profile_keys": indexed,
+            "active_profiles": len(metadata.load_profiles(args.repo_id, active_only=True)),
+        }
+        return _emit_json(payload)
+
+    if args.command == "search-profiles":
+        metadata = _make_metadata_store(args)
+        embedding_settings = load_embedding_settings(args)
+        embedding_provider = make_embedding_provider(embedding_settings)
+        if embedding_provider is None:
+            raise RuntimeError(
+                "search-profiles requires embedding config via --embed-provider or CONTEXT_GRAPH_EMBED_PROVIDER"
+            )
+        vector_store = _make_profile_vector_store(args, metadata=metadata)
+        if vector_store is None:
+            raise RuntimeError("search-profiles requires --metadata-backend=postgres")
+        search_service = ProfileSearchService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=embedding_provider,
+            query_parser=_make_query_parser(args),
+        )
+        result = search_service.search(
+            repo_id=args.repo_id,
+            query=args.query,
+            limit=args.limit,
+            active_only=not args.include_inactive,
+            llm_enabled=True,
+        )
+        payload = {
+            "repo_id": args.repo_id,
+            "query": args.query,
+            "parse_result": {
+                "anchors": [
+                    {"kind": anchor.kind, "value": anchor.value}
+                    for anchor in result.parse_result.anchors
+                ],
+                "high_level_keywords": list(result.parse_result.high_level_keywords),
+                "intent_tags": list(result.parse_result.intent_tags),
+            },
+            "hits": [
+                {
+                    "profile_id": hit.profile_id,
+                    "profile_key_id": hit.profile_key_id,
+                    "profile_kind": hit.profile_kind,
+                    "key_text": hit.key_text,
+                    "score": hit.score,
+                }
+                for hit in result.hits
+            ],
+            "profiles": [
+                {
+                    "profile_id": profile.profile_id,
+                    "profile_kind": profile.profile_kind,
+                    "profile_target_kind": profile.profile_target_kind,
+                    "profile_target_id": profile.profile_target_id,
+                    "relation_type": profile.relation_type,
+                    "source_node_id": profile.source_node_id,
+                    "target_node_id": profile.target_node_id,
+                    "value_text": profile.value_text,
+                    "keys": list(profile.keys),
+                    "metadata": dict(profile.metadata),
+                    "is_active": profile.is_active,
+                }
+                for profile in result.profiles
+            ],
+        }
+        return _emit_json(payload)
+
     if args.command == "reset-context":
         metadata = _make_metadata_store(args)
         graph_sink = _make_sink(args)
@@ -855,14 +1075,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             graph_sink.validate_execute_config()
             statements_executed = graph_sink.execute(statements)
             metadata_deleted = metadata.reset_repo_context(args.repo_id)
+            vector_store = _make_profile_vector_store(args, metadata=metadata)
+            vector_deleted = vector_store.reset_repo_context(args.repo_id) if vector_store else 0
         else:
             statements_executed = 0
             metadata_deleted = zero_counts
+            vector_deleted = 0
 
         payload = {
             "repo_id": args.repo_id,
             "execute": bool(args.execute),
             "metadata_deleted": metadata_deleted,
+            "vector_deleted": vector_deleted,
             "graph_statements_emitted": len(statements),
             "graph_statements_executed": statements_executed,
             "graph_statements_preview": [

@@ -31,6 +31,14 @@ from context_graph.hosted_indexer import HostedIndexRequest, HostedIndexer
 from context_graph.llm import EpisodeLLMSettings, load_episode_llm_settings
 from context_graph.metadata import InMemoryMetadataStore, RepoIndexState, RepoSourceState, SQLiteMetadataStore
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
+from context_graph.profile_vectors import (
+    AuroraProfileVectorStore,
+    InMemoryProfileVectorStore,
+    ProfileSearchService,
+    ProfileVectorIndexer,
+)
+from context_graph.profiles import ProfileDeactivation, ProfileRecord, SEMANTIC_FACT_PROFILE_KIND
+from context_graph.query_parser import QueryParser
 from context_graph.repo_cache import RepoCacheManager
 from context_graph.snapshot_builder import build_snapshot_from_graph_export
 from context_graph.temporal import TemporalGraphWriter
@@ -539,6 +547,91 @@ class FakeEpisodeLLMClient:
         raise AssertionError(f"unexpected response model {model_name!r}")
 
 
+class FakeQueryLLMClient:
+    def __init__(
+        self,
+        *,
+        keywords: tuple[str, ...] = (),
+    ) -> None:
+        self.keywords = keywords
+
+    async def generate_response(self, messages, response_model=None, **kwargs):
+        _ = (messages, kwargs)
+        model_name = getattr(response_model, "__name__", "")
+        if model_name == "ParsedHighLevelKeywords":
+            return {
+                "high_level_keywords": list(self.keywords),
+            }
+        raise AssertionError(f"unexpected response model {model_name!r}")
+
+
+class FakeEmbeddingProvider:
+    def embed_texts(self, texts):
+        vectors = []
+        for text in texts:
+            normalized = text.casefold()
+            vectors.append(
+                [
+                    1.0 if "helper" in normalized else 0.0,
+                    1.0 if "main" in normalized else 0.0,
+                    1.0 if "rollback" in normalized else 0.0,
+                    float(len(normalized.split())),
+                ]
+            )
+        return vectors
+
+
+class RecordingCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self._fetchall = []
+        self._fetchone = None
+
+    def execute(self, sql, params=()):
+        self.connection.executed.append((sql, params))
+        if "SELECT COUNT(*) FROM cg_profile_keys" in sql:
+            self._fetchone = (0,)
+        elif "SELECT" in sql and "FROM cg_profile_keys" in sql:
+            self._fetchall = [
+                (
+                    "profile:demo:semantic_fact_profile:fact:1",
+                    "pkey:test",
+                    "demo",
+                    SEMANTIC_FACT_PROFILE_KIND,
+                    "helper rollback",
+                    0.91,
+                )
+            ]
+        else:
+            self._fetchall = []
+            self._fetchone = None
+        return self
+
+    def executemany(self, sql, rows):
+        materialized = list(rows)
+        self.connection.executemany_calls.append((sql, materialized))
+        return self
+
+    def fetchall(self):
+        return list(self._fetchall)
+
+    def fetchone(self):
+        return self._fetchone
+
+
+class RecordingConnection:
+    def __init__(self):
+        self.executed = []
+        self.executemany_calls = []
+        self.commits = 0
+
+    def cursor(self):
+        return RecordingCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
 def _statement_rows(statements, query_fragment: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for statement in statements:
@@ -711,6 +804,33 @@ class EpisodeLLMSettingsTests(unittest.TestCase):
                 aws_region="us-east-1",
             ),
         )
+
+
+class QueryParserTests(unittest.TestCase):
+    def test_query_parser_extracts_deterministic_anchors(self) -> None:
+        parser = QueryParser()
+
+        result = parser.parse("Why was `helper` added to app.py in commit abc1234 for #42?")
+
+        anchors = {(anchor.kind, anchor.value) for anchor in result.anchors}
+        self.assertIn(("quoted", "helper"), anchors)
+        self.assertIn(("symbol", "app.py"), anchors)
+        self.assertIn(("commit_sha", "abc1234"), anchors)
+        self.assertIn(("artifact_number", "#42"), anchors)
+        self.assertIn("why", result.intent_tags)
+
+    def test_query_parser_merges_llm_high_level_keywords_with_deterministic_intents(self) -> None:
+        parser = QueryParser(
+            llm_client=FakeQueryLLMClient(
+                keywords=("auth rollback", "stability"),
+            )
+        )
+
+        result = parser.parse("What is the rollback impact for auth?", llm_enabled=True)
+
+        self.assertEqual(result.high_level_keywords, ("auth rollback", "stability"))
+        self.assertIn("rollback", result.intent_tags)
+        self.assertIn("impact", result.intent_tags)
 
 
 class DiffAndWriterTests(unittest.TestCase):
@@ -898,6 +1018,234 @@ class SinkPlanningTests(unittest.TestCase):
         self.assertEqual(entity_rows[0]["name"], "Alice Johnson")
         self.assertEqual(len(mention_rows), 1)
         self.assertEqual(mention_rows[0]["target_node_id"], entity_rows[0]["node_id"])
+
+    def test_episode_processor_persists_semantic_fact_profiles_for_relates_to(self) -> None:
+        metadata = InMemoryMetadataStore()
+        metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
+        sink = Neo4jGraphSink()
+        sink.execute = lambda statements: 0  # type: ignore[method-assign]
+        processor = EpisodeProcessor(
+            graph_sink=sink,
+            read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
+            adapter=GraphitiAdapter(
+                llm_client=FakeEpisodeLLMClient(
+                    extracted_entity_names=("main", "helper"),
+                    extracted_edges=(
+                        {
+                            "source_entity_name": "main",
+                            "target_entity_name": "helper",
+                            "relation_type": "JUSTIFIES",
+                            "fact": "main uses helper for shared logic",
+                            "valid_at": None,
+                            "invalid_at": None,
+                        },
+                    ),
+                )
+            ),
+        )
+
+        first_batch = processor.apply_batch(
+            [
+                EpisodeWorkItem(
+                    episode=EpisodeRecord(
+                        episode_id="turn-4",
+                        repo_id="demo",
+                        source_type="user_message",
+                        source_id="turn-4",
+                        author="user",
+                        created_at="2026-03-22T00:00:00+00:00",
+                        updated_at="2026-03-22T00:00:00+00:00",
+                        text="Why does `main` use `helper` in app.py?",
+                        metadata={"thread_id": "chat-4"},
+                    )
+                )
+            ],
+            execute=True,
+        )
+
+        self.assertEqual(len(first_batch.results[0].profiles), 1)
+        profiles = metadata.load_profiles("demo", active_only=True)
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0].profile_kind, SEMANTIC_FACT_PROFILE_KIND)
+        self.assertEqual(profiles[0].profile_target_kind, "FactEdge")
+        self.assertEqual(profiles[0].relation_type, "JUSTIFIES")
+        self.assertIn("main", profiles[0].value_text.lower())
+        self.assertIn("helper", profiles[0].value_text.lower())
+        self.assertIn("main", [key.lower() for key in profiles[0].keys])
+        self.assertIn("helper", [key.lower() for key in profiles[0].keys])
+
+        processor = EpisodeProcessor(
+            graph_sink=sink,
+            read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
+            adapter=GraphitiAdapter(
+                llm_client=FakeEpisodeLLMClient(
+                    extracted_entity_names=("main", "helper"),
+                    extracted_edges=(
+                        {
+                            "source_entity_name": "main",
+                            "target_entity_name": "helper",
+                            "relation_type": "JUSTIFIES",
+                            "fact": "main delegates shared helper behavior",
+                            "valid_at": None,
+                            "invalid_at": None,
+                        },
+                    ),
+                )
+            ),
+        )
+
+        processor.apply_batch(
+            [
+                EpisodeWorkItem(
+                    episode=EpisodeRecord(
+                        episode_id="turn-5",
+                        repo_id="demo",
+                        source_type="user_message",
+                        source_id="turn-5",
+                        author="user",
+                        created_at="2026-03-22T00:10:00+00:00",
+                        updated_at="2026-03-22T00:10:00+00:00",
+                        text="Actually, `main` delegates behavior to `helper`.",
+                        metadata={"thread_id": "chat-4"},
+                    )
+                )
+            ],
+            execute=True,
+        )
+
+        all_profiles = metadata.load_profiles("demo", active_only=False)
+        active_profiles = metadata.load_profiles("demo", active_only=True)
+        self.assertEqual(len(all_profiles), 2)
+        self.assertEqual(len(active_profiles), 1)
+        inactive_profiles = [profile for profile in all_profiles if not profile.is_active]
+        self.assertEqual(len(inactive_profiles), 1)
+        self.assertIn("uses helper for shared logic", inactive_profiles[0].value_text)
+        self.assertIn("delegates shared helper behavior", active_profiles[0].value_text)
+
+    def test_episode_processor_can_sync_profiles_into_vector_index(self) -> None:
+        metadata = InMemoryMetadataStore()
+        metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
+        sink = Neo4jGraphSink()
+        sink.execute = lambda statements: 0  # type: ignore[method-assign]
+        vector_store = InMemoryProfileVectorStore()
+        processor = EpisodeProcessor(
+            graph_sink=sink,
+            read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
+            adapter=GraphitiAdapter(
+                llm_client=FakeEpisodeLLMClient(
+                    extracted_entity_names=("main", "helper"),
+                    extracted_edges=(
+                        {
+                            "source_entity_name": "main",
+                            "target_entity_name": "helper",
+                            "relation_type": "JUSTIFIES",
+                            "fact": "main uses helper for shared logic",
+                            "valid_at": None,
+                            "invalid_at": None,
+                        },
+                    ),
+                )
+            ),
+            profile_indexer=ProfileVectorIndexer(
+                vector_store=vector_store,
+                embedding_provider=FakeEmbeddingProvider(),
+            ),
+        )
+
+        processor.apply_batch(
+            [
+                EpisodeWorkItem(
+                    episode=EpisodeRecord(
+                        episode_id="turn-6",
+                        repo_id="demo",
+                        source_type="user_message",
+                        source_id="turn-6",
+                        author="user",
+                        created_at="2026-03-22T00:00:00+00:00",
+                        updated_at="2026-03-22T00:00:00+00:00",
+                        text="Why does `main` use `helper` in app.py?",
+                        metadata={"thread_id": "chat-5"},
+                    )
+                )
+            ],
+            execute=True,
+        )
+
+        hits = vector_store.search_profile_keys(
+            repo_id="demo",
+            embedding=FakeEmbeddingProvider().embed_texts(["helper"])[0],
+            limit=5,
+            active_only=True,
+        )
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].profile_kind, SEMANTIC_FACT_PROFILE_KIND)
+
+
+class ProfileVectorStoreTests(unittest.TestCase):
+    def test_aurora_profile_vector_store_bootstraps_pgvector_schema(self) -> None:
+        connection = RecordingConnection()
+        store = AuroraProfileVectorStore(connection, embedding_dim=1024)
+
+        store.bootstrap()
+
+        sql_text = "\n".join(sql for sql, _ in connection.executed)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS vector", sql_text)
+        self.assertIn("CREATE TABLE IF NOT EXISTS cg_profile_keys", sql_text)
+        self.assertIn("vector(1024)", sql_text)
+        self.assertIn("USING hnsw", sql_text)
+
+    def test_profile_search_service_uses_query_parser_and_vector_hits(self) -> None:
+        metadata = InMemoryMetadataStore()
+        profile = ProfileRecord(
+            profile_id="profile:demo:semantic_fact_profile:fact:1",
+            repo_id="demo",
+            profile_kind=SEMANTIC_FACT_PROFILE_KIND,
+            profile_target_kind="FactEdge",
+            profile_target_id="fact:1",
+            relation_type="JUSTIFIES",
+            source_node_id="symbol:demo:demo.app.main",
+            source_node_kind="Function",
+            target_node_id="symbol:demo:demo.app.helper",
+            target_node_kind="Function",
+            target_revision_id=None,
+            value_text="Function main justifies Function helper. main uses helper for shared logic",
+            keys=("helper rollback", "main helper"),
+            metadata={"episode_ids": ["turn-1"]},
+            is_active=True,
+            updated_at="2026-03-22T00:00:00+00:00",
+        )
+        metadata.upsert_profiles((profile,))
+
+        vector_store = InMemoryProfileVectorStore()
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        indexer.sync_repo(repo_id="demo", metadata_store=metadata)
+
+        service = ProfileSearchService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+            query_parser=QueryParser(
+                llm_client=FakeQueryLLMClient(
+                    keywords=("helper rollback",),
+                )
+            ),
+        )
+
+        result = service.search(
+            repo_id="demo",
+            query="What is the rollback plan for helper?",
+            limit=5,
+            active_only=True,
+            llm_enabled=True,
+        )
+
+        self.assertEqual(result.parse_result.high_level_keywords, ("helper rollback",))
+        self.assertEqual(result.parse_result.intent_tags, ("rollback",))
+        self.assertEqual(len(result.hits), 1)
+        self.assertEqual(result.profiles[0].profile_id, profile.profile_id)
 
 
 @unittest.skipUnless(shutil.which("git"), "git executable is required for git metadata tests")
@@ -1111,6 +1459,53 @@ class MetadataStoreTests(unittest.TestCase):
             store.connection.execute("SELECT COUNT(*) FROM cg_profiles WHERE repo_id = 'demo'").fetchone()[0],
             0,
         )
+
+    def test_sqlite_metadata_store_round_trips_and_deactivates_profiles(self) -> None:
+        store = SQLiteMetadataStore(":memory:")
+        profile = ProfileRecord(
+            profile_id="profile:demo:semantic_fact_profile:fact:1",
+            repo_id="demo",
+            profile_kind=SEMANTIC_FACT_PROFILE_KIND,
+            profile_target_kind="FactEdge",
+            profile_target_id="fact:1",
+            relation_type="JUSTIFIES",
+            source_node_id="symbol:demo:demo.app.main",
+            source_node_kind="Function",
+            target_node_id="symbol:demo:demo.app.helper",
+            target_node_kind="Function",
+            target_revision_id=None,
+            value_text="Function main justifies Function helper. main uses helper for shared logic",
+            keys=("JUSTIFIES", "main", "helper"),
+            metadata={"episode_ids": ["turn-1"]},
+            is_active=True,
+            updated_at="2026-03-22T00:00:00+00:00",
+        )
+
+        store.upsert_profiles((profile,))
+        loaded = store.load_profiles("demo", active_only=True)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].profile_id, profile.profile_id)
+        self.assertEqual(loaded[0].keys, profile.keys)
+
+        store.deactivate_profiles(
+            (
+                ProfileDeactivation(
+                    repo_id="demo",
+                    profile_kind=SEMANTIC_FACT_PROFILE_KIND,
+                    relation_type="JUSTIFIES",
+                    source_node_id="symbol:demo:demo.app.main",
+                    target_node_id="symbol:demo:demo.app.helper",
+                    observed_at="2026-03-22T00:05:00+00:00",
+                ),
+            )
+        )
+
+        self.assertEqual(store.load_profiles("demo", active_only=True), ())
+        loaded_all = store.load_profiles("demo", active_only=False)
+        self.assertEqual(len(loaded_all), 1)
+        self.assertFalse(loaded_all[0].is_active)
+        self.assertEqual(loaded_all[0].updated_at, "2026-03-22T00:05:00+00:00")
 
     def test_reset_context_execute_requires_graph_config_before_deleting_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

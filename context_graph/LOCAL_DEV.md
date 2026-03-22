@@ -16,7 +16,7 @@ docker compose -f context_graph/docker-compose.local.yml up -d
 
 This starts:
 
-- PostgreSQL on `localhost:5433`
+- PostgreSQL + `pgvector` on `localhost:5433`
 - Neo4j on `localhost:7687` and browser UI on `http://localhost:7474`
 
 Default local credentials:
@@ -136,6 +136,34 @@ python3 -m context_graph ingest-episode \
 
 If the LLM provider is configured, the command above will try to produce semantic `RELATES_TO` facts in addition to `MENTIONS`.
 
+To sync active semantic fact profiles into the local pgvector store:
+
+```bash
+python3 -m context_graph sync-profile-vectors \
+  --repo-id demo-context \
+  --metadata-backend postgres \
+  --metadata-dsn postgresql://context_graph:context_graph@localhost:5433/context_graph \
+  --embed-provider bedrock
+```
+
+To parse a retrieval query into anchors and high-level keywords:
+
+```bash
+python3 -m context_graph parse-query \
+  --query "Why was helper added to app.py and what is the rollback impact?"
+```
+
+To search semantic relation profiles through pgvector:
+
+```bash
+python3 -m context_graph search-profiles \
+  --repo-id demo-context \
+  --query "What is the rollback impact of the helper change?" \
+  --metadata-backend postgres \
+  --metadata-dsn postgresql://context_graph:context_graph@localhost:5433/context_graph \
+  --embed-provider bedrock
+```
+
 To test the hosted GitHub URL flow locally:
 
 ```bash
@@ -208,5 +236,7 @@ LIMIT 25
 - `apply-latest-commit --execute` writes commit-aware graph updates and metadata for a local checkout.
 - `hosted-index --execute` does the same thing starting from a GitHub URL or slug and a persistent repo cache.
 - `ingest-episode --execute` is the easiest way to test the LLM-backed episode layer without cloning a GitHub repo.
+- `sync-profile-vectors` backfills active semantic fact profiles into Aurora/local Postgres pgvector.
+- `search-profiles` is the current LightRAG-style high-level retrieval entrypoint for semantic `RELATES_TO` facts.
 - `reset-context --execute` removes the stored `CodeNode` / `CodeNodeVersion` graph and metadata rows for a repo id.
 - If you skip `--execute`, the index commands only print the planned work without mutating storage.

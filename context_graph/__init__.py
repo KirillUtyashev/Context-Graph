@@ -1,5 +1,6 @@
 from .commit_indexer import CommitIndexResult, CommitIndexer
 from .diffing import diff_snapshots
+from .embeddings import EmbeddingProvider, EmbeddingSettings
 from .episode_processor import EpisodeBatchResult, EpisodeProcessor, EpisodeWorkItem
 from .episodes import ContextNodeRef, EpisodeRecord, FactRecord, MentionRecord
 from .git_metadata import CommitInfo, GitMetadata
@@ -18,6 +19,16 @@ from .models import (
     SnapshotApplyResult,
     SnapshotDiff,
 )
+from .profile_vectors import (
+    AuroraProfileVectorStore,
+    InMemoryProfileVectorStore,
+    ProfileSearchResult,
+    ProfileSearchService,
+    ProfileVectorHit,
+    ProfileVectorIndexer,
+)
+from .profiles import ProfileDeactivation, ProfileRecord, SEMANTIC_FACT_PROFILE_KIND
+from .query_parser import QueryAnchor, QueryParseResult, QueryParser
 from .repo_cache import RepoCacheManager
 from .snapshot_builder import CodebaseMemorySnapshotProducer
 from .temporal import TemporalGraphWriter
@@ -32,6 +43,8 @@ __all__ = [
     "CommitInfo",
     "ContextNodeRef",
     "CypherStatement",
+    "EmbeddingProvider",
+    "EmbeddingSettings",
     "EdgeChange",
     "EpisodeBatchResult",
     "EpisodeProcessor",
@@ -54,9 +67,21 @@ __all__ = [
     "Neo4jGraphSink",
     "NeptuneGraphSink",
     "NodeChange",
+    "ProfileSearchResult",
+    "ProfileSearchService",
+    "ProfileVectorHit",
+    "ProfileVectorIndexer",
+    "QueryAnchor",
+    "QueryParseResult",
+    "QueryParser",
+    "ProfileDeactivation",
+    "ProfileRecord",
+    "AuroraProfileVectorStore",
+    "InMemoryProfileVectorStore",
     "RepoCacheManager",
     "RepoIndexState",
     "RepoSourceState",
+    "SEMANTIC_FACT_PROFILE_KIND",
     "SQLiteMetadataStore",
     "SnapshotApplyResult",
     "SnapshotDiff",
