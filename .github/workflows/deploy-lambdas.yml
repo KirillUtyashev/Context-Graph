@@ -6,6 +6,10 @@ on:
     paths:
      - "lambda_augment/**"
      - "lambda_retrieve/**"
+     - "lambda_repo_sync_index/**"
+     - "context_graph/**"
+     - "vendor/codebase_memory_pipeline/**"
+     - "pyproject.toml"
   workflow_dispatch:
     inputs:
       env:
@@ -62,6 +66,20 @@ jobs:
           (cd lambda_augment && zip -r ../augment.zip .)
           (cd lambda_retrieve && zip -r ../retrieve.zip .)
 
+      - name: Resolve account registry
+        id: account
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          echo "registry=${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_OUTPUT"
+
+      - name: Login to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${{ steps.account.outputs.registry }}"
+
       - name: Deploy augment Lambda
         shell: bash
         run: |
@@ -80,3 +98,18 @@ jobs:
             --function-name "context-graph-${env}-retrieve" \
             --zip-file "fileb://retrieve.zip"
 
+      - name: Build and push repo-sync-index image
+        shell: bash
+        run: |
+          set -euo pipefail
+          env="${{ matrix.env }}"
+          image_uri="${{ steps.account.outputs.registry }}/context-graph-${env}-repo-sync-index:latest"
+          docker build -f lambda_repo_sync_index/Dockerfile -t "${image_uri}" .
+          docker push "${image_uri}"
+          if aws lambda get-function --function-name "context-graph-${env}-repo-sync-index" >/dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name "context-graph-${env}-repo-sync-index" \
+              --image-uri "${image_uri}"
+          else
+            echo "repo-sync-index Lambda does not exist yet; image pushed to ${image_uri}"
+          fi

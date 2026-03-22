@@ -1,2 +1,4 @@
+boto3>=1.39,<2
 neo4j>=5.22,<6
+openai>=1.91,<2
 psycopg[binary]>=3.2,<4

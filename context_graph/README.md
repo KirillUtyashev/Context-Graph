@@ -136,6 +136,9 @@ flowchart LR
     F --> G["Temporal Graph Writer"]
     G --> H["Neo4j / Neptune Graph Sink"]
     G --> I["SQLite / PostgreSQL Metadata Store"]
+    J["Episodes (GitHub / Agent / User / Commit Text)"] --> K["Episode Processor"]
+    K --> H
+    I --> K
 ```
 
 ## Current Graph Model
@@ -154,6 +157,30 @@ The persisted graph currently stores code objects as:
 
 `CodeNode` is the common umbrella label. The specific label like `File` or `Function` is preserved too.
 
+### Artifact and episode nodes
+
+The graph now also stores a lightweight provenance layer:
+
+- `(:Commit:ContextNode)`
+- `(:GitHubEntity:PullRequest:ContextNode)`
+- `(:GitHubEntity:Issue:ContextNode)`
+- `(:Episode:ContextNode)`
+
+The important modeling rule is:
+
+- deterministic artifacts stay as deterministic nodes
+- all text-bearing inputs are ingested as `Episode`
+
+That includes:
+
+- commit messages
+- PR bodies
+- issue bodies
+- PR review bodies
+- PR review comments
+- issue comments
+- future user / agent / note messages
+
 ### Code-layer edges
 
 Current edge types come from the exported upstream graph where available. In our current runs we have seen:
@@ -169,6 +196,12 @@ Current edge types come from the exported upstream graph where available. In our
 - `THROWS`
 
 Some edge types from the original project, such as `FILE_CHANGES_WITH`, depend on the current repository history and thresholds, so they will appear only when emitted by the upstream pass.
+
+For symmetry with `CodeNode`, persisted structural relationships now also carry:
+
+- `edge_kind = "CodeEdge"`
+
+This lets us distinguish code-graph relationships as a family while still preserving the specific relationship type such as `CALLS` or `DEFINES`.
 
 ### Temporal augmentation
 
@@ -189,6 +222,30 @@ These version edges carry temporal fields such as:
 - `valid_to_revision`
 
 Structural edges like `CALLS` and `DEFINES` are also stored with temporal metadata so older versions can be invalidated instead of deleted.
+
+### Episode and semantic edges
+
+The episode layer follows a simplified Graphiti-style split:
+
+- `Episode -[:ON]-> Artifact`
+- `Episode -[:MENTIONS]-> ContextNode`
+- `ContextNode -[:RELATES_TO]-> ContextNode`
+
+Where:
+
+- `ON` is deterministic attachment to a parent artifact such as a PR, issue, or commit
+- `MENTIONS` is episode-to-entity provenance
+- `RELATES_TO` is the generic semantic fact edge family
+
+For semantic fact edges, the stored relationship type is generic (`RELATES_TO`) and the actual semantic meaning is carried in edge properties such as:
+
+- `name`
+- `fact`
+- `created_at`
+- `expired_at`
+- `valid_at`
+- `invalid_at`
+- `episode_ids_json`
 
 ## How the Current Update Flow Works
 
@@ -211,41 +268,62 @@ This gives us a **temporal code graph** while still keeping a fast “current st
 
 ## What Works Right Now
 
-### Build a snapshot
+### Index a specific commit
 
 ```bash
-python3 -m context_graph build-snapshot /path/to/repo --repo-id demo-repo --revision-id r1
+python3 -m context_graph apply-commit /path/to/repo --repo-id demo-repo --commit <sha>
 ```
 
 This:
 
-- runs the vendored C exporter
-- builds a Python `GraphSnapshot`
-- prints a summary
-
-### Plan temporal updates
-
-```bash
-python3 -m context_graph plan-apply /path/to/repo --repo-id demo-repo --revision-id r1
-```
-
-This:
-
-- builds a snapshot
+- resolves the target git commit
+- builds a snapshot from a detached worktree for that exact revision
 - diffs it against the latest stored snapshot
-- generates Cypher statements for the selected graph backend
-- updates the metadata store
+- emits or executes the structural and provenance writes for that commit
 
-### Execute against local Neo4j and PostgreSQL
+### Advance to the latest commit
 
-See:
+```bash
+python3 -m context_graph apply-latest-commit /path/to/repo --repo-id demo-repo
+```
 
-- `context_graph/LOCAL_DEV.md`
+This:
 
-At the moment, the easiest local stack is:
+- resolves `HEAD`
+- replays any missing commits in order when the stored commit is an ancestor
+- persists `Commit`, `CodeNode`, `CodeNodeVersion`, and temporal relationship updates
+- also ingests the commit message as an `Episode` attached to the `Commit`
 
-- PostgreSQL on `localhost:5433`
-- Neo4j on `localhost:7687`
+### Clone/fetch and index from GitHub
+
+```bash
+python3 -m context_graph hosted-index --github-url https://github.com/OWNER/REPO --repo-id demo-repo
+```
+
+This:
+
+- resolves the canonical GitHub repo
+- clones or fetches a persistent local cache
+- indexes the requested commit or branch head
+- augments indexed commits with GitHub PR and issue provenance when GitHub exposes explicit links
+- stores PR / issue structural artifacts deterministically
+- ingests PR bodies, issue bodies, reviews, and comments as `Episode` nodes
+
+### Ingest a generic episode directly
+
+```bash
+python3 -m context_graph ingest-episode \
+  --repo-id demo-repo \
+  --source-type user_message \
+  --source-id turn-1 \
+  --text 'Why does main call helper here?'
+```
+
+This:
+
+- stores the raw episode
+- resolves likely code mentions from the latest snapshot
+- creates `ON` / `MENTIONS` / semantic fact statements through the same sink layer
 
 ## What Is Still Missing
 
@@ -253,14 +331,19 @@ This is a working prototype, but it is not the full end-state system yet.
 
 ### 1. Commit-aware temporal updates
 
-Right now, we can provide a `revision_id` manually and diff snapshots, but we do **not yet** have the full automated workflow for:
+The CLI now supports git-aware temporal indexing for existing local checkouts. It can:
 
-- detect new commit arrives
-- re-run indexing on the new checkout
-- map that commit to changed nodes/edges automatically
-- attach first-class `Commit` nodes into the persisted graph
+- resolve `HEAD` and explicit commit SHAs from git
+- build snapshots from detached temporary worktrees for exact commits
+- replay missing commits in order when the last indexed commit is an ancestor of the current target
+- attach first-class `Commit` nodes plus `HAS_COMMIT`, `PRECEDES`, `TOUCHED`, and `TOUCHED_FILE` relationships into the persisted graph
 
-That is one of the most important next steps.
+Current limitations:
+
+- the commit-aware CLI flow assumes we are indexing consecutive commits from the same branch lineage
+- if the checked-out branch changes, the CLI stops instead of trying to merge histories implicitly
+- if the previously indexed commit is not an ancestor of the current target commit, the CLI stops with an error instead of guessing
+- bootstrap version provenance is conservative: on a first import from an existing history, we only attach commit/version edges for nodes in the commit's changed files
 
 ### 2. First-class provenance entities
 
@@ -268,7 +351,6 @@ We have focused on the **code graph + temporal update base layer** first.
 
 We have **not yet** added first-class nodes for:
 
-- `Commit`
 - `PR`
 - `Issue`
 - `ConversationTurn`

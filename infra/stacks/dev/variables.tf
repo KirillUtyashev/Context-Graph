@@ -69,3 +69,7 @@ variable "neptune_max_capacity" {
   default = 2
 }
 
+variable "repo_sync_index_image_uri" {
+  type    = string
+  default = ""
+}
