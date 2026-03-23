@@ -960,7 +960,12 @@ class PostgresMetadataStore(_DbApiMetadataStore):
         try:
             import psycopg  # type: ignore
 
-            connection = psycopg.connect(dsn)
+            # Use ClientCursor for client-side parameter binding. psycopg3's default
+            # server-side binding cannot determine the type of None values passed for
+            # nullable TEXT columns, causing "could not determine data type of parameter"
+            # errors. ClientCursor substitutes parameters on the client before sending,
+            # which avoids this issue at the cost of slightly less query plan caching.
+            connection = psycopg.connect(dsn, cursor_factory=psycopg.ClientCursor)
             return cls(connection=connection)
         except ImportError:
             pass

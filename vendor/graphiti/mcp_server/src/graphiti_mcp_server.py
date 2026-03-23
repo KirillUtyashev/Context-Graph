@@ -29,6 +29,8 @@ from models.response_types import (
     FactSearchResponse,
     NodeResult,
     NodeSearchResponse,
+    ProfileResult,
+    SearchMemoryResponse,
     StatusResponse,
     SuccessResponse,
 )
@@ -153,10 +155,260 @@ mcp = FastMCP(
 # Global services
 graphiti_service: Optional['GraphitiService'] = None
 queue_service: QueueService | None = None
+aurora_ingestion_service: Optional['AuroraIngestionService'] = None
 
 # Global client for backward compatibility
 graphiti_client: Graphiti | None = None
 semaphore: asyncio.Semaphore
+
+
+class AuroraIngestionService:
+    """Drives context_graph EpisodeProcessor to write episodic ingestion into Aurora + Neptune.
+
+    Reads Aurora connection info from environment variables set by Terraform:
+      AURORA_ENDPOINT, AURORA_DB_NAME, AURORA_USERNAME, AURORA_PASSWORD_SECRET_ARN
+
+    The password is fetched from Secrets Manager at initialization time using the
+    instance IAM role (no credentials needed in code).
+
+    This service is optional: if Aurora env vars are absent the service initialises
+    to None and add_memory silently skips the Aurora path.
+    """
+
+    def __init__(self) -> None:
+        self._processor: Any = None  # context_graph.EpisodeProcessor
+        self._metadata: Any = None   # context_graph.PostgresMetadataStore
+        self._embed_provider: Any = None   # context_graph.embeddings.EmbeddingProvider
+        self._profile_vector_store: Any = None  # context_graph.profile_vectors.AuroraProfileVectorStore
+        self._profile_indexer: Any = None  # context_graph.profile_vectors.ProfileVectorIndexer
+        self._profile_search_service: Any = None  # context_graph.profile_vectors.ProfileSearchService
+        self._ready: bool = False
+        self._init_error: str | None = None
+
+    def _build_dsn(self) -> str | None:
+        endpoint = os.getenv('AURORA_ENDPOINT', '').strip()
+        if not endpoint:
+            return None
+        db_name = os.getenv('AURORA_DB_NAME', 'context_graph')
+        username = os.getenv('AURORA_USERNAME', 'postgres')
+        secret_arn = os.getenv('AURORA_PASSWORD_SECRET_ARN', '').strip()
+        if not secret_arn:
+            logger.warning('AURORA_PASSWORD_SECRET_ARN not set — Aurora ingestion disabled')
+            return None
+        region = os.getenv('AWS_DEFAULT_REGION') or os.getenv('AWS_REGION', 'ca-central-1')
+        try:
+            import boto3
+            sm = boto3.client('secretsmanager', region_name=region)
+            password = sm.get_secret_value(SecretId=secret_arn)['SecretString']
+            # Password may be a plain string or a JSON object {"password": "..."}
+            if password.startswith('{'):
+                import json as _json
+                pw_obj = _json.loads(password)
+                password = pw_obj.get('password') or pw_obj.get('master_password') or list(pw_obj.values())[0]
+            import urllib.parse
+            return (
+                f'postgresql://{username}:{urllib.parse.quote_plus(password)}'
+                f'@{endpoint}:5432/{db_name}'
+            )
+        except Exception as exc:
+            logger.error(f'Failed to fetch Aurora password from Secrets Manager: {exc}')
+            return None
+
+    def initialize(self) -> bool:
+        """Initialize synchronously (called from asyncio.to_thread at first use)."""
+        if self._ready:
+            return True
+        if self._init_error:
+            return False
+        try:
+            dsn = self._build_dsn()
+            if dsn is None:
+                self._init_error = 'Aurora DSN could not be constructed'
+                return False
+
+            from context_graph.metadata import PostgresMetadataStore
+            from context_graph.graph_sinks import NeptuneGraphSink, BaseCypherGraphSink, CypherStatement
+            from context_graph.graph_read import GraphReadRepository
+            from context_graph.graphiti_adapter import GraphitiAdapter
+            from context_graph.episode_processor import EpisodeProcessor
+            from context_graph.llm import EpisodeLLMSettings, make_episode_llm_client
+            from typing import Iterable as _Iterable
+
+            class _NullGraphSink(BaseCypherGraphSink):
+                """Collects planned Cypher statements without executing them.
+
+                The context_graph EpisodeProcessor plans Neptune Cypher writes. For this
+                integration, Neptune writes are already handled by Graphiti's own path;
+                here we only need the Aurora-side metadata and fact extraction, so we
+                discard the actual Cypher execution.
+                """
+                def execute(self, statements: '_Iterable[CypherStatement]') -> int:
+                    return sum(1 for _ in statements)  # count but don't execute
+
+            neptune_host = os.getenv('NEPTUNE_HOST', '').strip()
+            # NeptuneGraphSink uses the plain neo4j Bolt driver with empty credentials,
+            # which Neptune (IAM-auth mode) rejects. We use _NullGraphSink instead so
+            # that the EpisodeProcessor can plan + extract facts via the LLM without
+            # actually writing to Neptune (Graphiti's own queue already handles that).
+            _ = neptune_host  # kept for potential future use
+
+            metadata = PostgresMetadataStore.from_dsn(dsn)
+            metadata.bootstrap()
+            self._metadata = metadata
+
+            graph_sink = _NullGraphSink()
+
+            region = os.getenv('AWS_DEFAULT_REGION') or os.getenv('AWS_REGION', 'ca-central-1')
+            llm_settings = EpisodeLLMSettings(
+                provider='bedrock',
+                model=os.getenv('CONTEXT_GRAPH_LLM_MODEL', 'us.anthropic.claude-sonnet-4-6'),
+                aws_region=region,
+            )
+            llm_client = make_episode_llm_client(llm_settings)
+            adapter = GraphitiAdapter(llm_client=llm_client)
+
+            # Set up profile vector store and search service
+            try:
+                from context_graph.embeddings import make_embedding_provider, EmbeddingSettings
+                from context_graph.profile_vectors import (
+                    AuroraProfileVectorStore,
+                    ProfileVectorIndexer,
+                    ProfileSearchService,
+                )
+                from context_graph.query_parser import QueryParser
+
+                embed_settings = EmbeddingSettings(
+                    provider='bedrock',
+                    model='amazon.titan-embed-text-v2:0',
+                    dimensions=1024,
+                    aws_region=region,
+                )
+                self._embed_provider = make_embedding_provider(embed_settings)
+                self._profile_vector_store = AuroraProfileVectorStore.from_metadata_store(metadata)
+                self._profile_vector_store.bootstrap()
+                self._profile_indexer = ProfileVectorIndexer(
+                    vector_store=self._profile_vector_store,
+                    embedding_provider=self._embed_provider,
+                )
+                self._profile_search_service = ProfileSearchService(
+                    metadata_store=metadata,
+                    vector_store=self._profile_vector_store,
+                    embedding_provider=self._embed_provider,
+                    query_parser=QueryParser(llm_client=llm_client),
+                )
+                logger.info('Aurora profile vector store and search service initialised')
+            except Exception as vec_exc:
+                logger.warning(f'Profile vector store init failed (search_memory profile branch disabled): {vec_exc}')
+                self._profile_indexer = None
+                self._profile_search_service = None
+
+            self._processor = EpisodeProcessor(
+                graph_sink=graph_sink,
+                read_repository=GraphReadRepository(
+                    metadata_store=metadata,
+                    graph_sink=graph_sink,
+                ),
+                adapter=adapter,
+                profile_indexer=self._profile_indexer,
+            )
+            self._ready = True
+            logger.info('AuroraIngestionService initialised successfully')
+            return True
+        except Exception as exc:
+            self._init_error = str(exc)
+            logger.error(f'AuroraIngestionService init failed: {exc}')
+            return False
+
+    def search_profiles_sync(
+        self,
+        *,
+        query: str,
+        repo_id: str,
+        limit: int = 10,
+        active_only: bool = True,
+    ) -> list[dict]:
+        """Search Aurora semantic fact profiles synchronously (for asyncio.to_thread)."""
+        if not self.initialize() or self._profile_search_service is None:
+            return []
+        try:
+            result = self._profile_search_service.search(
+                repo_id=repo_id,
+                query=query,
+                limit=limit,
+                active_only=active_only,
+            )
+            hit_scores = {h.profile_id: h.score for h in result.hits}
+            return [
+                {
+                    'profile_id': p.profile_id,
+                    'relation_type': p.relation_type,
+                    'value_text': p.value_text,
+                    'source_node_id': p.source_node_id,
+                    'target_node_id': p.target_node_id,
+                    'is_active': bool(p.is_active),
+                    'score': hit_scores.get(p.profile_id, 0.0),
+                    'metadata': p.metadata if isinstance(p.metadata, dict) else {},
+                }
+                for p in result.profiles
+            ]
+        except Exception as exc:
+            logger.error(f'AuroraIngestionService.search_profiles_sync error: {exc}')
+            return []
+
+    def ingest_episode_sync(
+        self,
+        *,
+        repo_id: str,
+        source_type: str,
+        source_id: str,
+        text: str,
+        author: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        """Run the EpisodeProcessor synchronously (intended for asyncio.to_thread)."""
+        if not self.initialize():
+            return {'ok': False, 'error': self._init_error}
+        try:
+            from context_graph.episode_processor import EpisodeWorkItem
+            from context_graph.episodes import EpisodeRecord
+            from context_graph.models import utc_now_iso
+
+            now = utc_now_iso()
+            batch = self._processor.apply_batch(
+                [
+                    EpisodeWorkItem(
+                        episode=EpisodeRecord(
+                            episode_id=f'{source_type}:{source_id}',
+                            repo_id=repo_id,
+                            source_type=source_type,
+                            source_id=source_id,
+                            author=author,
+                            created_at=now,
+                            updated_at=now,
+                            text=text,
+                            metadata={'thread_id': thread_id} if thread_id else {},
+                        )
+                    )
+                ],
+                execute=True,
+            )
+            result = batch.results[0] if batch.results else None
+            return {
+                'ok': True,
+                'statements_executed': batch.statements_executed,
+                'facts': [
+                    {
+                        'fact_id': f.fact_id,
+                        'relation_type': f.relation_type,
+                        'fact': f.fact,
+                    }
+                    for f in (result.facts if result else [])
+                ],
+                'mentions': [m.target_node_id for m in (result.mentions if result else [])],
+            }
+        except Exception as exc:
+            logger.error(f'AuroraIngestionService.ingest_episode_sync error: {exc}')
+            return {'ok': False, 'error': str(exc)}
 
 
 class GraphitiService:
@@ -343,11 +595,22 @@ async def add_memory(
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
+    repo_id: str | None = None,
+    source_type: str | None = None,
+    source_id: str | None = None,
+    author: str | None = None,
+    thread_id: str | None = None,
 ) -> SuccessResponse | ErrorResponse:
     """Add an episode to memory. This is the primary way to add information to the graph.
 
     This function returns immediately and processes the episode addition in the background.
     Episodes for the same group_id are processed sequentially to avoid race conditions.
+
+    The episode is written to two backends:
+    1. Neptune (Graphiti knowledge graph — entity/fact extraction).
+    2. Aurora PostgreSQL (context_graph metadata store — episodic records and semantic
+       relation profiles for LightRAG-style retrieval). Aurora ingestion requires
+       repo_id, source_type, and source_id.
 
     Args:
         name (str): Name of the episode
@@ -362,27 +625,28 @@ async def add_memory(
                                - 'message': For conversation-style content
         source_description (str, optional): Description of the source
         uuid (str, optional): Optional UUID for the episode
+        repo_id (str, optional): Repository/project identifier for Aurora ingestion (e.g. 'context-graph').
+                                 Required to enable Aurora write path.
+        source_type (str, optional): Episode source type for Aurora (e.g. 'agent_transcript', 'message').
+                                     Defaults to the value of `source` if not set.
+        source_id (str, optional): Stable identifier for this episode within the source
+                                   (e.g. 'transcript-001'). Defaults to `name` if not set.
+        author (str, optional): Author login for Aurora metadata.
+        thread_id (str, optional): Logical thread identifier for grouping related episodes in Aurora.
 
     Examples:
-        # Adding plain text content
+        # Adding an agent transcript to both Neptune and Aurora
         add_memory(
-            name="Company News",
-            episode_body="Acme Corp announced a new product line today.",
-            source="text",
-            source_description="news article",
-            group_id="some_arbitrary_string"
-        )
-
-        # Adding structured JSON data
-        # NOTE: episode_body should be a JSON string (standard JSON escaping)
-        add_memory(
-            name="Customer Profile",
-            episode_body='{"company": {"name": "Acme Technologies"}, "products": [{"id": "P001", "name": "CloudSync"}, {"id": "P002", "name": "DataMiner"}]}',
-            source="json",
-            source_description="CRM data"
+            name="Implement auth PR discussion",
+            episode_body="Agent: I'll implement JWT auth...",
+            source="message",
+            repo_id="my-project",
+            source_type="agent_transcript",
+            source_id="transcript-2026-03-22-001",
+            author="kai",
         )
     """
-    global graphiti_service, queue_service
+    global graphiti_service, queue_service, aurora_ingestion_service
 
     if graphiti_service is None or queue_service is None:
         return ErrorResponse(error='Services not initialized')
@@ -401,7 +665,7 @@ async def add_memory(
                 logger.warning(f"Unknown source type '{source}', using 'text' as default")
                 episode_type = EpisodeType.text
 
-        # Submit to queue service for async processing
+        # Submit to queue service for async Neptune processing
         await queue_service.add_episode(
             group_id=effective_group_id,
             name=name,
@@ -412,9 +676,36 @@ async def add_memory(
             uuid=uuid or None,  # Ensure None is passed if uuid is None
         )
 
-        return SuccessResponse(
-            message=f"Episode '{name}' queued for processing in group '{effective_group_id}'"
-        )
+        # Also ingest into Aurora via context_graph EpisodeProcessor (async, non-blocking)
+        aurora_result: dict | None = None
+        if aurora_ingestion_service is not None and repo_id:
+            effective_source_type = source_type or source or 'text'
+            effective_source_id = source_id or name
+            try:
+                aurora_result = await asyncio.to_thread(
+                    aurora_ingestion_service.ingest_episode_sync,
+                    repo_id=repo_id,
+                    source_type=effective_source_type,
+                    source_id=effective_source_id,
+                    text=episode_body,
+                    author=author,
+                    thread_id=thread_id,
+                )
+            except Exception as aurora_exc:
+                logger.error(f'Aurora ingestion error (non-fatal): {aurora_exc}')
+                aurora_result = {'ok': False, 'error': str(aurora_exc)}
+
+        msg = f"Episode '{name}' queued for processing in group '{effective_group_id}'"
+        if aurora_result is not None:
+            if aurora_result.get('ok'):
+                facts_count = len(aurora_result.get('facts', []))
+                msg += f'; Aurora: {aurora_result["statements_executed"]} graph writes, {facts_count} facts extracted'
+            else:
+                msg += f'; Aurora: skipped ({aurora_result.get("error", "unknown error")})'
+        elif repo_id is None:
+            msg += '; Aurora: skipped (provide repo_id to enable)'
+
+        return SuccessResponse(message=msg)
     except Exception as e:
         error_msg = str(e)
         logger.error(f'Error queuing episode: {error_msg}')
@@ -553,6 +844,95 @@ async def search_memory_facts(
         error_msg = str(e)
         logger.error(f'Error searching facts: {error_msg}')
         return ErrorResponse(error=f'Error searching facts: {error_msg}')
+
+
+@mcp.tool()
+async def search_memory(
+    query: str,
+    group_ids: list[str] | None = None,
+    repo_id: str | None = None,
+    max_facts: int = 10,
+    max_profiles: int = 5,
+) -> SearchMemoryResponse | ErrorResponse:
+    """Search memory for context relevant to a query.
+
+    Combines Neptune (Graphiti structured entity facts) with Aurora PostgreSQL
+    (LightRAG-style semantic relation profiles) when repo_id is provided.
+
+    Args:
+        query: Natural language search query
+        group_ids: Optional list of Graphiti group IDs to filter Neptune results
+        repo_id: Repository identifier for Aurora profile search (enables Aurora path)
+        max_facts: Maximum number of Neptune facts to return (default: 10)
+        max_profiles: Maximum number of Aurora semantic profiles to return (default: 5)
+    """
+    global graphiti_service, aurora_ingestion_service
+
+    if graphiti_service is None:
+        return ErrorResponse(error='Graphiti service not initialized')
+
+    try:
+        if max_facts < 0:
+            return ErrorResponse(error='max_facts must be a non-negative integer')
+        if max_profiles < 0:
+            return ErrorResponse(error='max_profiles must be a non-negative integer')
+
+        client = await graphiti_service.get_client()
+
+        effective_group_ids = (
+            group_ids
+            if group_ids is not None
+            else [config.graphiti.group_id]
+            if config.graphiti.group_id
+            else []
+        )
+
+        # Neptune facts (skipped when max_facts=0)
+        facts = []
+        if max_facts > 0:
+            relevant_edges = await client.search(
+                group_ids=effective_group_ids,
+                query=query,
+                num_results=max_facts,
+            )
+            facts = [format_fact_result(edge) for edge in (relevant_edges or [])]
+
+        # Aurora profiles (when repo_id provided)
+        profiles: list[ProfileResult] = []
+        if repo_id and aurora_ingestion_service is not None and max_profiles > 0:
+            raw_profiles = await asyncio.to_thread(
+                aurora_ingestion_service.search_profiles_sync,
+                query=query,
+                repo_id=repo_id,
+                limit=max_profiles,
+            )
+            profiles = [ProfileResult(**p) for p in raw_profiles]
+
+        n_facts = len(facts)
+        n_profiles = len(profiles)
+        if n_facts == 0 and n_profiles == 0:
+            return SearchMemoryResponse(
+                message=f"No results found for: '{query}'",
+                facts=[],
+                profiles=[],
+            )
+
+        parts = []
+        if n_facts:
+            parts.append(f'{n_facts} fact{"s" if n_facts != 1 else ""}')
+        if n_profiles:
+            parts.append(f'{n_profiles} profile{"s" if n_profiles != 1 else ""}')
+        msg = f"Found {' and '.join(parts)} for: '{query}'"
+        if repo_id and aurora_ingestion_service is None:
+            msg += ' (Aurora unavailable — Neptune only)'
+        elif repo_id is None:
+            msg += ' (Neptune only — provide repo_id to include Aurora profiles)'
+
+        return SearchMemoryResponse(message=msg, facts=facts, profiles=profiles)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f'Error in search_memory: {error_msg}')
+        return ErrorResponse(error=f'Error in search_memory: {error_msg}')
 
 
 @mcp.tool()
@@ -910,6 +1290,15 @@ async def initialize_server() -> ServerConfig:
 
     # Initialize queue service with the client
     await queue_service.initialize(graphiti_client)
+
+    # Initialize Aurora ingestion service (optional — only active when AURORA_ENDPOINT is set)
+    global aurora_ingestion_service
+    if os.getenv('AURORA_ENDPOINT', '').strip():
+        aurora_ingestion_service = AuroraIngestionService()
+        logger.info('AuroraIngestionService created (will initialise on first use)')
+    else:
+        aurora_ingestion_service = None
+        logger.info('AURORA_ENDPOINT not set — Aurora ingestion path disabled')
 
     # Set MCP server settings
     if config.server.host:

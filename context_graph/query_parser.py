@@ -16,7 +16,7 @@ _BACKTICK_RE = re.compile(r"`([^`]+)`")
 _QUOTED_RE = re.compile(r'"([^"]{3,})"')
 _ISSUE_RE = re.compile(r"#(\d+)")
 _COMMIT_RE = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
-_ROUTE_RE = re.compile(r"(?<!\w)(/[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=-]+)")
+_ROUTE_RE = re.compile(r"(?<!\w)(/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=-]+)")
 _PATH_RE = re.compile(r"\b(?:[\w.-]+/)+[\w./-]+\b")
 _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.:]*\b")
 _FILE_EXTENSIONS = {

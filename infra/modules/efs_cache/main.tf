@@ -36,9 +36,10 @@ resource "aws_efs_file_system" "this" {
 }
 
 resource "aws_efs_mount_target" "this" {
-  for_each = {
-    for subnet_id in var.subnet_ids : subnet_id => subnet_id
-  }
+  # Keys must be known at plan time; use the list index rather than the
+  # subnet ID (which is an apply-time value when subnets are being created
+  # in the same run).
+  for_each = { for idx, id in var.subnet_ids : tostring(idx) => id }
 
   file_system_id  = aws_efs_file_system.this.id
   subnet_id       = each.value
