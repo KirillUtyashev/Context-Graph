@@ -223,6 +223,7 @@ async def extract_edges(
             created_at=utc_now(),
             valid_at=valid_at_datetime,
             invalid_at=invalid_at_datetime,
+            relationship_keywords=edge_data.relationship_keywords,
         )
         edges.append(edge)
         logger.debug(

@@ -383,3 +383,39 @@ This is the "breadcrumb trail" property: you can trace any fact in the graph bac
 | Non-blocking ingestion | Neptune queued async; Aurora via `asyncio.to_thread` |
 | Fault isolation | Aurora errors do not block the Neptune path |
 | Backward compatibility | Calls without `repo_id` skip Aurora silently |
+
+---
+
+## Local Development & Testing
+
+To test the MCP server locally with the MCP Inspector, follow these steps:
+
+1. **Install Dependencies**
+   ```bash
+   cd vendor/graphiti/mcp_server
+   uv sync
+   ```
+
+2. **Configure Environment Variables**
+   Ensure your `.env` file in `vendor/graphiti/mcp_server` contains the necessary credentials:
+   ```env
+   OPENAI_API_KEY=your_key_here
+   NEO4J_PASSWORD=contextgraph
+   NEO4J_USER=neo4j
+   ```
+
+3. **Ensure Database is Running**
+   If you aren't using an existing Neo4j instance, you can spin one up via Docker:
+   ```bash
+   docker compose -f docker/docker-compose-neo4j.yml up -d neo4j
+   ```
+   *(Note: If you already have a `context-graph-neo4j` container running from the main project, you can just use that one!)*
+
+4. **Launch the MCP Inspector**
+   Run the following command to start the Inspector with standard IO transport and the Neo4j database provider:
+   ```bash
+   npx @modelcontextprotocol/inspector uv run --isolated --project . main.py --transport stdio --database-provider neo4j
+   ```
+   
+   > [!IMPORTANT]
+   > If the `npx` command "eats" the `--transport stdio` flag (which causes the server to start in HTTP mode instead and fail to connect), simply click into the **Arguments** text box inside the Inspector browser UI, manually append `--transport stdio` to the list of arguments, and click **Connect** again.

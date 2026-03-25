@@ -10,11 +10,13 @@ from typing import Sequence
 from .commit_indexer import CommitIndexer
 from .embeddings import load_embedding_settings, make_embedding_provider
 from .episode_processor import EpisodeProcessor, EpisodeWorkItem
-from .episodes import EpisodeRecord
+from .episodes import (
+    EpisodeType,
+    make_episode,
+)
 from .graph_read import GraphReadRepository
-from .graphiti_adapter import GraphitiAdapter
 from .github_client import GitHubApiClient
-from .graph_sinks import NeptuneGraphSink, Neo4jGraphSink
+from .graph_sinks import GraphitiNeo4jExecutor, GraphitiNeptuneExecutor, NeptuneGraphSink, Neo4jGraphSink
 from .hosted_indexer import HostedIndexRequest, HostedIndexer
 from .llm import load_episode_llm_settings, make_episode_llm_client
 from .metadata import MetadataStore, PostgresMetadataStore, SQLiteMetadataStore
@@ -104,6 +106,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8182,
         help="Neptune Bolt port",
     )
+    latest_commit_parser.add_argument(
+        "--neptune-host-scheme",
+        choices=("neptune-db", "neptune-graph"),
+        default="neptune-db",
+        help="Neptune host URI scheme",
+    )
+    latest_commit_parser.add_argument(
+        "--aoss-host",
+        help="OpenSearch Serverless host for Neptune BM25 search",
+    )
     _add_llm_args(latest_commit_parser)
     _add_embed_args(latest_commit_parser)
 
@@ -187,6 +199,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8182,
         help="Neptune Bolt port",
+    )
+    commit_parser.add_argument(
+        "--neptune-host-scheme",
+        choices=("neptune-db", "neptune-graph"),
+        default="neptune-db",
+        help="Neptune host URI scheme",
+    )
+    commit_parser.add_argument(
+        "--aoss-host",
+        help="OpenSearch Serverless host for Neptune BM25 search",
     )
     _add_llm_args(commit_parser)
     _add_embed_args(commit_parser)
@@ -285,6 +307,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8182,
         help="Neptune Bolt port",
     )
+    hosted_parser.add_argument(
+        "--neptune-host-scheme",
+        choices=("neptune-db", "neptune-graph"),
+        default="neptune-db",
+        help="Neptune host URI scheme",
+    )
+    hosted_parser.add_argument(
+        "--aoss-host",
+        help="OpenSearch Serverless host for Neptune BM25 search",
+    )
     _add_llm_args(hosted_parser)
     _add_embed_args(hosted_parser)
 
@@ -348,6 +380,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8182,
         help="Neptune Bolt port",
+    )
+    episode_parser.add_argument(
+        "--neptune-host-scheme",
+        choices=("neptune-db", "neptune-graph"),
+        default="neptune-db",
+        help="Neptune host URI scheme",
+    )
+    episode_parser.add_argument(
+        "--aoss-host",
+        help="OpenSearch Serverless host for Neptune BM25 search",
     )
     _add_llm_args(episode_parser)
     _add_embed_args(episode_parser)
@@ -469,6 +511,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8182,
         help="Neptune Bolt port",
     )
+    reset_parser.add_argument(
+        "--neptune-host-scheme",
+        choices=("neptune-db", "neptune-graph"),
+        default="neptune-db",
+        help="Neptune host URI scheme",
+    )
+    reset_parser.add_argument(
+        "--aoss-host",
+        help="OpenSearch Serverless host for Neptune BM25 search",
+    )
     return parser
 
 
@@ -509,7 +561,7 @@ def _add_embed_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embed-provider",
         choices=("openai", "bedrock"),
-        help="Enable profile-key embeddings with the selected provider",
+        help="Enable graph and profile embeddings with the selected provider",
     )
     parser.add_argument(
         "--embed-model",
@@ -518,7 +570,7 @@ def _add_embed_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--embed-dimensions",
         type=int,
-        help="Embedding dimension for pgvector storage",
+        help="Embedding dimension for graph and pgvector storage",
     )
     parser.add_argument(
         "--embed-base-url",
@@ -535,33 +587,56 @@ def _make_episode_processor(
     *,
     metadata: MetadataStore | None = None,
     graph_sink=None,
+    embedding_provider=None,
 ) -> EpisodeProcessor:
     metadata = metadata or _make_metadata_store(args)
-    graph_sink = graph_sink or _make_sink(args)
+    embedding_provider = embedding_provider or _make_embedding_provider(args)
+    graph_sink = graph_sink or _make_sink(args, embedding_provider=embedding_provider)
     llm_settings = load_episode_llm_settings(args)
     llm_client = make_episode_llm_client(llm_settings)
-    adapter = GraphitiAdapter(llm_client=llm_client)
-    profile_indexer = _make_profile_indexer(args, metadata=metadata)
+    profile_indexer = _make_profile_indexer(
+        args,
+        metadata=metadata,
+        embedding_provider=embedding_provider,
+    )
     return EpisodeProcessor(
         graph_sink=graph_sink,
         read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=graph_sink),
-        adapter=adapter,
+        llm_client=llm_client,
         profile_indexer=profile_indexer,
     )
 
 
-def _make_sink(args):
+def _make_embedding_provider(args):
+    settings = load_embedding_settings(args)
+    return make_embedding_provider(settings)
+
+
+def _make_sink(args, *, embedding_provider=None):
+    embedding_provider = embedding_provider or _make_embedding_provider(args)
     if args.graph_backend == "neptune":
         return NeptuneGraphSink(
             host=args.neptune_host or os.getenv("CONTEXT_GRAPH_NEPTUNE_HOST"),
             port=args.neptune_port,
+            host_scheme=getattr(args, "neptune_host_scheme", "neptune-db"),
+            aoss_host=getattr(args, "aoss_host", None) or os.getenv("CONTEXT_GRAPH_AOSS_HOST"),
+            embedding_provider=embedding_provider,
         )
+
+    executor = GraphitiNeo4jExecutor(
+        uri=args.neo4j_uri or os.getenv("NEO4J_URI"),
+        username=args.neo4j_user or os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER"),
+        password=args.neo4j_password or os.getenv("NEO4J_PASSWORD"),
+        database=args.neo4j_database or os.getenv("NEO4J_DATABASE"),
+    )
 
     return Neo4jGraphSink(
         uri=args.neo4j_uri or os.getenv("NEO4J_URI"),
         username=args.neo4j_user or os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER"),
         password=args.neo4j_password or os.getenv("NEO4J_PASSWORD"),
         database=args.neo4j_database or os.getenv("NEO4J_DATABASE"),
+        executor=executor,
+        embedding_provider=embedding_provider,
     )
 
 
@@ -595,10 +670,10 @@ def _make_profile_vector_store_from_metadata(metadata: MetadataStore, *, embeddi
     return AuroraProfileVectorStore.from_metadata_store(metadata, embedding_dim=embedding_dim)
 
 
-def _make_profile_indexer(args, *, metadata: MetadataStore):
+def _make_profile_indexer(args, *, metadata: MetadataStore, embedding_provider=None):
     embedding_settings = load_embedding_settings(args)
-    embedding_provider = make_embedding_provider(embedding_settings)
-    if embedding_provider is None:
+    embedding_provider = embedding_provider or make_embedding_provider(embedding_settings)
+    if embedding_provider is None or embedding_settings is None:
         return None
     vector_store = _make_profile_vector_store_from_metadata(
         metadata,
@@ -792,13 +867,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command in {"apply-latest-commit", "apply-commit"}:
         metadata = _make_metadata_store(args)
-        graph_sink = _make_sink(args)
+        embedding_provider = _make_embedding_provider(args)
+        graph_sink = _make_sink(args, embedding_provider=embedding_provider)
         if args.execute:
             graph_sink.validate_execute_config()
         episode_processor = _make_episode_processor(
             args,
             metadata=metadata,
             graph_sink=graph_sink,
+            embedding_provider=embedding_provider,
         )
         indexer = CommitIndexer(
             metadata_store=metadata,
@@ -845,13 +922,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "hosted-index":
         metadata = _make_metadata_store(args)
-        graph_sink = _make_sink(args)
+        embedding_provider = _make_embedding_provider(args)
+        graph_sink = _make_sink(args, embedding_provider=embedding_provider)
         if args.execute:
             graph_sink.validate_execute_config()
         episode_processor = _make_episode_processor(
             args,
             metadata=metadata,
             graph_sink=graph_sink,
+            embedding_provider=embedding_provider,
         )
         hosted_indexer = HostedIndexer(
             metadata_store=metadata,
@@ -912,7 +991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch = processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id=f"{args.source_type}:{args.source_id}",
                         repo_id=args.repo_id,
                         source_type=args.source_type,
@@ -932,15 +1011,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "repo_id": args.repo_id,
             "episodes": [
                 {
-                    "episode_id": result.episode.episode_id,
-                    "source_type": result.episode.source_type,
+                    "episode_id": result.episode.name,
+                    "source_type": result.episode.source.value,
                     "mentions": [mention.target_node_id for mention in result.mentions],
                     "facts": [
                         {
-                            "fact_id": fact.fact_id,
-                            "source_node_id": fact.source_node_id,
-                            "target_node_id": fact.target_node_id,
-                            "relation_type": fact.relation_type,
+                            "fact_id": fact.uuid,
+                            "source_node_id": fact.source_node_uuid,
+                            "target_node_id": fact.target_node_uuid,
+                            "relation_type": fact.name,
                             "fact": fact.fact,
                         }
                         for fact in result.facts

@@ -1,16 +1,34 @@
 from __future__ import annotations
 
+import asyncio
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import re
+import sys
+import threading
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional, Sequence, TypeVar
 
-from .episodes import ContextNodeRef, EpisodeRecord, FactInvalidation, FactRecord, MentionRecord
+from .episodes import (
+    EntityNode,
+    EpisodicNode,
+    EntityEdge,
+    MentionRecord,
+    FactInvalidation,
+    combine_episode_ids,
+    entity_node_aliases,
+    entity_node_file_path,
+    entity_node_kind,
+    entity_node_qualified_name,
+    make_entity_node,
+)
 from .git_metadata import CommitInfo
 from .models import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
 
 if TYPE_CHECKING:
+    from .embeddings import EmbeddingProvider
     from .github_indexer import GitHubProvenanceBundle
 
 
@@ -23,6 +41,353 @@ T = TypeVar("T")
 class CypherStatement:
     query: str
     parameters: Mapping[str, Any]
+
+
+class BaseCypherExecutor(ABC):
+    @abstractmethod
+    def validate_execute_config(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute(self, statements: Iterable[CypherStatement]) -> int:
+        raise NotImplementedError
+
+    def search_context_nodes(
+        self,
+        *,
+        repo_id: str,
+        search_terms: Sequence[str],
+        limit: int = 25,
+    ) -> tuple[EntityNode, ...]:
+        _ = (repo_id, search_terms, limit)
+        return ()
+
+
+class _PersistentLoop:
+    """A single long-lived event loop running in a daemon thread.
+
+    The neo4j async driver binds its connection pool to the loop that created
+    it.  If we call ``asyncio.run()`` for every query we get a *new* loop each
+    time, and the driver's internal futures end up attached to a dead loop —
+    ``RuntimeError: … attached to a different loop``.
+
+    This helper spins up one background loop on first use and keeps it alive
+    for the lifetime of the process.  ``run(coro)`` schedules work on that
+    loop from any thread and blocks until the result is ready.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def _ensure_running(self) -> asyncio.AbstractEventLoop:
+        if self._loop is not None and self._loop.is_running():
+            return self._loop
+        with self._lock:
+            if self._loop is not None and self._loop.is_running():
+                return self._loop
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever, daemon=True, name="graphiti-neo4j-loop"
+            )
+            thread.start()
+            self._loop = loop
+            self._thread = thread
+            return loop
+
+    def run(self, coro: Any) -> Any:
+        loop = self._ensure_running()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+
+
+_persistent_loop = _PersistentLoop()
+
+
+def _run_coroutine_sync(coro: Any) -> Any:
+    return _persistent_loop.run(coro)
+
+
+def _ensure_graphiti_vendor_path() -> None:
+    vendor_root = Path(__file__).resolve().parent.parent / "vendor" / "graphiti"
+    vendor_root_str = str(vendor_root)
+    if vendor_root_str not in sys.path:
+        sys.path.insert(0, vendor_root_str)
+
+
+def _records_from_graphiti_result(result: Any) -> Sequence[Any]:
+    if isinstance(result, tuple) and result:
+        first = result[0]
+        if isinstance(first, Sequence):
+            return first
+    records = getattr(result, "records", None)
+    if records is not None:
+        return records
+    if isinstance(result, Sequence):
+        return result
+    return ()
+
+
+class GraphitiNeo4jExecutor(BaseCypherExecutor):
+    def __init__(
+        self,
+        *,
+        uri: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        database: Optional[str] = None,
+        driver: Any = None,
+        build_indices: bool = True,
+    ) -> None:
+        self.uri = uri
+        self.username = username
+        self.password = password
+        self.database = database or "neo4j"
+        self.driver = driver
+        self.build_indices = build_indices
+        self._indices_ready = False
+
+    def validate_execute_config(self) -> None:
+        if self.driver is not None:
+            return
+        if not self.uri or self.username is None or self.password is None:
+            raise RuntimeError(
+                "Graphiti-backed Neo4j execution requires "
+                "--neo4j-uri/--neo4j-user/--neo4j-password "
+                "(or NEO4J_URI/NEO4J_USERNAME or NEO4J_USER/NEO4J_PASSWORD)"
+            )
+
+    def _get_driver(self) -> Any:
+        if self.driver is None:
+            self.validate_execute_config()
+            _ensure_graphiti_vendor_path()
+            try:
+                from graphiti_core.driver.neo4j_driver import Neo4jDriver as GraphitiNeo4jDriver
+            except ImportError as exc:  # pragma: no cover - dependency wiring
+                raise RuntimeError(
+                    "Unable to import vendored Graphiti Neo4j driver. "
+                    "Ensure the vendored graphiti package and its dependencies are available "
+                    "(for local dev, install context_graph/requirements-local.txt)."
+                ) from exc
+
+            self.driver = GraphitiNeo4jDriver(
+                uri=self.uri,
+                user=self.username,
+                password=self.password,
+                database=self.database,
+            )
+
+        if self.build_indices and not self._indices_ready:
+            _run_coroutine_sync(self.driver.build_indices_and_constraints())
+            self._indices_ready = True
+        return self.driver
+
+    def execute(self, statements: Iterable[CypherStatement]) -> int:
+        driver = self._get_driver()
+        count = 0
+        for statement in statements:
+            _run_coroutine_sync(driver.execute_query(statement.query, params=dict(statement.parameters)))
+            count += 1
+        return count
+
+    def search_context_nodes(
+        self,
+        *,
+        repo_id: str,
+        search_terms: Sequence[str],
+        limit: int = 25,
+    ) -> tuple[EntityNode, ...]:
+        # If no credentials/driver configured, skip graph search gracefully
+        # (planning-only mode with no live backend)
+        if self.driver is None and (not self.uri or self.username is None or self.password is None):
+            return ()
+
+        normalized_terms = tuple(
+            dict.fromkeys(term.strip().lower() for term in search_terms if term.strip())
+        )
+        if not normalized_terms:
+            return ()
+
+        driver = self._get_driver()
+        query = (
+            "MATCH (n {repo_id: $repo_id}) WHERE (n:Entity OR n:Episodic) "
+            "  AND NOT n:Episode "
+            "WITH n, "
+            "     toLower(coalesce(n.name, '')) AS lname, "
+            "     toLower(coalesce(n.qualified_name, '')) AS lqualified, "
+            "     toLower(coalesce(n.file_path, '')) AS lfile "
+            "WITH n, [term IN $terms WHERE "
+            "           lname = term OR "
+            "           lqualified = term OR "
+            "           lfile = term OR "
+            "           lname CONTAINS term OR "
+            "           lqualified ENDS WITH '.' + term OR "
+            "           lfile ENDS WITH '/' + term OR "
+            "           lfile ENDS WITH term"
+            "     ] AS matches "
+            "WHERE size(matches) > 0 "
+            "RETURN "
+            "  n.node_id AS node_id, "
+            "  n.repo_id AS repo_id, "
+            "  n.kind AS kind, "
+            "  n.name AS name, "
+            "  n.qualified_name AS qualified_name, "
+            "  n.file_path AS file_path, "
+            "  n.metadata_json AS metadata_json, "
+            "  n.aliases_json AS aliases_json, "
+            "  matches AS matches "
+            "ORDER BY size(matches) DESC, n.kind, coalesce(n.qualified_name, n.name) "
+            "LIMIT $limit"
+        )
+        result = _run_coroutine_sync(
+            driver.execute_query(
+                query,
+                params={
+                    "repo_id": repo_id,
+                    "terms": list(normalized_terms),
+                    "limit": limit,
+                },
+            )
+        )
+        records = _records_from_graphiti_result(result)
+        return tuple(_context_node_from_record(record) for record in records)
+
+
+class GraphitiNeptuneExecutor(BaseCypherExecutor):
+    """Executor backed by Graphiti's vendored NeptuneDriver.
+
+    Uses ``langchain_aws.NeptuneGraph`` / boto3 under the hood, which talks
+    to Neptune via the HTTPS openCypher endpoint (NOT the Bolt protocol).
+    """
+
+    def __init__(
+        self,
+        *,
+        host: Optional[str] = None,
+        port: int = 8182,
+        host_scheme: str = "neptune-db",
+        aoss_host: Optional[str] = None,
+        aoss_port: int = 443,
+        driver: Any = None,
+        build_indices: bool = True,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.host_scheme = host_scheme
+        self.aoss_host = aoss_host
+        self.aoss_port = aoss_port
+        self.driver = driver
+        self.build_indices = build_indices
+        self._indices_ready = False
+
+    def validate_execute_config(self) -> None:
+        if self.driver is not None:
+            return
+        if not self.host:
+            raise RuntimeError(
+                "Graphiti-backed Neptune execution requires "
+                "--neptune-host (or CONTEXT_GRAPH_NEPTUNE_HOST)"
+            )
+
+    def _get_driver(self) -> Any:
+        if self.driver is None:
+            self.validate_execute_config()
+            _ensure_graphiti_vendor_path()
+            try:
+                from graphiti_core.driver.neptune_driver import (
+                    NeptuneDriver as GraphitiNeptuneDriver,
+                )
+            except ImportError as exc:  # pragma: no cover - dependency wiring
+                raise RuntimeError(
+                    "Unable to import vendored Graphiti Neptune driver. "
+                    "Ensure the vendored graphiti package and its dependencies are available "
+                    "(for local dev, install context_graph/requirements-local.txt "
+                    "and pip install langchain-aws opensearch-py)."
+                ) from exc
+
+            neptune_host = f"{self.host_scheme}://{self.host}"
+            self.driver = GraphitiNeptuneDriver(
+                host=neptune_host,
+                port=self.port,
+                aoss_host=self.aoss_host,
+                aoss_port=self.aoss_port,
+            )
+
+        if self.build_indices and not self._indices_ready:
+            _run_coroutine_sync(self.driver.build_indices_and_constraints())
+            self._indices_ready = True
+        return self.driver
+
+    def execute(self, statements: Iterable[CypherStatement]) -> int:
+        driver = self._get_driver()
+        count = 0
+        for statement in statements:
+            _run_coroutine_sync(
+                driver.execute_query(statement.query, params=dict(statement.parameters))
+            )
+            count += 1
+        return count
+
+    def search_context_nodes(
+        self,
+        *,
+        repo_id: str,
+        search_terms: Sequence[str],
+        limit: int = 25,
+    ) -> tuple[EntityNode, ...]:
+        if self.driver is None and not self.host:
+            return ()
+
+        normalized_terms = tuple(
+            dict.fromkeys(term.strip().lower() for term in search_terms if term.strip())
+        )
+        if not normalized_terms:
+            return ()
+
+        driver = self._get_driver()
+        query = (
+            "MATCH (n {repo_id: $repo_id}) WHERE (n:Entity OR n:Episodic) "
+            "  AND NOT n:Episode "
+            "WITH n, "
+            "     toLower(coalesce(n.name, '')) AS lname, "
+            "     toLower(coalesce(n.qualified_name, '')) AS lqualified, "
+            "     toLower(coalesce(n.file_path, '')) AS lfile "
+            "WITH n, [term IN $terms WHERE "
+            "           lname = term OR "
+            "           lqualified = term OR "
+            "           lfile = term OR "
+            "           lname CONTAINS term OR "
+            "           lqualified ENDS WITH '.' + term OR "
+            "           lfile ENDS WITH '/' + term OR "
+            "           lfile ENDS WITH term"
+            "     ] AS matches "
+            "WHERE size(matches) > 0 "
+            "RETURN "
+            "  n.node_id AS node_id, "
+            "  n.repo_id AS repo_id, "
+            "  n.kind AS kind, "
+            "  n.name AS name, "
+            "  n.qualified_name AS qualified_name, "
+            "  n.file_path AS file_path, "
+            "  n.metadata_json AS metadata_json, "
+            "  n.aliases_json AS aliases_json, "
+            "  matches AS matches "
+            "ORDER BY size(matches) DESC, n.kind, coalesce(n.qualified_name, n.name) "
+            "LIMIT $limit"
+        )
+        result = _run_coroutine_sync(
+            driver.execute_query(
+                query,
+                params={
+                    "repo_id": repo_id,
+                    "terms": list(normalized_terms),
+                    "limit": limit,
+                },
+            )
+        )
+        records = _records_from_graphiti_result(result)
+        return tuple(_context_node_from_record(record) for record in records)
 
 
 def _sanitize_relationship_type(edge_type: str) -> str:
@@ -71,6 +436,18 @@ def _node_row(node: CanonicalNode, revision_id: str) -> dict[str, Any]:
     }
 
 
+def _project_row(node: CanonicalNode, *, root_path: str, revision_id: str) -> dict[str, Any]:
+    return {
+        "node_id": node.node_id,
+        "repo_id": node.repo_id,
+        "revision_id": revision_id,
+        "kind": node.kind,
+        "name": node.name,
+        "qualified_name": node.qualified_name,
+        "root_path": root_path,
+    }
+
+
 def _edge_row(edge: CanonicalEdge, revision_id: str) -> dict[str, Any]:
     return {
         "edge_id": edge.edge_id,
@@ -87,6 +464,77 @@ def _edge_row(edge: CanonicalEdge, revision_id: str) -> dict[str, Any]:
 
 def _json_list(values: Sequence[str]) -> str:
     return json.dumps(list(values), separators=(",", ":"))
+
+
+def _normalized_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def _summary_text(*parts: Any) -> str:
+    return " ".join(
+        normalized
+        for normalized in (_normalized_text(part) for part in parts)
+        if normalized
+    )
+
+
+def _aliases_from_row(row: Mapping[str, Any]) -> tuple[str, ...]:
+    payload = row.get("aliases_json")
+    if isinstance(payload, str):
+        values = _maybe_json_list(payload)
+        return tuple(_normalized_text(value) for value in values if _normalized_text(value))
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        return tuple(_normalized_text(value) for value in payload if _normalized_text(value))
+    return ()
+
+
+def _graphiti_entity_summary(row: Mapping[str, Any]) -> str:
+    aliases = _aliases_from_row(row)
+    alias_text = ""
+    if aliases:
+        alias_text = f"aliases {' '.join(aliases)}"
+    return _summary_text(
+        row.get("kind"),
+        row.get("name"),
+        f"qualified {row.get('qualified_name')}" if row.get("qualified_name") else "",
+        f"file {row.get('file_path')}" if row.get("file_path") else "",
+        f"root {row.get('root_path')}" if row.get("root_path") else "",
+        alias_text,
+    )
+
+
+def _graphiti_commit_summary(row: Mapping[str, Any]) -> str:
+    return _summary_text(
+        row.get("kind"),
+        row.get("name"),
+        f"subject {row.get('subject')}" if row.get("subject") else "",
+        f"branch {row.get('branch')}" if row.get("branch") else "",
+        f"author {row.get('author_name')}" if row.get("author_name") else "",
+    )
+
+
+def _graphiti_external_entity_name(row: Mapping[str, Any]) -> str:
+    title = _normalized_text(row.get("title"))
+    if title:
+        return title
+    kind = _normalized_text(row.get("kind"))
+    number = row.get("number")
+    if kind and number is not None:
+        return f"{kind} #{number}"
+    return _normalized_text(row.get("external_id"))
+
+
+def _graphiti_external_entity_summary(row: Mapping[str, Any]) -> str:
+    return _summary_text(
+        row.get("kind"),
+        row.get("name"),
+        f"number {row.get('number')}" if row.get("number") is not None else "",
+        f"state {row.get('state')}" if row.get("state") else "",
+        f"repo {row.get('github_repo')}" if row.get("github_repo") else "",
+        f"url {row.get('url')}" if row.get("url") else "",
+    )
 
 
 def _touch_row(
@@ -148,31 +596,31 @@ def _external_link_row(repo_id: str, link: Any) -> dict[str, Any]:
     }
 
 
-def _episode_row(episode: EpisodeRecord) -> dict[str, Any]:
+def _episode_row(episode: EpisodicNode) -> dict[str, Any]:
     return {
-        "node_id": episode.node_id,
-        "episode_id": episode.episode_id,
-        "repo_id": episode.repo_id,
-        "source_type": episode.source_type,
-        "source_id": episode.source_id,
+        "node_id": episode.uuid,
+        "episode_id": episode.name,
+        "repo_id": episode.group_id,
+        "source_type": episode.source.value,
+        "source_id": episode.source_description,
         "author": episode.author,
-        "created_at": episode.created_at,
-        "updated_at": episode.updated_at,
-        "text": episode.text,
-        "metadata_json": episode.metadata_json(),
+        "created_at": str(episode.created_at),
+        "updated_at": str(episode.valid_at),
+        "text": episode.content,
+        "metadata_json": json.dumps(episode.episode_metadata, separators=(",", ":"), sort_keys=True),
     }
 
 
-def _context_node_row(node: ContextNodeRef) -> dict[str, Any]:
+def _context_node_row(node: EntityNode) -> dict[str, Any]:
     return {
-        "node_id": node.node_id,
-        "repo_id": node.repo_id,
-        "kind": node.kind,
+        "node_id": node.uuid,
+        "repo_id": node.group_id,
+        "kind": entity_node_kind(node),
         "name": node.name,
-        "qualified_name": node.qualified_name,
-        "file_path": node.file_path,
-        "aliases_json": json.dumps(list(node.aliases), separators=(",", ":")),
-        "metadata_json": json.dumps(dict(node.metadata), separators=(",", ":"), sort_keys=True),
+        "qualified_name": entity_node_qualified_name(node),
+        "file_path": entity_node_file_path(node),
+        "aliases_json": json.dumps(list(entity_node_aliases(node)), separators=(",", ":")),
+        "metadata_json": json.dumps(dict(node.attributes), separators=(",", ":"), sort_keys=True),
     }
 
 
@@ -185,20 +633,21 @@ def _mention_row(mention: MentionRecord) -> dict[str, Any]:
     }
 
 
-def _fact_row(fact: FactRecord) -> dict[str, Any]:
+def _fact_row(fact: EntityEdge) -> dict[str, Any]:
     return {
-        "repo_id": fact.repo_id,
-        "fact_id": fact.fact_id,
-        "source_node_id": fact.source_node_id,
-        "target_node_id": fact.target_node_id,
-        "relation_type": fact.relation_type,
+        "repo_id": fact.group_id,
+        "fact_id": fact.uuid,
+        "source_node_id": fact.source_node_uuid,
+        "target_node_id": fact.target_node_uuid,
+        "relation_type": fact.name,
         "fact": fact.fact,
-        "episode_ids_json": json.dumps(list(fact.episode_ids), separators=(",", ":")),
-        "created_at": fact.created_at,
-        "valid_at": fact.valid_at,
-        "invalid_at": fact.invalid_at,
-        "expired_at": fact.expired_at,
-        "metadata_json": fact.metadata_json(),
+        "episodes": list(fact.episodes),
+        "episode_ids_json": json.dumps(list(fact.episodes), separators=(",", ":")),
+        "created_at": str(fact.created_at),
+        "valid_at": str(fact.valid_at) if fact.valid_at else None,
+        "invalid_at": str(fact.invalid_at) if fact.invalid_at else None,
+        "expired_at": str(fact.expired_at) if fact.expired_at else None,
+        "metadata_json": json.dumps(dict(fact.attributes), separators=(",", ":"), sort_keys=True),
     }
 
 
@@ -215,8 +664,82 @@ def _fact_invalidation_row(invalidation: FactInvalidation) -> dict[str, Any]:
 
 
 class BaseCypherGraphSink:
-    def __init__(self, *, batch_size: int = 250) -> None:
+    def __init__(
+        self,
+        *,
+        batch_size: int = 250,
+        executor: BaseCypherExecutor | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+    ) -> None:
         self.batch_size = batch_size
+        self.executor = executor
+        self.embedding_provider = embedding_provider
+
+    def _attach_embeddings(
+        self,
+        rows: Sequence[dict[str, Any]],
+        *,
+        text_key: str,
+        embedding_key: str,
+    ) -> list[dict[str, Any]]:
+        materialized = [dict(row) for row in rows]
+        for row in materialized:
+            row.setdefault(embedding_key, None)
+
+        if self.embedding_provider is None:
+            return materialized
+
+        positions: list[int] = []
+        texts: list[str] = []
+        for index, row in enumerate(materialized):
+            text = _normalized_text(row.get(text_key))
+            row[text_key] = text if text else row.get(text_key)
+            if text:
+                positions.append(index)
+                texts.append(text)
+
+        if not texts:
+            return materialized
+
+        embeddings = self.embedding_provider.embed_texts(texts)
+        if len(embeddings) != len(texts):
+            raise RuntimeError(
+                f"embedding provider returned {len(embeddings)} vectors for {len(texts)} texts"
+            )
+
+        for index, embedding in zip(positions, embeddings, strict=True):
+            materialized[index][embedding_key] = list(embedding)
+
+        return materialized
+
+    def _prepare_graphiti_entity_rows(
+        self,
+        rows: Sequence[dict[str, Any]],
+        *,
+        observed_at: str,
+        summary_builder,
+        name_builder=None,
+        created_at_builder=None,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["uuid"] = str(item["node_id"])
+            item["group_id"] = str(item["repo_id"])
+            name = name_builder(item) if name_builder is not None else item.get("name")
+            item["name"] = _normalized_text(name)
+            created_at = created_at_builder(item, observed_at) if created_at_builder else observed_at
+            item["created_at"] = _normalized_text(created_at) or observed_at
+            item["summary"] = summary_builder(item)
+            prepared.append(item)
+        return self._attach_embeddings(prepared, text_key="name", embedding_key="name_embedding")
+
+    def _prepare_graphiti_fact_rows(self, rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared = [dict(row) for row in rows]
+        for row in prepared:
+            row["uuid"] = row["fact_id"]
+            row["group_id"] = str(row["repo_id"])
+        return self._attach_embeddings(prepared, text_key="fact", embedding_key="fact_embedding")
 
     def plan_apply_diff(
         self,
@@ -232,28 +755,36 @@ class BaseCypherGraphSink:
         )
         if project_node is None:
             raise ValueError("snapshot must contain a Project node")
+        project_row = self._prepare_graphiti_entity_rows(
+            [
+                _project_row(
+                    project_node,
+                    root_path=snapshot.root_path,
+                    revision_id=snapshot.revision_id,
+                )
+            ],
+            observed_at=observed_at,
+            summary_builder=_graphiti_entity_summary,
+        )[0]
         statements: list[CypherStatement] = [
             CypherStatement(
                 query=(
-                    "MERGE (project:CodeNode:Project:ContextNode {node_id: $node_id}) "
+                    "MERGE (project:CodeNode:Project:Entity {node_id: $node_id}) "
+                    "ON CREATE SET project.created_at = $created_at "
                     "SET project.repo_id = $repo_id, "
+                    "    project.uuid = $uuid, "
+                    "    project.group_id = $group_id, "
                     "    project.kind = 'Project', "
                     "    project.name = $name, "
                     "    project.qualified_name = $qualified_name, "
                     "    project.root_path = $root_path, "
+                    "    project.summary = $summary, "
+                    "    project.name_embedding = $name_embedding, "
                     "    project.active = true, "
                     "    project.latest_revision_id = $revision_id, "
                     "    project.updated_at = $observed_at"
                 ),
-                parameters={
-                    "node_id": project_node.node_id,
-                    "repo_id": snapshot.repo_id,
-                    "name": project_node.name,
-                    "qualified_name": project_node.qualified_name,
-                    "root_path": snapshot.root_path,
-                    "revision_id": snapshot.revision_id,
-                    "observed_at": observed_at,
-                },
+                parameters={**project_row, "observed_at": observed_at},
             )
         ]
 
@@ -307,16 +838,26 @@ class BaseCypherGraphSink:
         for kind, nodes in sorted(by_kind.items()):
             label = _sanitize_node_label(kind)
             for batch in _chunked((_node_row(node, snapshot.revision_id) for node in nodes), self.batch_size):
+                enriched_batch = self._prepare_graphiti_entity_rows(
+                    batch,
+                    observed_at=observed_at,
+                    summary_builder=_graphiti_entity_summary,
+                )
                 statements.append(
                     CypherStatement(
                         query=(
                             f"UNWIND $rows AS row "
-                            f"MERGE (n:CodeNode:{label}:ContextNode {{node_id: row.node_id}}) "
+                            f"MERGE (n:CodeNode:{label}:Entity {{node_id: row.node_id}}) "
+                            "ON CREATE SET n.created_at = row.created_at "
                             "SET n.repo_id = row.repo_id, "
+                            "    n.uuid = row.uuid, "
+                            "    n.group_id = row.group_id, "
                             "    n.kind = row.kind, "
                             "    n.name = row.name, "
                             "    n.qualified_name = row.qualified_name, "
                             "    n.file_path = row.file_path, "
+                            "    n.summary = row.summary, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.start_line = row.start_line, "
                             "    n.end_line = row.end_line, "
                             "    n.properties_json = row.properties_json, "
@@ -324,7 +865,7 @@ class BaseCypherGraphSink:
                             "    n.last_seen_revision = row.revision_id, "
                             "    n.updated_at = $observed_at"
                         ),
-                        parameters={"rows": batch, "observed_at": observed_at},
+                        parameters={"rows": enriched_batch, "observed_at": observed_at},
                     )
                 )
                 statements.append(
@@ -353,7 +894,7 @@ class BaseCypherGraphSink:
                             "  observed_at: $observed_at"
                             "}]->(v)"
                         ),
-                        parameters={"rows": batch, "observed_at": observed_at},
+                        parameters={"rows": enriched_batch, "observed_at": observed_at},
                     )
                 )
 
@@ -432,8 +973,15 @@ class BaseCypherGraphSink:
         statements: list[CypherStatement] = [
             CypherStatement(
                 query=(
-                    "MERGE (commit:Commit:ContextNode {repo_id: $repo_id, sha: $sha}) "
+                    "MERGE (commit:Commit:Entity {repo_id: $repo_id, sha: $sha}) "
+                    "ON CREATE SET commit.created_at = $created_at "
                     "SET commit.node_id = $node_id, "
+                    "    commit.uuid = $uuid, "
+                    "    commit.group_id = $group_id, "
+                    "    commit.kind = $kind, "
+                    "    commit.name = $name, "
+                    "    commit.summary = $summary, "
+                    "    commit.name_embedding = $name_embedding, "
                     "    commit.branch = $branch, "
                     "    commit.author_name = $author_name, "
                     "    commit.author_email = $author_email, "
@@ -447,9 +995,32 @@ class BaseCypherGraphSink:
                     "    commit.updated_at = $observed_at"
                 ),
                 parameters={
-                    "repo_id": snapshot.repo_id,
+                    **self._prepare_graphiti_entity_rows(
+                        [
+                            {
+                                "repo_id": snapshot.repo_id,
+                                "sha": commit.sha,
+                                "node_id": f"commit:{snapshot.repo_id}:{commit.sha}",
+                                "kind": "Commit",
+                                "name": commit.sha[:12],
+                                "subject": commit.subject,
+                                "branch": commit.branch,
+                                "author_name": commit.author_name,
+                                "author_email": commit.author_email,
+                                "authored_at": commit.authored_at,
+                                "committed_at": commit.committed_at,
+                                "body": commit.body,
+                                "parent_shas_json": _json_list(commit.parent_shas),
+                                "changed_files_json": _json_list(commit.changed_files),
+                            }
+                        ],
+                        observed_at=observed_at,
+                        summary_builder=_graphiti_commit_summary,
+                        created_at_builder=lambda row, fallback: (
+                            row.get("committed_at") or row.get("authored_at") or fallback
+                        ),
+                    )[0],
                     "sha": commit.sha,
-                    "node_id": f"commit:{snapshot.repo_id}:{commit.sha}",
                     "branch": commit.branch,
                     "author_name": commit.author_name,
                     "author_email": commit.author_email,
@@ -479,23 +1050,35 @@ class BaseCypherGraphSink:
         ]
 
         if commit.parent_shas:
-            parent_rows = [
-                {
-                    "repo_id": snapshot.repo_id,
-                    "parent_sha": parent_sha,
-                    "sha": commit.sha,
-                }
-                for parent_sha in commit.parent_shas
-            ]
+            parent_rows = self._prepare_graphiti_entity_rows(
+                [
+                    {
+                        "repo_id": snapshot.repo_id,
+                        "parent_sha": parent_sha,
+                        "sha": commit.sha,
+                        "node_id": f"commit:{snapshot.repo_id}:{parent_sha}",
+                        "kind": "Commit",
+                        "name": parent_sha[:12],
+                    }
+                    for parent_sha in commit.parent_shas
+                ],
+                observed_at=observed_at,
+                summary_builder=_graphiti_commit_summary,
+            )
             statements.append(
                 CypherStatement(
-                        query=(
-                            "UNWIND $rows AS row "
-                        "MERGE (parent:Commit:ContextNode {repo_id: row.repo_id, sha: row.parent_sha}) "
-                        "ON CREATE SET parent.placeholder = true, "
-                        "              parent.node_id = 'commit:' + row.repo_id + ':' + row.parent_sha, "
-                        "              parent.updated_at = $observed_at "
-                        "SET parent.node_id = 'commit:' + row.repo_id + ':' + row.parent_sha, "
+                    query=(
+                        "UNWIND $rows AS row "
+                        "MERGE (parent:Commit:Entity {repo_id: row.repo_id, sha: row.parent_sha}) "
+                        "ON CREATE SET parent.created_at = row.created_at, "
+                        "              parent.placeholder = true "
+                        "SET parent.node_id = row.node_id, "
+                        "    parent.uuid = row.uuid, "
+                        "    parent.group_id = row.group_id, "
+                        "    parent.kind = row.kind, "
+                        "    parent.name = row.name, "
+                        "    parent.summary = row.summary, "
+                        "    parent.name_embedding = row.name_embedding, "
                         "    parent.updated_at = $observed_at "
                         "WITH row "
                         "MATCH (parent:Commit {repo_id: row.repo_id, sha: row.parent_sha}) "
@@ -606,27 +1189,39 @@ class BaseCypherGraphSink:
         for kind, entities in sorted(by_kind.items()):
             label = _sanitize_node_label(kind)
             for batch in _chunked((_external_entity_row(entity) for entity in entities), self.batch_size):
+                enriched_batch = self._prepare_graphiti_entity_rows(
+                    batch,
+                    observed_at=observed_at,
+                    summary_builder=_graphiti_external_entity_summary,
+                    name_builder=_graphiti_external_entity_name,
+                    created_at_builder=lambda row, fallback: row.get("created_at") or fallback,
+                )
                 statements.append(
                     CypherStatement(
                         query=(
                             f"UNWIND $rows AS row "
-                            f"MERGE (n:GitHubEntity:{label}:ContextNode {{node_id: row.node_id}}) "
+                            f"MERGE (n:GitHubEntity:{label}:Entity {{node_id: row.node_id}}) "
+                            "ON CREATE SET n.created_at = row.created_at "
                             "SET n.repo_id = row.repo_id, "
+                            "    n.uuid = row.uuid, "
+                            "    n.group_id = row.group_id, "
                             "    n.github_repo = row.github_repo, "
                             "    n.kind = row.kind, "
+                            "    n.name = row.name, "
+                            "    n.summary = row.summary, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.external_id = row.external_id, "
                             "    n.number = row.number, "
                             "    n.url = row.url, "
                             "    n.title = row.title, "
                             "    n.state = row.state, "
                             "    n.author_login = row.author_login, "
-                            "    n.created_at = row.created_at, "
                             "    n.updated_at = row.updated_at, "
                             "    n.metadata_json = row.metadata_json, "
                             "    n.raw_json = row.raw_json, "
                             "    n.last_synced_at = $observed_at"
                         ),
-                        parameters={"rows": batch, "observed_at": observed_at},
+                        parameters={"rows": enriched_batch, "observed_at": observed_at},
                     )
                 )
 
@@ -701,7 +1296,7 @@ class BaseCypherGraphSink:
 
     def plan_upsert_episodes(
         self,
-        episodes: Sequence[EpisodeRecord],
+        episodes: Sequence[EpisodicNode],
         *,
         observed_at: Optional[str] = None,
     ) -> list[CypherStatement]:
@@ -714,7 +1309,7 @@ class BaseCypherGraphSink:
                 CypherStatement(
                     query=(
                         "UNWIND $rows AS row "
-                        "MERGE (e:Episode:ContextNode {node_id: row.node_id}) "
+                        "MERGE (e:Episode:Episodic {node_id: row.node_id}) "
                         "SET e.episode_id = row.episode_id, "
                         "    e.repo_id = row.repo_id, "
                         "    e.source_type = row.source_type, "
@@ -744,7 +1339,7 @@ class BaseCypherGraphSink:
             CypherStatement(
                 query=(
                     "MATCH (episode:Episode {node_id: $episode_node_id}) "
-                    "MATCH (target:ContextNode {node_id: $target_node_id}) "
+                    "MATCH (target:Entity {node_id: $target_node_id}) "
                     "MERGE (episode)-[r:ON]->(target) "
                     "SET r.repo_id = $repo_id, "
                     "    r.observed_at = $observed_at"
@@ -760,35 +1355,45 @@ class BaseCypherGraphSink:
 
     def plan_upsert_context_nodes(
         self,
-        nodes: Sequence[ContextNodeRef],
+        nodes: Sequence[EntityNode],
         *,
         observed_at: Optional[str] = None,
     ) -> list[CypherStatement]:
         if not nodes:
             return []
         observed_at = observed_at or datetime.now(timezone.utc).isoformat()
-        by_kind: dict[str, list[ContextNodeRef]] = {}
+        by_kind: dict[str, list[EntityNode]] = {}
         for node in nodes:
-            by_kind.setdefault(node.kind, []).append(node)
+            by_kind.setdefault(entity_node_kind(node), []).append(node)
         statements: list[CypherStatement] = []
         for kind, grouped_nodes in sorted(by_kind.items()):
             label = _sanitize_node_label(kind)
             for batch in _chunked((_context_node_row(node) for node in grouped_nodes), self.batch_size):
+                enriched_batch = self._prepare_graphiti_entity_rows(
+                    batch,
+                    observed_at=observed_at,
+                    summary_builder=_graphiti_entity_summary,
+                )
                 statements.append(
                     CypherStatement(
                         query=(
                             f"UNWIND $rows AS row "
-                            f"MERGE (n:ContextNode:{label} {{node_id: row.node_id}}) "
+                            f"MERGE (n:Entity:{label} {{node_id: row.node_id}}) "
+                            "ON CREATE SET n.created_at = row.created_at "
                             "SET n.repo_id = row.repo_id, "
+                            "    n.uuid = row.uuid, "
+                            "    n.group_id = row.group_id, "
                             "    n.kind = row.kind, "
                             "    n.name = row.name, "
                             "    n.qualified_name = row.qualified_name, "
                             "    n.file_path = row.file_path, "
                             "    n.aliases_json = row.aliases_json, "
+                            "    n.summary = row.summary, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.metadata_json = row.metadata_json, "
                             "    n.updated_at = $observed_at"
                         ),
-                        parameters={"rows": batch, "observed_at": observed_at},
+                        parameters={"rows": enriched_batch, "observed_at": observed_at},
                     )
                 )
         return statements
@@ -809,7 +1414,7 @@ class BaseCypherGraphSink:
                     query=(
                         "UNWIND $rows AS row "
                         "MATCH (episode:Episode {node_id: row.episode_node_id}) "
-                        "MATCH (target:ContextNode {node_id: row.target_node_id}) "
+                        "MATCH (target:Entity {node_id: row.target_node_id}) "
                         "MERGE (episode)-[r:MENTIONS {repo_id: row.repo_id, target_node_id: row.target_node_id}]->(target) "
                         "SET r.metadata_json = row.metadata_json, "
                         "    r.observed_at = $observed_at"
@@ -834,7 +1439,7 @@ class BaseCypherGraphSink:
                 CypherStatement(
                     query=(
                         "UNWIND $rows AS row "
-                        "MATCH (source:ContextNode {node_id: row.source_node_id})-[r:RELATES_TO]->(target:ContextNode {node_id: row.target_node_id}) "
+                        "MATCH (source:Entity {node_id: row.source_node_id})-[r:RELATES_TO]->(target:Entity {node_id: row.target_node_id}) "
                         "WHERE r.repo_id = row.repo_id "
                         "  AND r.name = row.relation_type "
                         "  AND r.expired_at IS NULL "
@@ -849,7 +1454,7 @@ class BaseCypherGraphSink:
 
     def plan_apply_fact_edges(
         self,
-        facts: Sequence[FactRecord],
+        facts: Sequence[EntityEdge],
         *,
         observed_at: Optional[str] = None,
     ) -> list[CypherStatement]:
@@ -858,16 +1463,21 @@ class BaseCypherGraphSink:
         observed_at = observed_at or datetime.now(timezone.utc).isoformat()
         statements: list[CypherStatement] = []
         for batch in _chunked((_fact_row(fact) for fact in facts), self.batch_size):
+            enriched_batch = self._prepare_graphiti_fact_rows(batch)
             statements.append(
                 CypherStatement(
                     query=(
                         "UNWIND $rows AS row "
-                        "MATCH (source:ContextNode {node_id: row.source_node_id}) "
-                        "MATCH (target:ContextNode {node_id: row.target_node_id}) "
+                        "MATCH (source:Entity {node_id: row.source_node_id}) "
+                        "MATCH (target:Entity {node_id: row.target_node_id}) "
                         "MERGE (source)-[r:RELATES_TO {fact_id: row.fact_id}]->(target) "
                         "SET r.repo_id = row.repo_id, "
+                        "    r.uuid = row.uuid, "
+                        "    r.group_id = row.group_id, "
                         "    r.name = row.relation_type, "
                         "    r.fact = row.fact, "
+                        "    r.fact_embedding = row.fact_embedding, "
+                        "    r.episodes = row.episodes, "
                         "    r.episode_ids_json = row.episode_ids_json, "
                         "    r.created_at = row.created_at, "
                         "    r.valid_at = row.valid_at, "
@@ -876,7 +1486,7 @@ class BaseCypherGraphSink:
                         "    r.metadata_json = row.metadata_json, "
                         "    r.updated_at = $observed_at"
                     ),
-                    parameters={"rows": batch, "observed_at": observed_at},
+                    parameters={"rows": enriched_batch, "observed_at": observed_at},
                 )
             )
         return statements
@@ -1069,8 +1679,8 @@ class BaseCypherGraphSink:
             ),
             CypherStatement(
                 query=(
-                    "MATCH (n:ContextNode {repo_id: $repo_id}) "
-                    "WHERE NOT n:Episode "
+                    "MATCH (n {repo_id: $repo_id}) WHERE (n:Entity OR n:Episodic) "
+                    "  AND NOT n:Episode "
                     "  AND NOT n:GitHubEntity "
                     "  AND NOT n:Commit "
                     "  AND NOT n:CodeNode "
@@ -1081,10 +1691,14 @@ class BaseCypherGraphSink:
         ]
 
     def validate_execute_config(self) -> None:
+        if self.executor is not None:
+            self.executor.validate_execute_config()
         return None
 
     def execute(self, statements: Iterable[CypherStatement]) -> int:
-        raise NotImplementedError
+        if self.executor is None:
+            raise NotImplementedError
+        return self.executor.execute(statements)
 
     def search_context_nodes(
         self,
@@ -1092,9 +1706,14 @@ class BaseCypherGraphSink:
         repo_id: str,
         search_terms: Sequence[str],
         limit: int = 25,
-    ) -> tuple[ContextNodeRef, ...]:
-        _ = (repo_id, search_terms, limit)
-        return ()
+    ) -> tuple[EntityNode, ...]:
+        if self.executor is None:
+            return ()
+        return self.executor.search_context_nodes(
+            repo_id=repo_id,
+            search_terms=search_terms,
+            limit=limit,
+        )
 
 
 class Neo4jGraphSink(BaseCypherGraphSink):
@@ -1106,232 +1725,75 @@ class Neo4jGraphSink(BaseCypherGraphSink):
         password: Optional[str] = None,
         database: Optional[str] = None,
         driver: Any = None,
+        executor: BaseCypherExecutor | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
         batch_size: int = 250,
     ) -> None:
-        super().__init__(batch_size=batch_size)
+        super().__init__(
+            batch_size=batch_size,
+            embedding_provider=embedding_provider,
+            executor=executor
+            or GraphitiNeo4jExecutor(
+                uri=uri,
+                username=username,
+                password=password,
+                database=database,
+                driver=driver,
+            ),
+        )
         self.uri = uri
         self.username = username
         self.password = password
         self.database = database
         self.driver = driver
 
-    def validate_execute_config(self) -> None:
-        if self.driver is not None:
-            return
-        if not self.uri or self.username is None or self.password is None:
-            raise RuntimeError(
-                "Neo4j execution requires either an injected driver or "
-                "--neo4j-uri/--neo4j-user/--neo4j-password "
-                "(or NEO4J_URI/NEO4J_USERNAME or NEO4J_USER/NEO4J_PASSWORD)"
-            )
-
-    def execute(self, statements: Iterable[CypherStatement]) -> int:
-        try:
-            from neo4j import GraphDatabase  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("neo4j driver is required to execute Cypher statements") from exc
-
-        driver = self.driver
-        managed_driver = False
-        if driver is None:
-            if not self.uri or self.username is None or self.password is None:
-                raise RuntimeError("Neo4jGraphSink requires either a driver or uri/username/password")
-            driver = GraphDatabase.driver(self.uri, auth=(self.username, self.password))
-            managed_driver = True
-
-        count = 0
-        session_kwargs = {"database": self.database} if self.database else {}
-        try:
-            with driver.session(**session_kwargs) as session:
-                for statement in statements:
-                    session.run(statement.query, statement.parameters).consume()
-                    count += 1
-        finally:
-            if managed_driver:
-                driver.close()
-        return count
-
-    def search_context_nodes(
-        self,
-        *,
-        repo_id: str,
-        search_terms: Sequence[str],
-        limit: int = 25,
-    ) -> tuple[ContextNodeRef, ...]:
-        return _search_context_nodes_with_neo4j(
-            driver=self.driver,
-            uri=self.uri,
-            username=self.username,
-            password=self.password,
-            database=self.database,
-            repo_id=repo_id,
-            search_terms=search_terms,
-            limit=limit,
-        )
-
 
 class NeptuneGraphSink(BaseCypherGraphSink):
+    """Neptune graph sink backed by Graphiti's NeptuneDriver.
+
+    Uses the Neptune openCypher HTTPS endpoint via langchain_aws / boto3,
+    not the Neo4j Bolt protocol.
+    """
+
     def __init__(
         self,
         *,
         host: Optional[str] = None,
         port: int = 8182,
+        host_scheme: str = "neptune-db",
+        aoss_host: Optional[str] = None,
+        aoss_port: int = 443,
         driver: Any = None,
-        encrypted: bool = True,
+        executor: BaseCypherExecutor | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
         batch_size: int = 250,
     ) -> None:
-        super().__init__(batch_size=batch_size)
+        super().__init__(
+            batch_size=batch_size,
+            embedding_provider=embedding_provider,
+            executor=executor
+            or GraphitiNeptuneExecutor(
+                host=host,
+                port=port,
+                host_scheme=host_scheme,
+                aoss_host=aoss_host,
+                aoss_port=aoss_port,
+                driver=driver,
+            ),
+        )
         self.host = host
         self.port = port
+        self.host_scheme = host_scheme
+        self.aoss_host = aoss_host
+        self.aoss_port = aoss_port
         self.driver = driver
-        self.encrypted = encrypted
-
-    def validate_execute_config(self) -> None:
-        if self.driver is not None:
-            return
-        if not self.host:
-            raise RuntimeError(
-                "Neptune execution requires either an injected driver or "
-                "--neptune-host (or CONTEXT_GRAPH_NEPTUNE_HOST)"
-            )
-
-    def execute(self, statements: Iterable[CypherStatement]) -> int:
-        try:
-            from neo4j import GraphDatabase  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("neo4j driver is required to execute Neptune Bolt statements") from exc
-
-        driver = self.driver
-        managed_driver = False
-        if driver is None:
-            if not self.host:
-                raise RuntimeError("NeptuneGraphSink requires either a driver or a host")
-            uri = f"bolt://{self.host}:{self.port}"
-            driver = GraphDatabase.driver(uri, auth=("", ""), encrypted=self.encrypted)
-            managed_driver = True
-
-        count = 0
-        try:
-            with driver.session() as session:
-                for statement in statements:
-                    session.run(statement.query, statement.parameters).consume()
-                    count += 1
-        finally:
-            if managed_driver:
-                driver.close()
-        return count
-
-    def search_context_nodes(
-        self,
-        *,
-        repo_id: str,
-        search_terms: Sequence[str],
-        limit: int = 25,
-    ) -> tuple[ContextNodeRef, ...]:
-        return _search_context_nodes_with_neo4j(
-            driver=self.driver,
-            uri=f"bolt://{self.host}:{self.port}" if self.host else None,
-            username="",
-            password="",
-            database=None,
-            repo_id=repo_id,
-            search_terms=search_terms,
-            limit=limit,
-            encrypted=self.encrypted,
-        )
 
 
-def _search_context_nodes_with_neo4j(
-    *,
-    driver: Any,
-    uri: str | None,
-    username: str | None,
-    password: str | None,
-    database: str | None,
-    repo_id: str,
-    search_terms: Sequence[str],
-    limit: int,
-    encrypted: bool | None = None,
-) -> tuple[ContextNodeRef, ...]:
-    normalized_terms = tuple(dict.fromkeys(term.strip().lower() for term in search_terms if term.strip()))
-    if not normalized_terms:
-        return ()
 
-    try:
-        from neo4j import GraphDatabase  # type: ignore
-    except ImportError:
-        return ()
-
-    managed_driver = False
-    active_driver = driver
-    if active_driver is None:
-        if not uri:
-            return ()
-        auth = None
-        if username is not None and password is not None:
-            auth = (username, password)
-        kwargs: dict[str, Any] = {}
-        if encrypted is not None:
-            kwargs["encrypted"] = encrypted
-        active_driver = GraphDatabase.driver(uri, auth=auth, **kwargs)
-        managed_driver = True
-
-    query = (
-        "MATCH (n:ContextNode {repo_id: $repo_id}) "
-        "WHERE NOT n:Episode "
-        "WITH n, "
-        "     toLower(coalesce(n.name, '')) AS lname, "
-        "     toLower(coalesce(n.qualified_name, '')) AS lqualified, "
-        "     toLower(coalesce(n.file_path, '')) AS lfile "
-        "WITH n, [term IN $terms WHERE "
-        "           lname = term OR "
-        "           lqualified = term OR "
-        "           lfile = term OR "
-        "           lname CONTAINS term OR "
-        "           lqualified ENDS WITH '.' + term OR "
-        "           lfile ENDS WITH '/' + term OR "
-        "           lfile ENDS WITH term"
-        "     ] AS matches "
-        "WHERE size(matches) > 0 "
-        "RETURN "
-        "  n.node_id AS node_id, "
-        "  n.repo_id AS repo_id, "
-        "  n.kind AS kind, "
-        "  n.name AS name, "
-        "  n.qualified_name AS qualified_name, "
-        "  n.file_path AS file_path, "
-        "  n.metadata_json AS metadata_json, "
-        "  n.aliases_json AS aliases_json, "
-        "  matches AS matches "
-        "ORDER BY size(matches) DESC, n.kind, coalesce(n.qualified_name, n.name) "
-        "LIMIT $limit"
-    )
-
-    session_kwargs = {"database": database} if database else {}
-    try:
-        with active_driver.session(**session_kwargs) as session:
-            records = session.run(
-                query,
-                {
-                    "repo_id": repo_id,
-                    "terms": list(normalized_terms),
-                    "limit": limit,
-                },
-            )
-            nodes = tuple(_context_node_from_record(record) for record in records)
-    except Exception:
-        nodes = ()
-    finally:
-        if managed_driver:
-            active_driver.close()
-
-    return nodes
-
-
-def _context_node_from_record(record: Any) -> ContextNodeRef:
+def _context_node_from_record(record: Any) -> EntityNode:
     metadata = _maybe_json_dict(record.get("metadata_json"))
     aliases_payload = _maybe_json_list(record.get("aliases_json"))
-    return ContextNodeRef(
+    return make_entity_node(
         node_id=str(record.get("node_id")),
         repo_id=str(record.get("repo_id")),
         kind=str(record.get("kind")),

@@ -4,7 +4,14 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Mapping, Sequence
 
-from .episodes import ContextNodeRef, FactInvalidation, FactRecord
+from .episodes import (
+    EntityNode,
+    FactInvalidation,
+    EntityEdge,
+    entity_node_file_path,
+    entity_node_kind,
+    entity_node_searchable_terms,
+)
 from .models import canonical_json
 
 
@@ -53,46 +60,43 @@ class ProfileDeactivation:
 
 
 def semantic_fact_profile_from_fact(
-    fact: FactRecord,
+    fact: EntityEdge,
     *,
-    source: ContextNodeRef | None,
-    target: ContextNodeRef | None,
+    source: EntityNode | None,
+    target: EntityNode | None,
 ) -> ProfileRecord:
-    source_name = source.name if source else fact.source_node_id
-    target_name = target.name if target else fact.target_node_id
-    source_kind = source.kind if source else _string_or_none(fact.metadata.get("source_kind"))
-    target_kind = target.kind if target else _string_or_none(fact.metadata.get("target_kind"))
-    relation_label = _relation_label(fact.relation_type)
-    value_text = (
-        f"{source_kind or 'Entity'} {source_name} {relation_label} "
-        f"{target_kind or 'Entity'} {target_name}. {fact.fact}"
-    )
+    source_name = source.name if source else fact.source_node_uuid
+    target_name = target.name if target else fact.target_node_uuid
+    source_kind = entity_node_kind(source) if source else _string_or_none(fact.attributes.get("source_kind"))
+    target_kind = entity_node_kind(target) if target else _string_or_none(fact.attributes.get("target_kind"))
+    relation_label = _relation_label(fact.name)
+    value_text = fact.fact
     metadata = {
-        "fact_id": fact.fact_id,
-        "episode_ids": list(fact.episode_ids),
+        "fact_id": fact.uuid,
+        "episode_ids": list(fact.episodes),
         "source_name": source_name,
         "target_name": target_name,
         "source_kind": source_kind,
         "target_kind": target_kind,
-        "created_at": fact.created_at,
-        "valid_at": fact.valid_at,
-        "invalid_at": fact.invalid_at,
-        "expired_at": fact.expired_at,
+        "created_at": str(fact.created_at),
+        "valid_at": str(fact.valid_at) if fact.valid_at else None,
+        "invalid_at": str(fact.invalid_at) if fact.invalid_at else None,
+        "expired_at": str(fact.expired_at) if fact.expired_at else None,
     }
-    if source and source.file_path:
-        metadata["source_file_path"] = source.file_path
-    if target and target.file_path:
-        metadata["target_file_path"] = target.file_path
+    if source and entity_node_file_path(source):
+        metadata["source_file_path"] = entity_node_file_path(source)
+    if target and entity_node_file_path(target):
+        metadata["target_file_path"] = entity_node_file_path(target)
     return ProfileRecord(
-        profile_id=f"profile:{fact.repo_id}:{SEMANTIC_FACT_PROFILE_KIND}:{fact.fact_id}",
-        repo_id=fact.repo_id,
+        profile_id=f"profile:{fact.group_id}:{SEMANTIC_FACT_PROFILE_KIND}:{fact.uuid}",
+        repo_id=fact.group_id,
         profile_kind=SEMANTIC_FACT_PROFILE_KIND,
         profile_target_kind=FACT_EDGE_TARGET_KIND,
-        profile_target_id=fact.fact_id,
-        relation_type=fact.relation_type,
-        source_node_id=fact.source_node_id,
+        profile_target_id=fact.uuid,
+        relation_type=fact.name,
+        source_node_id=fact.source_node_uuid,
         source_node_kind=source_kind,
-        target_node_id=fact.target_node_id,
+        target_node_id=fact.target_node_uuid,
         target_node_kind=target_kind,
         target_revision_id=None,
         value_text=value_text,
@@ -105,7 +109,7 @@ def semantic_fact_profile_from_fact(
         is_active=fact.expired_at is None,
         valid_from_revision=None,
         valid_to_revision=None,
-        updated_at=fact.expired_at or fact.created_at,
+        updated_at=str(fact.expired_at) if fact.expired_at else str(fact.created_at),
     )
 
 
@@ -130,23 +134,26 @@ def profile_deactivation_from_fact_invalidation(
 
 def _profile_keys_for_fact(
     *,
-    fact: FactRecord,
-    source: ContextNodeRef | None,
-    target: ContextNodeRef | None,
+    fact: EntityEdge,
+    source: EntityNode | None,
+    target: EntityNode | None,
 ) -> tuple[str, ...]:
+    if fact.relationship_keywords:
+        return tuple(dict.fromkeys(fact.relationship_keywords))
+        
     values: list[str] = [
-        fact.relation_type,
-        _relation_label(fact.relation_type),
+        fact.name,
+        _relation_label(fact.name),
         fact.fact,
     ]
     if source:
-        values.extend(source.searchable_terms())
+        values.extend(entity_node_searchable_terms(source))
     else:
-        values.append(fact.source_node_id)
+        values.append(fact.source_node_uuid)
     if target:
-        values.extend(target.searchable_terms())
+        values.extend(entity_node_searchable_terms(target))
     else:
-        values.append(fact.target_node_id)
+        values.append(fact.target_node_uuid)
     deduped: dict[str, str] = {}
     for value in values:
         normalized = " ".join(str(value).strip().split())

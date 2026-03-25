@@ -1,13 +1,29 @@
+import os
+import sys
+from pathlib import Path
+
+# Ensure vendor/graphiti is in sys.path so graphiti_core can be imported natively
+_vendor_dir = Path(__file__).resolve().parent.parent / "vendor" / "graphiti"
+if str(_vendor_dir) not in sys.path:
+    sys.path.insert(0, str(_vendor_dir))
+
 from .commit_indexer import CommitIndexResult, CommitIndexer
 from .diffing import diff_snapshots
 from .embeddings import EmbeddingProvider, EmbeddingSettings
 from .episode_processor import EpisodeBatchResult, EpisodeProcessor, EpisodeWorkItem
-from .episodes import ContextNodeRef, EpisodeRecord, FactRecord, MentionRecord
+from .episodes import EntityNode, EpisodicNode, EntityEdge, MentionRecord
 from .git_metadata import CommitInfo, GitMetadata
 from .github_client import GitHubApiClient, GitHubRepoRef, GitHubRepoResolver
 from .github_indexer import GitHubIndexer, GitHubSyncResult
 from .graph_read import GraphReadRepository
-from .graph_sinks import CypherStatement, NeptuneGraphSink, Neo4jGraphSink
+from .graph_sinks import (
+    BaseCypherExecutor,
+    CypherStatement,
+    GraphitiNeo4jExecutor,
+    GraphitiNeptuneExecutor,
+    NeptuneGraphSink,
+    Neo4jGraphSink,
+)
 from .hosted_indexer import HostedIndexRequest, HostedIndexResult, HostedIndexer
 from .metadata import AuroraMetadataStore, InMemoryMetadataStore, RepoIndexState, RepoSourceState, SQLiteMetadataStore
 from .models import (
@@ -41,16 +57,17 @@ __all__ = [
     "CommitIndexResult",
     "CommitIndexer",
     "CommitInfo",
-    "ContextNodeRef",
+    "EntityNode",
+    "BaseCypherExecutor",
     "CypherStatement",
     "EmbeddingProvider",
     "EmbeddingSettings",
     "EdgeChange",
     "EpisodeBatchResult",
     "EpisodeProcessor",
-    "EpisodeRecord",
+    "EpisodicNode",
     "EpisodeWorkItem",
-    "FactRecord",
+    "EntityEdge",
     "GitHubApiClient",
     "GitHubIndexer",
     "GitHubRepoRef",
@@ -64,6 +81,8 @@ __all__ = [
     "HostedIndexer",
     "InMemoryMetadataStore",
     "MentionRecord",
+    "GraphitiNeo4jExecutor",
+    "GraphitiNeptuneExecutor",
     "Neo4jGraphSink",
     "NeptuneGraphSink",
     "NodeChange",

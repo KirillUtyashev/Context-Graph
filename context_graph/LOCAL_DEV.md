@@ -4,6 +4,7 @@ This project can now test the current snapshot, temporal-update flow, and episod
 
 - local PostgreSQL for metadata
 - local Neo4j for graph writes
+- Graphiti's Neo4j driver as the graph execution backend
 - a locally configured LLM provider for Graphiti-style fact extraction
 
 ## 1. Start local services
@@ -34,6 +35,9 @@ Default local credentials:
 ```bash
 python3 -m pip install -r context_graph/requirements-local.txt
 ```
+
+That local requirements file includes the vendored Graphiti base Python deps needed by the
+`GraphitiNeo4jExecutor`, including `python-dotenv`, `pydantic`, `numpy`, and `tenacity`.
 
 ## 3. Optional: enable LLM-backed episode extraction
 
@@ -82,6 +86,9 @@ If you omit the model ids, the vendored Graphiti Bedrock client already defaults
 
 ## 4. Run a real local apply
 
+All graph writes now go through `GraphitiNeo4jExecutor` — there is no `--graph-executor` flag
+anymore. Just provide Neo4j credentials and add `--execute`.
+
 You can keep config inline:
 
 ```bash
@@ -97,7 +104,19 @@ python3 -m context_graph apply-latest-commit \
   --execute
 ```
 
-When the LLM env vars above are set, the same command also runs commit-message episodes through the Graphiti-style extraction layer.
+For the lightest possible smoke test, skip PostgreSQL and use SQLite metadata:
+
+```bash
+python3 -m context_graph apply-latest-commit \
+  /Users/utya.kirill/Desktop/UOFT/Context-Graph \
+  --repo-id demo-context \
+  --metadata-db /tmp/context-graph.sqlite \
+  --graph-backend neo4j \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password contextgraph \
+  --execute
+```
 
 Or use environment variables:
 
@@ -133,8 +152,6 @@ python3 -m context_graph ingest-episode \
   --text "Why was the helper function added in this commit?" \
   --execute
 ```
-
-If the LLM provider is configured, the command above will try to produce semantic `RELATES_TO` facts in addition to `MENTIONS`.
 
 To sync active semantic fact profiles into the local pgvector store:
 
@@ -178,8 +195,6 @@ python3 -m context_graph hosted-index \
   --execute
 ```
 
-`hosted-index` now uses the same `--llm-provider` / env-var based episode configuration, so PR bodies, issue bodies, reviews, and comments can all flow through the same extraction path.
-
 To clear a repo's persisted graph + metadata context:
 
 ```bash
@@ -192,6 +207,10 @@ python3 -m context_graph reset-context \
   --neo4j-password contextgraph \
   --execute
 ```
+
+On the first Graphiti-backed run, the driver will also build its usual Neo4j range/fulltext indices.
+Those extra Graphiti indices are safe to keep in a local dev database even though `context_graph`
+is still using its own schema and query planners.
 
 ## 5. Inspect results
 
@@ -240,3 +259,53 @@ LIMIT 25
 - `search-profiles` is the current LightRAG-style high-level retrieval entrypoint for semantic `RELATES_TO` facts.
 - `reset-context --execute` removes the stored `CodeNode` / `CodeNodeVersion` graph and metadata rows for a repo id.
 - If you skip `--execute`, the index commands only print the planned work without mutating storage.
+
+
+---
+
+## Change log
+
+### Graphiti-only execution (removed Direct executors)
+
+Previously the codebase had three executor implementations behind a `--graph-executor` CLI flag:
+
+- `DirectNeo4jExecutor` — used the raw `neo4j` Python driver synchronously
+- `DirectNeptuneExecutor` — same but pointed at Neptune's Bolt endpoint
+- `GraphitiNeo4jExecutor` — used the vendored Graphiti async Neo4j driver
+
+All three shared the same `BaseCypherExecutor` ABC and were selected at runtime via
+`--graph-executor direct` (default) or `--graph-executor graphiti`.
+
+**What changed:**
+
+- `DirectNeo4jExecutor`, `DirectNeptuneExecutor`, and the `_search_context_nodes_with_neo4j`
+  helper were removed entirely from `graph_sinks.py`.
+- `GraphitiNeo4jExecutor` is now the only executor. `Neo4jGraphSink` and `NeptuneGraphSink`
+  both default to it.
+- The `--graph-executor` flag was removed from all CLI subcommands (`apply-latest-commit`,
+  `apply-commit`, `hosted-index`, `ingest-episode`, `reset-context`).
+- `_make_sink` in `cli.py` always constructs a `GraphitiNeo4jExecutor` — no branching logic.
+- `GraphitiNeo4jExecutor.search_context_nodes` returns `()` gracefully when no credentials
+  are configured, so planning-only runs (no `--execute`) work without a live Neo4j connection.
+- All 46 unit tests pass after updating test fixtures to inject `RecordingExecutor` where
+  bare `Neo4jGraphSink()` / `NeptuneGraphSink()` were used without credentials.
+
+### GraphitiNeptuneExecutor (proper Neptune driver support)
+
+Previously `NeptuneGraphSink` defaulted to `GraphitiNeo4jExecutor` with a manufactured
+`bolt://` URI — this was incorrect because Graphiti's `NeptuneDriver` uses the HTTPS
+openCypher endpoint via `langchain_aws` / boto3, not the Neo4j Bolt protocol.
+
+**What changed:**
+
+- Added `GraphitiNeptuneExecutor` to `graph_sinks.py`. It lazily instantiates Graphiti's
+  `NeptuneDriver` with `neptune-db://` or `neptune-graph://` host prefix and optional
+  AOSS (OpenSearch Serverless) for BM25 keyword search.
+- `NeptuneGraphSink` now defaults to `GraphitiNeptuneExecutor` instead of
+  `GraphitiNeo4jExecutor`.
+- New CLI flags on all relevant subcommands:
+  - `--neptune-host-scheme` (`neptune-db` or `neptune-graph`, default `neptune-db`)
+  - `--aoss-host` (optional AOSS host, also via `CONTEXT_GRAPH_AOSS_HOST` env var)
+- `_make_sink` in `cli.py` passes `host_scheme` and `aoss_host` to `NeptuneGraphSink`.
+- `GraphitiNeptuneExecutor` exported from `context_graph.__init__`.
+- 5 new tests added (50 total pass).

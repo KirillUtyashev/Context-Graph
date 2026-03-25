@@ -85,6 +85,8 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
 
 def episodic_node_from_record(record: Any) -> EpisodicNode:
     """Parse an episodic node from a database record."""
+    import json as _json
+
     created_at = parse_db_date(record['created_at'])
     valid_at = parse_db_date(record['valid_at'])
 
@@ -92,6 +94,18 @@ def episodic_node_from_record(record: Any) -> EpisodicNode:
         raise ValueError(f'created_at cannot be None for episode {record.get("uuid", "unknown")}')
     if valid_at is None:
         raise ValueError(f'valid_at cannot be None for episode {record.get("uuid", "unknown")}')
+
+    # Parse episode_metadata: stored as JSON string in the database
+    raw_meta = record.get('episode_metadata')
+    if isinstance(raw_meta, str):
+        try:
+            episode_metadata = _json.loads(raw_meta)
+        except (_json.JSONDecodeError, TypeError):
+            episode_metadata = {}
+    elif isinstance(raw_meta, dict):
+        episode_metadata = raw_meta
+    else:
+        episode_metadata = {}
 
     return EpisodicNode(
         content=record['content'],
@@ -103,6 +117,9 @@ def episodic_node_from_record(record: Any) -> EpisodicNode:
         name=record['name'],
         source_description=record['source_description'],
         entity_edges=record['entity_edges'],
+        author=record.get('author'),
+        episode_metadata=episode_metadata,
+        parent_node_id=record.get('parent_node_id'),
     )
 
 

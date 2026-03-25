@@ -148,17 +148,22 @@ async def _call_extraction_llm(
     context: dict,
 ) -> dict:
     """Call the appropriate extraction prompt based on episode type."""
-    if episode.source == EpisodeType.message:
+    # Message-style extraction (actor: content format)
+    message_types = {
+        EpisodeType.message,
+        EpisodeType.user_message,
+        EpisodeType.agent_message,
+    }
+    if episode.source in message_types:
         prompt = prompt_library.extract_nodes.extract_message(context)
         prompt_name = 'extract_nodes.extract_message'
-    elif episode.source == EpisodeType.text:
-        prompt = prompt_library.extract_nodes.extract_text(context)
-        prompt_name = 'extract_nodes.extract_text'
     elif episode.source == EpisodeType.json:
         prompt = prompt_library.extract_nodes.extract_json(context)
         prompt_name = 'extract_nodes.extract_json'
     else:
-        # Fallback to text extraction
+        # Text extraction covers: text, github_pr_body, github_issue_body,
+        # github_pr_review, github_pr_review_comment, github_pr_issue_comment,
+        # github_issue_comment, git_commit_message, and any future text-based types
         prompt = prompt_library.extract_nodes.extract_text(context)
         prompt_name = 'extract_nodes.extract_text'
 

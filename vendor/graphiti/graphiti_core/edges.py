@@ -280,6 +280,10 @@ class EntityEdge(Edge):
     attributes: dict[str, Any] = Field(
         default={}, description='Additional attributes of the edge. Dependent on edge name'
     )
+    relationship_keywords: list[str] | None = Field(
+        default=None, description='Extracted thematic keywords describing the relationship'
+    )
+
 
     async def generate_embedding(self, embedder: EmbedderClient):
         start = time()
