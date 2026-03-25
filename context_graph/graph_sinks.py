@@ -5,9 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from pathlib import Path
 import re
-import sys
 import threading
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional, Sequence, TypeVar
 
@@ -109,13 +107,6 @@ def _run_coroutine_sync(coro: Any) -> Any:
     return _persistent_loop.run(coro)
 
 
-def _ensure_graphiti_vendor_path() -> None:
-    vendor_root = Path(__file__).resolve().parent.parent / "vendor" / "graphiti"
-    vendor_root_str = str(vendor_root)
-    if vendor_root_str not in sys.path:
-        sys.path.insert(0, vendor_root_str)
-
-
 def _records_from_graphiti_result(result: Any) -> Sequence[Any]:
     if isinstance(result, tuple) and result:
         first = result[0]
@@ -161,15 +152,7 @@ class GraphitiNeo4jExecutor(BaseCypherExecutor):
     def _get_driver(self) -> Any:
         if self.driver is None:
             self.validate_execute_config()
-            _ensure_graphiti_vendor_path()
-            try:
-                from graphiti_core.driver.neo4j_driver import Neo4jDriver as GraphitiNeo4jDriver
-            except ImportError as exc:  # pragma: no cover - dependency wiring
-                raise RuntimeError(
-                    "Unable to import vendored Graphiti Neo4j driver. "
-                    "Ensure the vendored graphiti package and its dependencies are available "
-                    "(for local dev, install context_graph/requirements-local.txt)."
-                ) from exc
+            from .storage.graph.neo4j_driver import Neo4jDriver as GraphitiNeo4jDriver
 
             self.driver = GraphitiNeo4jDriver(
                 uri=self.uri,
@@ -293,18 +276,7 @@ class GraphitiNeptuneExecutor(BaseCypherExecutor):
     def _get_driver(self) -> Any:
         if self.driver is None:
             self.validate_execute_config()
-            _ensure_graphiti_vendor_path()
-            try:
-                from graphiti_core.driver.neptune_driver import (
-                    NeptuneDriver as GraphitiNeptuneDriver,
-                )
-            except ImportError as exc:  # pragma: no cover - dependency wiring
-                raise RuntimeError(
-                    "Unable to import vendored Graphiti Neptune driver. "
-                    "Ensure the vendored graphiti package and its dependencies are available "
-                    "(for local dev, install context_graph/requirements-local.txt "
-                    "and pip install langchain-aws opensearch-py)."
-                ) from exc
+            from .storage.graph.neptune_driver import NeptuneDriver as GraphitiNeptuneDriver
 
             neptune_host = f"{self.host_scheme}://{self.host}"
             self.driver = GraphitiNeptuneDriver(

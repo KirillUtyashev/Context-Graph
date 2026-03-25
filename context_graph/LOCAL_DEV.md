@@ -1,10 +1,10 @@
 # Local Development
 
-This project can now test the current snapshot, temporal-update flow, and episode extraction against:
+This project can now test the current snapshot, temporal-update flow, episode extraction, and the internal MCP server against:
 
 - local PostgreSQL for metadata
 - local Neo4j for graph writes
-- Graphiti's Neo4j driver as the graph execution backend
+- the internal `context_graph` graph execution backend
 - a locally configured LLM provider for Graphiti-style fact extraction
 
 ## 1. Start local services
@@ -195,6 +195,148 @@ python3 -m context_graph hosted-index \
   --execute
 ```
 
+## 5. End-to-End Hosted Repo + MCP Smoke Test
+
+This is the shortest local path for the full "ingest repo, start MCP, query `search_memory`" loop.
+It uses:
+
+- Neo4j for the graph
+- SQLite for metadata
+- the internal MCP server in `context_graph.server.mcp`
+- OpenAI for both episode extraction and embeddings
+
+Use one fresh `repo_id` per run or reset the old one first. That avoids mixing old graph data and embedding dimensions.
+
+### Terminal 1: optional cleanup
+
+Dry-run the reset first:
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+./.venv/bin/python -m context_graph reset-context \
+  --repo-id restaurant-backend-1536 \
+  --metadata-db /tmp/context-graph-1536.sqlite \
+  --graph-backend neo4j \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password contextgraph
+```
+
+Then execute it:
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+./.venv/bin/python -m context_graph reset-context \
+  --repo-id restaurant-backend-1536 \
+  --metadata-db /tmp/context-graph-1536.sqlite \
+  --graph-backend neo4j \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password contextgraph \
+  --execute
+```
+
+If you also want to force a fresh GitHub clone instead of reusing the repo cache, remove the cached checkout:
+
+```bash
+rm -rf /Users/utya.kirill/Desktop/UOFT/Context-Graph/.cache/context-graph/repos/KirillUtyashev/ContextGraphTestRepo
+```
+
+That last step is optional. `reset-context` already clears the stored graph, metadata rows, and profile vectors for the repo.
+
+### Terminal 1: ingest the test repo
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+export OPENAI_API_KEY='YOUR_OPENAI_KEY'
+export GITHUB_TOKEN='YOUR_GITHUB_TOKEN'
+export REPO_ID='restaurant-backend-1536'
+export METADATA_DB='/tmp/context-graph-1536.sqlite'
+
+./.venv/bin/python -m context_graph hosted-index \
+  --github-url https://github.com/KirillUtyashev/ContextGraphTestRepo \
+  --repo-id "$REPO_ID" \
+  --repo-cache-dir /Users/utya.kirill/Desktop/UOFT/Context-Graph/.cache/context-graph \
+  --metadata-db "$METADATA_DB" \
+  --graph-backend neo4j \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password contextgraph \
+  --llm-provider openai \
+  --llm-model gpt-4o \
+  --embed-provider openai \
+  --embed-dimensions 1536 \
+  --execute
+```
+
+### Terminal 2: start the MCP server
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+export OPENAI_API_KEY='YOUR_OPENAI_KEY'
+export METADATA_SQLITE_PATH='/tmp/context-graph-1536.sqlite'
+export NEO4J_URI='bolt://localhost:7687'
+export NEO4J_USER='neo4j'
+export NEO4J_PASSWORD='contextgraph'
+export GRAPHITI_GROUP_ID='restaurant-backend-1536'
+
+./scripts/run_mcp_local.sh
+```
+
+That script starts the internal MCP server over HTTP by running:
+
+```bash
+./.venv/bin/python -m context_graph.server.mcp
+```
+
+Quick sanity check:
+
+```bash
+curl -i http://localhost:8000/health
+```
+
+### Terminal 3: query the MCP server
+
+Profile-only check:
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+REPO_ID='restaurant-backend-1536' GROUP_ID='restaurant-backend-1536' \
+./scripts/query_mcp_local.sh "What are the core entities in restaurant-backend?" 0 5
+```
+
+Facts + profiles:
+
+```bash
+cd /Users/utya.kirill/Desktop/UOFT/Context-Graph
+
+REPO_ID='restaurant-backend-1536' GROUP_ID='restaurant-backend-1536' \
+./scripts/query_mcp_local.sh "What are the core entities in restaurant-backend?" 5 5
+```
+
+Useful query examples:
+
+```bash
+REPO_ID='restaurant-backend-1536' GROUP_ID='restaurant-backend-1536' \
+./scripts/query_mcp_local.sh "Which pull requests and issues mention the featured restaurant filter?" 5 5
+```
+
+```bash
+REPO_ID='restaurant-backend-1536' GROUP_ID='restaurant-backend-1536' \
+./scripts/query_mcp_local.sh "What code entities are involved in the backend?" 5 5
+```
+
+Expected terminal behavior:
+
+- Terminal 1 prints ingest output
+- Terminal 2 shows MCP server logs
+- Terminal 3 prints the `search_memory` response payload
+
 To clear a repo's persisted graph + metadata context:
 
 ```bash
@@ -212,7 +354,7 @@ On the first Graphiti-backed run, the driver will also build its usual Neo4j ran
 Those extra Graphiti indices are safe to keep in a local dev database even though `context_graph`
 is still using its own schema and query planners.
 
-## 5. Inspect results
+## 6. Inspect results
 
 - Neo4j browser: `http://localhost:7474`
 - Bolt URI: `bolt://localhost:7687`
@@ -257,7 +399,9 @@ LIMIT 25
 - `ingest-episode --execute` is the easiest way to test the LLM-backed episode layer without cloning a GitHub repo.
 - `sync-profile-vectors` backfills active semantic fact profiles into Aurora/local Postgres pgvector.
 - `search-profiles` is the current LightRAG-style high-level retrieval entrypoint for semantic `RELATES_TO` facts.
-- `reset-context --execute` removes the stored `CodeNode` / `CodeNodeVersion` graph and metadata rows for a repo id.
+- `reset-context --execute` removes the stored graph, metadata rows, and profile vectors for a repo id.
+- `scripts/run_mcp_local.sh` starts the internal HTTP MCP server from `context_graph.server.mcp`.
+- `scripts/query_mcp_local.sh` is the quickest local wrapper for calling `search_memory` against that MCP server.
 - If you skip `--execute`, the index commands only print the planned work without mutating storage.
 
 

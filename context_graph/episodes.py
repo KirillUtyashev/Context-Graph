@@ -1,7 +1,7 @@
-"""Episode data types – unified with Graphiti's type system.
+"""Episode data types – unified with Context Graph's internal memory model.
 
-The canonical types are Graphiti's ``EpisodicNode``, ``EntityNode``, and
-``EntityEdge``.  This module re-exports them and provides thin factory
+The canonical types are ``EpisodicNode``, ``EntityNode``, and ``EntityEdge``.
+This module re-exports them and provides thin factory
 helpers (``make_episode``, ``make_entity_node``, ``make_entity_edge``)
 that accept the field names historically used by Context Graph for
 backward compatibility during the migration.
@@ -19,9 +19,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-# ── re-export Graphiti canonical types ────────────────────────────
-from graphiti_core.edges import EntityEdge          # noqa: F401  (re-export)
-from graphiti_core.nodes import (                   # noqa: F401  (re-export)
+# ── re-export internal canonical types ────────────────────────────
+from .memory.models.edges import EntityEdge         # noqa: F401  (re-export)
+from .memory.models.nodes import (                  # noqa: F401  (re-export)
     EntityNode,
     EpisodeType,
     EpisodicNode,

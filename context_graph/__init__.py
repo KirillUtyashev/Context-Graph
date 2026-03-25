@@ -1,12 +1,3 @@
-import os
-import sys
-from pathlib import Path
-
-# Ensure vendor/graphiti is in sys.path so graphiti_core can be imported natively
-_vendor_dir = Path(__file__).resolve().parent.parent / "vendor" / "graphiti"
-if str(_vendor_dir) not in sys.path:
-    sys.path.insert(0, str(_vendor_dir))
-
 from .commit_indexer import CommitIndexResult, CommitIndexer
 from .diffing import diff_snapshots
 from .embeddings import EmbeddingProvider, EmbeddingSettings

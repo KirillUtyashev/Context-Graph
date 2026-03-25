@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from collections import defaultdict
 from typing import Any, Iterable, Mapping, Sequence
 
-from graphiti_core.edges import EntityEdge
-from graphiti_core.nodes import EntityNode, EpisodicNode
-from graphiti_core.utils.maintenance.edge_operations import extract_edges as _graphiti_extract_edges
-from graphiti_core.utils.maintenance.node_operations import extract_nodes as _graphiti_extract_nodes
+from .memory.models.edges import EntityEdge
+from .memory.models.nodes import EntityNode, EpisodeType, EpisodicNode
+from .memory.extraction.edge_operations import extract_edges as _graphiti_extract_edges
+from .memory.extraction.node_operations import extract_nodes as _graphiti_extract_nodes
+from .memory.datetime_utils import utc_now
 
 from .episodes import (
     EpisodeProcessingResult,
@@ -346,8 +347,6 @@ def _run_async(coro: Any) -> Any:
 
 def _texts_to_episodes(group_id: str, texts: Sequence[str]) -> list[EpisodicNode]:
     """Convert plain text strings to minimal EpisodicNode objects for Graphiti's API."""
-    from graphiti_core.nodes import EpisodeType
-    from graphiti_core.utils.datetime_utils import utc_now
     return [
         EpisodicNode(
             name="previous_context",

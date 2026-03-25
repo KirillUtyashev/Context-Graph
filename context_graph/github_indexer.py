@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping, Sequence
 
-from graphiti_core.nodes import EpisodicNode
+from .memory.models.nodes import EpisodicNode
 
 from .episode_processor import EpisodeBatchResult, EpisodeProcessor, EpisodeWorkItem
 from .episodes import make_entity_node, make_episode

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-mcp.sh — Build, upload, and deploy the graphiti MCP server to EC2
+# deploy-mcp.sh — Build, upload, and deploy the Context Graph MCP server to EC2
 #
 # Usage:
 #   AWS_PROFILE=<your-profile> bash scripts/deploy-mcp.sh [--env dev]
@@ -11,8 +11,8 @@
 #
 # What this script does:
 #   1. Resolves the artifacts S3 bucket name and EC2 instance ID from AWS.
-#   2. Builds a tar.gz artifact from vendor/graphiti/mcp_server/ and the
-#      graphiti-core source (vendor/graphiti/), bundled as graphiti_core_src/.
+#   2. Builds a tar.gz artifact from the internal Context Graph MCP server,
+#      including the MCP wrappers, config, and context_graph package source.
 #   3. Uploads the artifact + a new deploy script to s3://<bucket>/mcp-server/
 #   4. Invokes the updated deploy script on EC2 via SSM.
 
@@ -29,9 +29,8 @@ done
 AWS_REGION="${AWS_REGION:-ca-central-1}"
 PROJECT_NAME="context-graph"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MCP_SERVER_DIR="${REPO_ROOT}/vendor/graphiti/mcp_server"
-GRAPHITI_CORE_DIR="${REPO_ROOT}/vendor/graphiti"
 CONTEXT_GRAPH_DIR="${REPO_ROOT}/context_graph"
+MCP_CONFIG_DIR="${REPO_ROOT}/context_graph/server/mcp"
 
 echo "==> Deploying MCP server to env=${ENV} region=${AWS_REGION}"
 
@@ -69,15 +68,12 @@ STAGING_DIR="/tmp/mcp_server_staging_${SHA}"
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
 
-# Copy mcp_server contents (main.py, src/, config/, requirements.txt, etc.)
-cp -a "${MCP_SERVER_DIR}/." "${STAGING_DIR}/"
-
-# Bundle graphiti-core source as graphiti_core_src/ inside the artifact.
-# On EC2, the deploy script will: pip install -e ./graphiti_core_src[neptune]
-mkdir -p "${STAGING_DIR}/graphiti_core_src"
-rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
-  --exclude='mcp_server' --exclude='uv.lock' --exclude='.venv' \
-  "${GRAPHITI_CORE_DIR}/" "${STAGING_DIR}/graphiti_core_src/"
+# Copy MCP entrypoints and config bundle
+cp "${REPO_ROOT}/main.py" "${STAGING_DIR}/main.py"
+cp "${REPO_ROOT}/graphiti_mcp_server.py" "${STAGING_DIR}/graphiti_mcp_server.py"
+cp "${MCP_CONFIG_DIR}/requirements.txt" "${STAGING_DIR}/requirements.txt"
+mkdir -p "${STAGING_DIR}/config"
+cp -a "${MCP_CONFIG_DIR}/config/." "${STAGING_DIR}/config/"
 
 # Bundle context_graph source as context_graph_src/context_graph/ inside the artifact.
 # The .pth file will add context_graph_src/ to sys.path, making `import context_graph` work.
@@ -108,7 +104,7 @@ tar -czf "${ARTIFACT}" -C "${STAGING_DIR}" .
 echo "==> Artifact size: $(du -sh "${ARTIFACT}" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# Write updated deploy script locally (handles vendored graphiti-core)
+# Write updated deploy script locally
 # ---------------------------------------------------------------------------
 DEPLOY_SCRIPT="/tmp/deploy-mcp-server-${SHA}.sh"
 cat > "${DEPLOY_SCRIPT}" <<'DEPLOY_SCRIPT_CONTENT'
@@ -151,19 +147,6 @@ echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 $PYTHON_BIN -m venv /opt/mcp_server/venv
 /opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
 
-# Install vendored graphiti-core (bundled in the artifact as graphiti_core_src/)
-GRAPHITI_SRC="/opt/mcp_server/current/graphiti_core_src"
-if [ -d "${GRAPHITI_SRC}" ]; then
-  echo "==> Installing vendored graphiti-core[neptune]..."
-  /opt/mcp_server/venv/bin/pip install -e "${GRAPHITI_SRC}[neptune]" --quiet
-
-  # AL2023 puts the dist-info in lib64 but .pth files in lib; ensure graphiti_core
-  # is importable by writing a .pth file to both site-packages locations.
-  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
-    echo "${GRAPHITI_SRC}" > "${SP}/_graphiti_core_src.pth" 2>/dev/null || true
-  done
-fi
-
 # Install context_graph package (bundled in the artifact as context_graph_src/)
 CONTEXT_GRAPH_SRC="/opt/mcp_server/current/context_graph_src"
 if [ -d "${CONTEXT_GRAPH_SRC}" ]; then
@@ -178,9 +161,9 @@ fi
 echo "==> Installing MCP server dependencies..."
 /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
 
-# Verify both packages are importable after all dependencies are installed
-/opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
-/opt/mcp_server/venv/bin/python -c "from context_graph.episode_processor import EpisodeProcessor; print('context_graph import OK')"
+# Verify the internal runtime is importable after all dependencies are installed
+/opt/mcp_server/venv/bin/python -c "from context_graph.storage.graph.neptune_driver import NeptuneDriver; print('context_graph storage import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import GraphitiService; print('context_graph mcp import OK')"
 
 systemctl daemon-reload
 systemctl enable --now mcp-server.service
