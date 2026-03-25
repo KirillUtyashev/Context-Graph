@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import asyncio
 import json
 import logging
 import typing
@@ -181,7 +182,7 @@ class BedrockLLMClient(LLMClient):
         }
 
         try:
-            response = self._bedrock.converse(**request)
+            response = await asyncio.to_thread(self._bedrock.converse, **request)
         except self._bedrock.exceptions.ThrottlingException as e:
             raise RateLimitError(
                 f'Bedrock rate limit / throttling exceeded. Error: {e}'

@@ -31,6 +31,7 @@ PROJECT_NAME="context-graph"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MCP_SERVER_DIR="${REPO_ROOT}/vendor/graphiti/mcp_server"
 GRAPHITI_CORE_DIR="${REPO_ROOT}/vendor/graphiti"
+CONTEXT_GRAPH_DIR="${REPO_ROOT}/context_graph"
 
 echo "==> Deploying MCP server to env=${ENV} region=${AWS_REGION}"
 
@@ -77,6 +78,31 @@ mkdir -p "${STAGING_DIR}/graphiti_core_src"
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
   --exclude='mcp_server' --exclude='uv.lock' --exclude='.venv' \
   "${GRAPHITI_CORE_DIR}/" "${STAGING_DIR}/graphiti_core_src/"
+
+# Bundle context_graph source as context_graph_src/context_graph/ inside the artifact.
+# The .pth file will add context_graph_src/ to sys.path, making `import context_graph` work.
+mkdir -p "${STAGING_DIR}/context_graph_src/context_graph"
+rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
+  --exclude='docker-compose.local.yml' \
+  "${CONTEXT_GRAPH_DIR}/" "${STAGING_DIR}/context_graph_src/context_graph/"
+# Write a minimal pyproject.toml so pip treats context_graph_src/ as a package root
+cat > "${STAGING_DIR}/context_graph_src/pyproject.toml" << 'PYPROJECT_EOF'
+[project]
+name = "context-graph-pkg"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    "boto3>=1.34,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["context_graph"]
+PYPROJECT_EOF
 
 tar -czf "${ARTIFACT}" -C "${STAGING_DIR}" .
 echo "==> Artifact size: $(du -sh "${ARTIFACT}" | cut -f1)"
@@ -138,12 +164,23 @@ if [ -d "${GRAPHITI_SRC}" ]; then
   done
 fi
 
+# Install context_graph package (bundled in the artifact as context_graph_src/)
+CONTEXT_GRAPH_SRC="/opt/mcp_server/current/context_graph_src"
+if [ -d "${CONTEXT_GRAPH_SRC}" ]; then
+  echo "==> Installing context_graph package..."
+  /opt/mcp_server/venv/bin/pip install -e "${CONTEXT_GRAPH_SRC}" --quiet
+  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
+    echo "${CONTEXT_GRAPH_SRC}" > "${SP}/_context_graph_src.pth" 2>/dev/null || true
+  done
+fi
+
 # Install remaining MCP server dependencies
 echo "==> Installing MCP server dependencies..."
 /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
 
-# Verify graphiti_core is importable before starting the service
+# Verify both packages are importable after all dependencies are installed
 /opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.episode_processor import EpisodeProcessor; print('context_graph import OK')"
 
 systemctl daemon-reload
 systemctl enable --now mcp-server.service

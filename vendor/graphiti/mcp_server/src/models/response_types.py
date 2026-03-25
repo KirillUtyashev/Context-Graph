@@ -41,3 +41,20 @@ class EpisodeSearchResponse(TypedDict):
 class StatusResponse(TypedDict):
     status: str
     message: str
+
+
+class ProfileResult(TypedDict):
+    profile_id: str
+    relation_type: str | None
+    value_text: str
+    source_node_id: str | None
+    target_node_id: str | None
+    is_active: bool
+    score: float
+    metadata: dict[str, Any]
+
+
+class SearchMemoryResponse(TypedDict):
+    message: str
+    facts: list[dict[str, Any]]
+    profiles: list[ProfileResult]

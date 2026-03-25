@@ -145,6 +145,22 @@ resource "aws_iam_role_policy" "invoke_retrieve_lambda" {
   })
 }
 
+locals {
+  # Build Bedrock resource ARNs for the allowed model IDs.
+  # Bedrock uses two different ARN patterns:
+  #   - Foundation models:   arn:aws:bedrock:*::foundation-model/<id>
+  #   - Inference profiles:  arn:aws:bedrock:*:*:inference-profile/<id>
+  # Inference profiles (e.g. us.anthropic.*) are required for cross-region throughput
+  # and use account-scoped ARNs; foundation-model ARNs are global (no account).
+  # We emit both patterns for every entry so that InvokeModel and Converse work.
+  _bedrock_model_arns = length(var.bedrock_allowed_model_ids) > 0 ? flatten([
+    for m in var.bedrock_allowed_model_ids : [
+      "arn:aws:bedrock:*::foundation-model/${m}",
+      "arn:aws:bedrock:*:*:inference-profile/${m}"
+    ]
+  ]) : ["*"]
+}
+
 resource "aws_iam_role_policy" "bedrock_invoke" {
   count = var.enable_bedrock ? 1 : 0
 
@@ -164,37 +180,40 @@ resource "aws_iam_role_policy" "bedrock_invoke" {
           "bedrock:ConverseStream",
           "bedrock:CountTokens"
         ]
-        Resource = "*"
+        # Scope to specific model ARNs when a list is provided; otherwise all models.
+        Resource = local._bedrock_model_arns
       }
     ]
   })
 }
 
+# The old Deny-based restriction policy was removed. The Deny approach using
+# StringNotEqualsIfExists broke the Converse API because bedrock:ModelId is
+# not set by Converse (only bedrock:InferredModelId is). Scoping the Allow
+# Resource directly is the correct mechanism.
 resource "aws_iam_role_policy" "bedrock_invoke_restrict_models" {
-  count = (var.enable_bedrock && length(var.bedrock_allowed_model_ids) > 0) ? 1 : 0
+  count = 0 # disabled — model scoping is now handled via Allow Resource ARNs above
 
   name = "${var.name}-mcp-bedrock-invoke-restrict-models"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({ Version = "2012-10-17", Statement = [] })
+}
+
+resource "aws_iam_role_policy" "aurora_secret_read" {
+  count = var.aurora_password_secret_arn != "" ? 1 : 0
+
+  name = "${var.name}-mcp-aurora-secret-read"
   role = aws_iam_role.ssm.id
 
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "RestrictBedrockModelIds"
-        Effect = "Deny"
-        Action = [
-          "bedrock:InvokeModel",
-          "bedrock:InvokeModelWithResponseStream",
-          "bedrock:Converse",
-          "bedrock:ConverseStream",
-          "bedrock:CountTokens"
-        ]
-        Resource = "*"
-        Condition = {
-          "StringNotEqualsIfExists" = {
-            "bedrock:ModelId" = var.bedrock_allowed_model_ids
-          }
-        }
+        Sid    = "ReadAuroraSecret"
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [var.aurora_password_secret_arn]
       }
     ]
   })
@@ -250,6 +269,11 @@ unit = textwrap.dedent('''
     Environment=RETRIEVE_LAMBDA_NAME=${var.name}-retrieve
     Environment=NEPTUNE_HOST=neptune-db://${var.neptune_endpoint}
     Environment=CONFIG_PATH=/opt/mcp_server/current/config/config-neptune-bedrock.yaml
+    Environment=AURORA_ENDPOINT=${var.aurora_endpoint}
+    Environment=AURORA_DB_NAME=${var.aurora_db_name}
+    Environment=AURORA_USERNAME=${var.aurora_username}
+    Environment=AURORA_PASSWORD_SECRET_ARN=${var.aurora_password_secret_arn}
+    Environment=CONTEXT_GRAPH_LLM_PROVIDER=bedrock
     ExecStart=/opt/mcp_server/venv/bin/python /opt/mcp_server/current/main.py
     Restart=on-failure
     RestartSec=2

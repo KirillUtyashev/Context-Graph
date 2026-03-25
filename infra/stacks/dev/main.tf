@@ -28,6 +28,10 @@ module "mcp" {
   enable_bedrock            = var.enable_bedrock
   bedrock_allowed_model_ids = var.bedrock_allowed_model_ids
   neptune_endpoint          = module.neptune.endpoint
+  aurora_endpoint            = module.aurora.cluster_endpoint
+  aurora_password_secret_arn = module.aurora.master_password_secret_arn
+  aurora_db_name             = module.aurora.db_name
+  aurora_username            = module.aurora.master_username
   tags                      = local.tags
 }
 
