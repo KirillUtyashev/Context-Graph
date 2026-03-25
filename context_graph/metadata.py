@@ -929,7 +929,7 @@ class _DbApiMetadataStore(MetadataStore):
 
 class SQLiteMetadataStore(_DbApiMetadataStore):
     def __init__(self, path: str) -> None:
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(path, check_same_thread=False)
         super().__init__(connection=connection, placeholder="?")
 
 

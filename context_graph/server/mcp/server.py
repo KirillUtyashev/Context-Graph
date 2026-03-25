@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+from datetime import datetime
 import logging
 import os
 import sys
@@ -31,6 +32,7 @@ from context_graph.server.mcp.response_types import (
     StatusResponse,
     SuccessResponse,
 )
+from context_graph.embeddings import EmbeddingProvider
 from context_graph.runtime.providers.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
 from context_graph.server.mcp.memory_client import ContextGraphMemoryClient
 from context_graph.server.mcp.queue import QueueService
@@ -278,7 +280,8 @@ class AuroraIngestionService:
 
                 # Create Embedder using MCP factory (supports OpenAI, Bedrock, etc.)
                 # This ensures we use the same embedding model for both backends.
-                self._embed_provider = EmbedderFactory.create(self.config.embedder)
+                raw_embedder = EmbedderFactory.create(self.config.embedder)
+                self._embed_provider = EmbeddingProvider(raw_embedder)
                 
                 # Choose vector store based on metadata type
                 if isinstance(metadata, PostgresMetadataStore):
@@ -445,8 +448,8 @@ class AuroraIngestionService:
                 'statements_executed': batch.statements_executed,
                 'facts': [
                     {
-                        'fact_id': f.fact_id,
-                        'relation_type': f.relation_type,
+                        'fact_id': f.uuid,
+                        'relation_type': f.name,
                         'fact': f.fact,
                     }
                     for f in (result.facts if result else [])
@@ -685,28 +688,56 @@ async def add_memory(
             uuid=uuid or None,  # Ensure None is passed if uuid is None
         )
 
-        # Also ingest into Aurora via context_graph EpisodeProcessor (async, non-blocking)
+        # Also ingest into Aurora via context_graph EpisodeProcessor in the background.
+        # The MCP tool should return quickly after queueing work instead of blocking
+        # on the full profile extraction/indexing path.
         aurora_result: dict | None = None
         if aurora_ingestion_service is not None and repo_id:
             effective_source_type = source_type or source or 'text'
             effective_source_id = source_id or name
-            try:
-                aurora_result = await asyncio.to_thread(
-                    aurora_ingestion_service.ingest_episode_sync,
-                    repo_id=repo_id,
-                    source_type=effective_source_type,
-                    source_id=effective_source_id,
-                    text=episode_body,
-                    author=author,
-                    thread_id=thread_id,
-                )
-            except Exception as aurora_exc:
-                logger.error(f'Aurora ingestion error (non-fatal): {aurora_exc}')
-                aurora_result = {'ok': False, 'error': str(aurora_exc)}
+            
+            async def _run_aurora_ingest() -> None:
+                try:
+                    result = await asyncio.to_thread(
+                        aurora_ingestion_service.ingest_episode_sync,
+                        repo_id=repo_id,
+                        source_type=effective_source_type,
+                        source_id=effective_source_id,
+                        text=episode_body,
+                        author=author,
+                        thread_id=thread_id,
+                    )
+                    if result.get('ok'):
+                        logger.info(
+                            "Aurora ingestion completed for repo_id=%s source_id=%s with %s statements and %s facts",
+                            repo_id,
+                            effective_source_id,
+                            result.get('statements_executed', 0),
+                            len(result.get('facts', [])),
+                        )
+                    else:
+                        logger.warning(
+                            "Aurora ingestion skipped for repo_id=%s source_id=%s: %s",
+                            repo_id,
+                            effective_source_id,
+                            result.get('error', 'unknown error'),
+                        )
+                except Exception as aurora_exc:
+                    logger.error(
+                        'Aurora ingestion error (non-fatal) for repo_id=%s source_id=%s: %s',
+                        repo_id,
+                        effective_source_id,
+                        aurora_exc,
+                    )
+
+            asyncio.create_task(_run_aurora_ingest())
+            aurora_result = {'ok': True, 'queued': True}
 
         msg = f"Episode '{name}' queued for processing in group '{effective_group_id}'"
         if aurora_result is not None:
-            if aurora_result.get('ok'):
+            if aurora_result.get('queued'):
+                msg += '; Aurora: queued for background ingestion'
+            elif aurora_result.get('ok'):
                 facts_count = len(aurora_result.get('facts', []))
                 msg += f'; Aurora: {aurora_result["statements_executed"]} graph writes, {facts_count} facts extracted'
             else:

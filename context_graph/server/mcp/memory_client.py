@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import datetime
 from uuid import uuid4
@@ -182,7 +183,11 @@ class ContextGraphMemoryClient:
             content=episode_body,
             valid_at=reference_time,
         )
-        batch = processor.apply_batch([EpisodeWorkItem(episode=episode)], execute=True)
+        batch = await asyncio.to_thread(
+            processor.apply_batch,
+            [EpisodeWorkItem(episode=episode)],
+            execute=True,
+        )
         result = batch.results[0] if batch.results else None
         return {
             "episode": episode,

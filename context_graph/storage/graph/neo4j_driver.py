@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
@@ -69,6 +70,10 @@ class Neo4jDriver(GraphDriver):
         database: str = 'neo4j',
     ):
         super().__init__()
+        try:
+            self._owner_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._owner_loop = None
         self.client = AsyncGraphDatabase.driver(
             uri=uri,
             auth=(user or '', password or ''),
@@ -89,8 +94,6 @@ class Neo4jDriver(GraphDriver):
         self._graph_ops = Neo4jGraphMaintenanceOperations()
 
         # Schedule the indices and constraints to be built
-        import asyncio
-
         try:
             # Try to get the current event loop
             loop = asyncio.get_running_loop()
@@ -169,12 +172,38 @@ class Neo4jDriver(GraphDriver):
         params.setdefault('database_', self._database)
 
         try:
-            result = await self.client.execute_query(cypher_query_, parameters_=params, **kwargs)
+            current_loop = None
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            if (
+                self._owner_loop is not None
+                and self._owner_loop.is_running()
+                and current_loop is not self._owner_loop
+            ):
+                concurrent_future = asyncio.run_coroutine_threadsafe(
+                    self._execute_query_inner(cypher_query_, params=params, **kwargs),
+                    self._owner_loop,
+                )
+                result = await asyncio.wrap_future(concurrent_future)
+            else:
+                result = await self._execute_query_inner(cypher_query_, params=params, **kwargs)
         except Exception as e:
             logger.error(f'Error executing Neo4j query: {e}\n{cypher_query_}\n{params}')
             raise
 
         return result
+
+    async def _execute_query_inner(
+        self,
+        cypher_query_: LiteralString,
+        *,
+        params: dict[str, Any],
+        **kwargs: Any,
+    ) -> EagerResult:
+        return await self.client.execute_query(cypher_query_, parameters_=params, **kwargs)
 
     def session(self, database: str | None = None) -> GraphDriverSession:
         _database = database or self._database
