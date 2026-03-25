@@ -10,6 +10,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Evaluation scaffold caches
+evaluation/**/__pycache__/
+
 # Editor / OS files
 .idea/
 .DS_Store
