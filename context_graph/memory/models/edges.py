@@ -962,7 +962,7 @@ def get_episodic_edge_from_record(record: Any) -> EpisodicEdge:
 
 
 def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityEdge:
-    episodes = record['episodes']
+    episodes = record['episodes'] or []
     if provider == GraphProvider.KUZU:
         attributes = json.loads(record['attributes']) if record['attributes'] else {}
     else:
