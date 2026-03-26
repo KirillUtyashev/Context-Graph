@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import math
 from dataclasses import dataclass
 import hashlib
+import sys
 from typing import Any, Iterable, Mapping, Sequence
 
 from .embeddings import EmbeddingProvider
@@ -432,14 +433,45 @@ class ProfileSearchService:
         keywords = list(parse_result.high_level_keywords)
         if not keywords:
             keywords = [query]
+        print(
+            "[context_graph.debug] profile_search.search "
+            f"repo_id={repo_id!r} "
+            f"query={query!r} "
+            f"keywords={keywords!r} "
+            f"limit={limit} "
+            f"active_only={active_only} "
+            f"llm_enabled={llm_enabled}",
+            file=sys.stderr,
+            flush=True,
+        )
         embeddings = self.embedding_provider.embed_texts(keywords)
         merged_hits: dict[str, ProfileVectorHit] = {}
-        for embedding in embeddings:
+        for keyword, embedding in zip(keywords, embeddings):
             hits = self.vector_store.search_profile_keys(
                 repo_id=repo_id,
                 embedding=embedding,
                 limit=limit,
                 active_only=active_only,
+            )
+            raw_hits = [
+                {
+                    "profile_id": hit.profile_id,
+                    "profile_key_id": hit.profile_key_id,
+                    "repo_id": hit.repo_id,
+                    "profile_kind": hit.profile_kind,
+                    "key_text": hit.key_text,
+                    "score": hit.score,
+                }
+                for hit in hits
+            ]
+            print(
+                "[context_graph.debug] profile_search.raw_vector_hits "
+                f"repo_id={repo_id!r} "
+                f"keyword={keyword!r} "
+                f"embedding_dim={len(embedding)} "
+                f"hits={raw_hits!r}",
+                file=sys.stderr,
+                flush=True,
             )
             for hit in hits:
                 current = merged_hits.get(hit.profile_id)

@@ -54,9 +54,8 @@ CMD_ID="$(aws ssm send-command \
   --comment "Neptune smoke test" \
   --parameters 'commands=[
     "cat > /tmp/neptune_test.py << '\''PYEOF'\''",
-    "import asyncio, sys, os, subprocess",
-    "sys.path.insert(0, \"/opt/mcp_server/current/graphiti_core_src\")",
-    "from graphiti_core.driver.neptune_driver import NeptuneDriver",
+    "import asyncio, os, subprocess",
+    "from context_graph.storage.graph.neptune_driver import NeptuneDriver",
     "host = os.environ.get(\"NEPTUNE_HOST\", \"\")",
     "if not host:",
     "    r = subprocess.run([\"bash\",\"-c\",\"grep NEPTUNE_HOST /etc/systemd/system/mcp-server.service\"], capture_output=True, text=True)",

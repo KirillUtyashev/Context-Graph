@@ -4,7 +4,13 @@ from dataclasses import dataclass
 import re
 from typing import Iterable, Sequence
 
-from .episodes import ContextNodeRef
+from .episodes import (
+    EntityNode,
+    entity_node_kind,
+    entity_node_qualified_name,
+    entity_node_searchable_terms,
+    make_entity_node,
+)
 from .graph_sinks import BaseCypherGraphSink
 from .metadata import MetadataStore
 from .models import CanonicalNode
@@ -21,7 +27,7 @@ class GraphReadRepository:
     metadata_store: MetadataStore
     graph_sink: BaseCypherGraphSink | None = None
 
-    def latest_code_nodes(self, repo_id: str) -> tuple[ContextNodeRef, ...]:
+    def latest_code_nodes(self, repo_id: str) -> tuple[EntityNode, ...]:
         snapshot = self.metadata_store.load_latest_snapshot(repo_id)
         if snapshot is None:
             return ()
@@ -36,10 +42,10 @@ class GraphReadRepository:
         *,
         repo_id: str,
         text: str,
-        extra_nodes: Sequence[ContextNodeRef] = (),
+        extra_nodes: Sequence[EntityNode] = (),
         limit: int = 25,
-    ) -> tuple[ContextNodeRef, ...]:
-        scored: dict[str, tuple[int, ContextNodeRef]] = {}
+    ) -> tuple[EntityNode, ...]:
+        scored: dict[str, tuple[int, EntityNode]] = {}
         candidate_text = text or ""
         lowered_text = candidate_text.lower()
         search_terms = _extract_search_terms(candidate_text)
@@ -48,16 +54,16 @@ class GraphReadRepository:
             score = self._score_node(node, lowered_text, search_terms)
             if score <= 0:
                 continue
-            current = scored.get(node.node_id)
+            current = scored.get(node.uuid)
             if current is None or score > current[0]:
-                scored[node.node_id] = (score, node)
+                scored[node.uuid] = (score, node)
 
         ordered = sorted(
             scored.values(),
             key=lambda item: (
                 -item[0],
-                item[1].kind,
-                item[1].qualified_name or item[1].name,
+                entity_node_kind(item[1]),
+                entity_node_qualified_name(item[1]) or item[1].name,
             ),
         )
         return tuple(node for _, node in ordered[:limit])
@@ -68,7 +74,7 @@ class GraphReadRepository:
         search_terms: Sequence[str],
         *,
         limit: int = 25,
-    ) -> tuple[ContextNodeRef, ...]:
+    ) -> tuple[EntityNode, ...]:
         if self.graph_sink is None:
             return ()
         return self.graph_sink.search_context_nodes(
@@ -77,13 +83,13 @@ class GraphReadRepository:
             limit=limit,
         )
 
-    def _from_canonical_node(self, node: CanonicalNode) -> ContextNodeRef:
+    def _from_canonical_node(self, node: CanonicalNode) -> EntityNode:
         aliases: list[str] = []
         if node.file_path:
             aliases.append(node.file_path.rsplit("/", 1)[-1])
         if node.qualified_name:
             aliases.extend(part for part in node.qualified_name.split(".") if part)
-        return ContextNodeRef(
+        return make_entity_node(
             node_id=node.node_id,
             repo_id=node.repo_id,
             kind=node.kind,
@@ -96,11 +102,11 @@ class GraphReadRepository:
 
     def _score_node(
         self,
-        node: ContextNodeRef,
+        node: EntityNode,
         lowered_text: str,
         search_terms: Iterable[str],
     ) -> int:
-        terms = [term.lower() for term in node.searchable_terms()]
+        terms = [term.lower() for term in entity_node_searchable_terms(node)]
         score = 0
         for term in terms:
             if not term:

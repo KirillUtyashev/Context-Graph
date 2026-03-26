@@ -5,8 +5,10 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping, Sequence
 
+from .memory.models.nodes import EpisodicNode
+
 from .episode_processor import EpisodeBatchResult, EpisodeProcessor, EpisodeWorkItem
-from .episodes import ContextNodeRef, EpisodeRecord
+from .episodes import make_entity_node, make_episode
 from .github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
 from .graph_sinks import BaseCypherGraphSink, CypherStatement
 from .models import utc_now_iso
@@ -223,7 +225,7 @@ class GitHubIndexer:
             pr_context_nodes = [
                 _entity_ref(pr_entity),
                 *[
-                    ContextNodeRef(
+                    make_entity_node(
                         node_id=_issue_node_id(repo_id, issue_number),
                         repo_id=repo_id,
                         kind="Issue",
@@ -389,9 +391,9 @@ class GitHubIndexer:
                 sorted(
                     episode_work_items,
                     key=lambda item: (
-                        item.episode.created_at or "",
-                        item.episode.source_type,
-                        item.episode.episode_id,
+                        str(item.episode.created_at) or "",
+                        item.episode.source.value,
+                        item.episode.name,
                     ),
                 )
             ),
@@ -458,13 +460,13 @@ def _build_issue_entity(
     )
 
 
-def _entity_ref(entity: GitHubEntity) -> ContextNodeRef:
+def _entity_ref(entity: GitHubEntity):
     aliases = []
     if entity.number is not None:
         aliases.append(f"#{entity.number}")
     if entity.title:
         aliases.append(entity.title)
-    return ContextNodeRef(
+    return make_entity_node(
         node_id=entity.node_id,
         repo_id=entity.repo_id,
         kind=entity.kind,
@@ -474,10 +476,10 @@ def _entity_ref(entity: GitHubEntity) -> ContextNodeRef:
     )
 
 
-def _commit_ref(repo_id: str, commit_sha: Any) -> ContextNodeRef | None:
+def _commit_ref(repo_id: str, commit_sha):
     if not isinstance(commit_sha, str) or not commit_sha:
         return None
-    return ContextNodeRef(
+    return make_entity_node(
         node_id=f"commit:{repo_id}:{commit_sha}",
         repo_id=repo_id,
         kind="Commit",
@@ -498,12 +500,12 @@ def _build_artifact_body_episode(
     title: str | None,
     body: Any,
     metadata: Mapping[str, Any],
-) -> EpisodeRecord | None:
+) -> EpisodicNode | None:
     text = _compose_body_text(title=title, body=body)
     if text is None:
         return None
     created = str(created_at or updated_at or utc_now_iso())
-    return EpisodeRecord(
+    return make_episode(
         episode_id=source_id,
         repo_id=repo_id,
         source_type=source_type,
@@ -523,7 +525,7 @@ def _build_review_episode(
     repo_ref: GitHubRepoRef,
     pull_number: int,
     payload: Mapping[str, Any],
-) -> EpisodeRecord | None:
+) -> EpisodicNode | None:
     body = payload.get("body")
     state = payload.get("state")
     if not body and not state:
@@ -538,7 +540,7 @@ def _build_review_episode(
     if not text:
         return None
     created = str(payload.get("submitted_at") or payload.get("created_at") or utc_now_iso())
-    return EpisodeRecord(
+    return make_episode(
         episode_id=f"github-review:{review_id}",
         repo_id=repo_id,
         source_type="github_pr_review",
@@ -564,7 +566,7 @@ def _build_review_comment_episode(
     repo_ref: GitHubRepoRef,
     pull_number: int,
     payload: Mapping[str, Any],
-) -> EpisodeRecord | None:
+) -> EpisodicNode | None:
     body = payload.get("body")
     if not isinstance(body, str) or not body.strip():
         return None
@@ -572,7 +574,7 @@ def _build_review_comment_episode(
     path = payload.get("path")
     prefix = f"Path: {path}\n\n" if isinstance(path, str) and path else ""
     created = str(payload.get("created_at") or utc_now_iso())
-    return EpisodeRecord(
+    return make_episode(
         episode_id=f"github-review-comment:{comment_id}",
         repo_id=repo_id,
         source_type="github_pr_review_comment",
@@ -601,13 +603,13 @@ def _build_issue_comment_episode(
     parent_node_id: str,
     parent_number: int,
     payload: Mapping[str, Any],
-) -> EpisodeRecord | None:
+) -> EpisodicNode | None:
     body = payload.get("body")
     if not isinstance(body, str) or not body.strip():
         return None
     comment_id = int(payload["id"])
     created = str(payload.get("created_at") or utc_now_iso())
-    return EpisodeRecord(
+    return make_episode(
         episode_id=f"github-issue-comment:{comment_id}",
         repo_id=repo_id,
         source_type=(

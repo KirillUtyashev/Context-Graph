@@ -165,17 +165,15 @@ semaphore: asyncio.Semaphore
 class AuroraIngestionService:
     """Drives context_graph EpisodeProcessor to write episodic ingestion into Aurora + Neptune.
 
-    Reads Aurora connection info from environment variables set by Terraform:
-      AURORA_ENDPOINT, AURORA_DB_NAME, AURORA_USERNAME, AURORA_PASSWORD_SECRET_ARN
-
-    The password is fetched from Secrets Manager at initialization time using the
-    instance IAM role (no credentials needed in code).
-
-    This service is optional: if Aurora env vars are absent the service initialises
-    to None and add_memory silently skips the Aurora path.
+    Can be configured for cloud (AWS Neptune + Aurora) or local (Neo4j + SQLite/Postgres).
+    
+    Reads provider settings from the global GraphitiConfig:
+      - LLM: config.llm
+      - Embedder: config.embedder
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: GraphitiConfig) -> None:
+        self.config = config
         self._processor: Any = None  # context_graph.EpisodeProcessor
         self._metadata: Any = None   # context_graph.PostgresMetadataStore
         self._embed_provider: Any = None   # context_graph.embeddings.EmbeddingProvider
@@ -186,21 +184,33 @@ class AuroraIngestionService:
         self._init_error: str | None = None
 
     def _build_dsn(self) -> str | None:
+        # Priority 1: Explicit DSN or DATABASE_URL (for local development)
+        dsn = os.getenv('POSTGRES_DSN') or os.getenv('DATABASE_URL')
+        if dsn:
+            return dsn
+
+        # Priority 2: AWS Aurora with Secrets Manager (production)
         endpoint = os.getenv('AURORA_ENDPOINT', '').strip()
         if not endpoint:
+            # Fallback to local SQLite if requested
+            sqlite_path = os.getenv('METADATA_SQLITE_PATH')
+            if sqlite_path:
+                return f'sqlite:///{sqlite_path}'
             return None
+
         db_name = os.getenv('AURORA_DB_NAME', 'context_graph')
         username = os.getenv('AURORA_USERNAME', 'postgres')
         secret_arn = os.getenv('AURORA_PASSWORD_SECRET_ARN', '').strip()
-        if not secret_arn:
-            logger.warning('AURORA_PASSWORD_SECRET_ARN not set — Aurora ingestion disabled')
-            return None
         region = os.getenv('AWS_DEFAULT_REGION') or os.getenv('AWS_REGION', 'ca-central-1')
+
+        if not secret_arn:
+            logger.warning('AURORA_PASSWORD_SECRET_ARN not set and no local DSN found — Aurora ingestion disabled')
+            return None
+
         try:
             import boto3
             sm = boto3.client('secretsmanager', region_name=region)
             password = sm.get_secret_value(SecretId=secret_arn)['SecretString']
-            # Password may be a plain string or a JSON object {"password": "..."}
             if password.startswith('{'):
                 import json as _json
                 pw_obj = _json.loads(password)
@@ -221,18 +231,27 @@ class AuroraIngestionService:
         if self._init_error:
             return False
         try:
-            dsn = self._build_dsn()
-            if dsn is None:
-                self._init_error = 'Aurora DSN could not be constructed'
+            metadata_dsn = self._build_dsn()
+            if metadata_dsn is None:
+                self._init_error = 'Metadata storage (Postgres/SQLite) could not be configured'
                 return False
 
-            from context_graph.metadata import PostgresMetadataStore
+            from context_graph.metadata import PostgresMetadataStore, SQLiteMetadataStore
             from context_graph.graph_sinks import NeptuneGraphSink, BaseCypherGraphSink, CypherStatement
             from context_graph.graph_read import GraphReadRepository
             from context_graph.graphiti_adapter import GraphitiAdapter
             from context_graph.episode_processor import EpisodeProcessor
-            from context_graph.llm import EpisodeLLMSettings, make_episode_llm_client
             from typing import Iterable as _Iterable
+
+            # Determine metadata store type
+            if metadata_dsn.startswith('sqlite:///'):
+                sqlite_path = metadata_dsn.replace('sqlite:///', '')
+                metadata = SQLiteMetadataStore(sqlite_path)
+            else:
+                metadata = PostgresMetadataStore.from_dsn(metadata_dsn)
+            
+            metadata.bootstrap()
+            self._metadata = metadata
 
             class _NullGraphSink(BaseCypherGraphSink):
                 """Collects planned Cypher statements without executing them.
@@ -245,26 +264,10 @@ class AuroraIngestionService:
                 def execute(self, statements: '_Iterable[CypherStatement]') -> int:
                     return sum(1 for _ in statements)  # count but don't execute
 
-            neptune_host = os.getenv('NEPTUNE_HOST', '').strip()
-            # NeptuneGraphSink uses the plain neo4j Bolt driver with empty credentials,
-            # which Neptune (IAM-auth mode) rejects. We use _NullGraphSink instead so
-            # that the EpisodeProcessor can plan + extract facts via the LLM without
-            # actually writing to Neptune (Graphiti's own queue already handles that).
-            _ = neptune_host  # kept for potential future use
-
-            metadata = PostgresMetadataStore.from_dsn(dsn)
-            metadata.bootstrap()
-            self._metadata = metadata
-
             graph_sink = _NullGraphSink()
 
-            region = os.getenv('AWS_DEFAULT_REGION') or os.getenv('AWS_REGION', 'ca-central-1')
-            llm_settings = EpisodeLLMSettings(
-                provider='bedrock',
-                model=os.getenv('CONTEXT_GRAPH_LLM_MODEL', 'us.anthropic.claude-sonnet-4-6'),
-                aws_region=region,
-            )
-            llm_client = make_episode_llm_client(llm_settings)
+            # Create LLM client using MCP factory (supports OpenAI, Claude, Bedrock, etc.)
+            llm_client = LLMClientFactory.create(self.config.llm)
             adapter = GraphitiAdapter(llm_client=llm_client)
 
             # Set up profile vector store and search service
@@ -272,19 +275,26 @@ class AuroraIngestionService:
                 from context_graph.embeddings import make_embedding_provider, EmbeddingSettings
                 from context_graph.profile_vectors import (
                     AuroraProfileVectorStore,
+                    InMemoryProfileVectorStore,
                     ProfileVectorIndexer,
                     ProfileSearchService,
                 )
                 from context_graph.query_parser import QueryParser
 
-                embed_settings = EmbeddingSettings(
-                    provider='bedrock',
-                    model='amazon.titan-embed-text-v2:0',
-                    dimensions=1024,
-                    aws_region=region,
-                )
-                self._embed_provider = make_embedding_provider(embed_settings)
-                self._profile_vector_store = AuroraProfileVectorStore.from_metadata_store(metadata)
+                # Create Embedder using MCP factory (supports OpenAI, Bedrock, etc.)
+                # This ensures we use the same embedding model for both backends.
+                self._embed_provider = EmbedderFactory.create(self.config.embedder)
+                
+                # Choose vector store based on metadata type
+                if isinstance(metadata, PostgresMetadataStore):
+                    self._profile_vector_store = AuroraProfileVectorStore.from_metadata_store(
+                        metadata, 
+                        embedding_dim=self.config.embedder.dimensions
+                    )
+                else:
+                    logger.warning('Using In-Memory vector store (profiles will not persist across restarts)')
+                    self._profile_vector_store = InMemoryProfileVectorStore()
+                
                 self._profile_vector_store.bootstrap()
                 self._profile_indexer = ProfileVectorIndexer(
                     vector_store=self._profile_vector_store,
@@ -296,9 +306,9 @@ class AuroraIngestionService:
                     embedding_provider=self._embed_provider,
                     query_parser=QueryParser(llm_client=llm_client),
                 )
-                logger.info('Aurora profile vector store and search service initialised')
+                logger.info(f'Profile vector store ({type(self._profile_vector_store).__name__}) initialised')
             except Exception as vec_exc:
-                logger.warning(f'Profile vector store init failed (search_memory profile branch disabled): {vec_exc}')
+                logger.warning(f'Profile vector store init failed: {vec_exc}')
                 self._profile_indexer = None
                 self._profile_search_service = None
 
@@ -328,14 +338,57 @@ class AuroraIngestionService:
         active_only: bool = True,
     ) -> list[dict]:
         """Search Aurora semantic fact profiles synchronously (for asyncio.to_thread)."""
-        if not self.initialize() or self._profile_search_service is None:
+        if not self.initialize():
+            logger.warning(
+                'Profile search skipped for %s because AuroraIngestionService failed to initialize: %s',
+                repo_id,
+                self._init_error,
+            )
+            return []
+        if self._profile_search_service is None:
+            logger.warning(
+                'Profile search skipped for %s because profile search service is unavailable',
+                repo_id,
+            )
             return []
         try:
+            active_profile_count = len(self._metadata.load_profiles(repo_id, active_only=active_only))
+            logger.info(
+                'Profile search starting for %s with %d active metadata profiles',
+                repo_id,
+                active_profile_count,
+            )
+
+            # For local testing with In-Memory vector store, always resync from the
+            # metadata DB before searching. Hosted indexing often runs in a separate
+            # process from the MCP server, so a one-time per-repo cache can leave the
+            # in-memory vector index permanently stale after new profiles are written.
+            from context_graph.profile_vectors import InMemoryProfileVectorStore
+            if isinstance(self._profile_vector_store, InMemoryProfileVectorStore) and self._profile_indexer:
+                try:
+                    logger.info(
+                        'Auto-syncing profiles for %s from metadata store into in-memory index...',
+                        repo_id,
+                    )
+                    count = self._profile_indexer.sync_repo(
+                        repo_id=repo_id,
+                        metadata_store=self._metadata,
+                    )
+                    logger.info('Synced %s semantic profile keys for %s', count, repo_id)
+                except Exception as sync_exc:
+                    logger.warning(f'Auto-sync failed for {repo_id}: {sync_exc}')
+
             result = self._profile_search_service.search(
                 repo_id=repo_id,
                 query=query,
                 limit=limit,
                 active_only=active_only,
+            )
+            logger.info(
+                'Profile search for %s produced %d hits and %d profiles',
+                repo_id,
+                len(result.hits),
+                len(result.profiles),
             )
             hit_scores = {h.profile_id: h.score for h in result.hits}
             return [
@@ -1291,14 +1344,20 @@ async def initialize_server() -> ServerConfig:
     # Initialize queue service with the client
     await queue_service.initialize(graphiti_client)
 
-    # Initialize Aurora ingestion service (optional — only active when AURORA_ENDPOINT is set)
+    # Initialize Aurora ingestion service (optional — only active when AURORA_ENDPOINT or DATABASE_URL is set)
     global aurora_ingestion_service
-    if os.getenv('AURORA_ENDPOINT', '').strip():
-        aurora_ingestion_service = AuroraIngestionService()
+    has_aurora_config = (
+        os.getenv('AURORA_ENDPOINT', '').strip() 
+        or os.getenv('DATABASE_URL', '').strip()
+        or os.getenv('POSTGRES_DSN', '').strip()
+        or os.getenv('METADATA_SQLITE_PATH', '').strip()
+    )
+    if has_aurora_config:
+        aurora_ingestion_service = AuroraIngestionService(config)
         logger.info('AuroraIngestionService created (will initialise on first use)')
     else:
         aurora_ingestion_service = None
-        logger.info('AURORA_ENDPOINT not set — Aurora ingestion path disabled')
+        logger.info('AURORA_ENDPOINT/DATABASE_URL not set — Aurora ingestion path disabled')
 
     # Set MCP server settings
     if config.server.host:

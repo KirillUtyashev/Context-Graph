@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import re
+import sys
 from typing import Any, Sequence
 
 try:
@@ -111,6 +112,16 @@ class QueryParser:
 
         keywords = _dedupe_texts(keywords)
         intent_tags = [tag for tag in _dedupe_texts(intent_tags) if tag in _ALLOWED_INTENTS]
+
+        print(
+            "[context_graph.debug] query_parser.parse "
+            f"query={query!r} "
+            f"anchors={[{'kind': anchor.kind, 'value': anchor.value} for anchor in anchors]!r} "
+            f"high_level_keywords={keywords!r} "
+            f"intent_tags={intent_tags!r}",
+            file=sys.stderr,
+            flush=True,
+        )
 
         return QueryParseResult(
             raw_query=query,

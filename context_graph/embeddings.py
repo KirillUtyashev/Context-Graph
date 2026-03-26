@@ -5,8 +5,6 @@ from dataclasses import dataclass
 import os
 from typing import Any, Sequence
 
-from .llm import ensure_graphiti_vendor_path
-
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
@@ -63,9 +61,8 @@ def make_embedding_provider(settings: EmbeddingSettings | None) -> EmbeddingProv
     if settings is None:
         return None
 
-    ensure_graphiti_vendor_path()
     if settings.provider == "openai":
-        from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+        from .runtime.embedding.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
         client = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
@@ -78,7 +75,7 @@ def make_embedding_provider(settings: EmbeddingSettings | None) -> EmbeddingProv
         return EmbeddingProvider(client)
 
     if settings.provider == "bedrock":
-        from graphiti_core.embedder.bedrock import BedrockTitanEmbedder, BedrockTitanEmbedderConfig
+        from .runtime.embedding.bedrock import BedrockTitanEmbedder, BedrockTitanEmbedderConfig
 
         client = BedrockTitanEmbedder(
             config=BedrockTitanEmbedderConfig(

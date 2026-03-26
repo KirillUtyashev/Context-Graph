@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
 from time import time
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -71,20 +71,29 @@ class EpisodeType(Enum):
         Represents a plain text episode.
     """
 
+    # Graphiti built-in
     message = 'message'
     json = 'json'
     text = 'text'
+    # Context Graph extensions — GitHub provenance
+    github_pr_body = 'github_pr_body'
+    github_issue_body = 'github_issue_body'
+    github_pr_review = 'github_pr_review'
+    github_pr_review_comment = 'github_pr_review_comment'
+    github_pr_issue_comment = 'github_pr_issue_comment'
+    github_issue_comment = 'github_issue_comment'
+    # Context Graph extensions — other sources
+    git_commit_message = 'git_commit_message'
+    user_message = 'user_message'
+    agent_message = 'agent_message'
 
     @staticmethod
-    def from_str(episode_type: str):
-        if episode_type == 'message':
-            return EpisodeType.message
-        if episode_type == 'json':
-            return EpisodeType.json
-        if episode_type == 'text':
-            return EpisodeType.text
-        logger.error(f'Episode type: {episode_type} not implemented')
-        raise NotImplementedError
+    def from_str(episode_type: str) -> 'EpisodeType':
+        try:
+            return EpisodeType(episode_type)
+        except ValueError:
+            logger.error(f'Episode type: {episode_type} not implemented')
+            raise NotImplementedError(f'Unknown episode type: {episode_type}')
 
 
 class Node(BaseModel, ABC):
@@ -323,6 +332,15 @@ class EpisodicNode(Node):
         description='list of entity edges referenced in this episode',
         default_factory=list,
     )
+    # Context Graph extensions
+    author: str | None = Field(default=None, description='author login or identifier')
+    episode_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description='additional metadata (thread_id, url, etc.)',
+    )
+    parent_node_id: str | None = Field(
+        default=None, description='uuid of the parent node (e.g. PR or Issue this episode belongs to)',
+    )
 
     async def save(self, driver: GraphDriver):
         if driver.graph_operations_interface:
@@ -341,6 +359,9 @@ class EpisodicNode(Node):
             'created_at': self.created_at,
             'valid_at': self.valid_at,
             'source': self.source.value,
+            'author': self.author,
+            'episode_metadata': json.dumps(self.episode_metadata) if self.episode_metadata else '{}',
+            'parent_node_id': self.parent_node_id,
         }
 
         result = await driver.execute_query(
@@ -1004,6 +1025,18 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
     if valid_at is None:
         raise ValueError(f'valid_at cannot be None for episode {record.get("uuid", "unknown")}')
 
+    # Parse episode_metadata: stored as JSON string in the database
+    raw_meta = record.get('episode_metadata')
+    if isinstance(raw_meta, str):
+        try:
+            episode_metadata = json.loads(raw_meta)
+        except (json.JSONDecodeError, TypeError):
+            episode_metadata = {}
+    elif isinstance(raw_meta, dict):
+        episode_metadata = raw_meta
+    else:
+        episode_metadata = {}
+
     return EpisodicNode(
         content=record['content'],
         created_at=created_at,
@@ -1014,6 +1047,9 @@ def get_episodic_node_from_record(record: Any) -> EpisodicNode:
         name=record['name'],
         source_description=record['source_description'],
         entity_edges=record['entity_edges'],
+        author=record.get('author'),
+        episode_metadata=episode_metadata,
+        parent_node_id=record.get('parent_node_id'),
     )
 
 

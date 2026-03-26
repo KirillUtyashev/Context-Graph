@@ -8,14 +8,26 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from context_graph import cli as cli_module
 from context_graph.cli import main as cli_main
 from context_graph.commit_indexer import CommitIndexer
 from context_graph.diffing import diff_snapshots
 from context_graph.episode_processor import EpisodeProcessor, EpisodeWorkItem
-from context_graph.episodes import EpisodeRecord
+from context_graph.episodes import (
+    EntityNode,
+    EntityEdge,
+    MentionRecord,
+    entity_node_file_path,
+    entity_node_kind,
+    entity_node_qualified_name,
+    make_entity_edge,
+    make_entity_node,
+    make_episode,
+)
 from context_graph.git_metadata import GitMetadata
 from context_graph.github_client import (
     GitHubApiClient,
@@ -24,9 +36,16 @@ from context_graph.github_client import (
     collect_unique_numbers,
     parse_github_repo_input,
 )
+from context_graph.github_indexer import GitHubEntity, GitHubProvenanceBundle
 from context_graph.graph_read import GraphReadRepository
-from context_graph.graphiti_adapter import GraphitiAdapter
-from context_graph.graph_sinks import NeptuneGraphSink, Neo4jGraphSink
+from context_graph.graph_sinks import (
+    BaseCypherExecutor,
+    CypherStatement,
+    GraphitiNeo4jExecutor,
+    GraphitiNeptuneExecutor,
+    NeptuneGraphSink,
+    Neo4jGraphSink,
+)
 from context_graph.hosted_indexer import HostedIndexRequest, HostedIndexer
 from context_graph.llm import EpisodeLLMSettings, load_episode_llm_settings
 from context_graph.metadata import InMemoryMetadataStore, RepoIndexState, RepoSourceState, SQLiteMetadataStore
@@ -543,8 +562,53 @@ class FakeEpisodeLLMClient:
                 ]
             }
         if model_name == "ExtractedEdges":
-            return {"edges": list(self.extracted_edges)}
+            return {
+                "edges": [
+                    {
+                        **edge,
+                        "relationship_keywords": list(edge.get("relationship_keywords", ["related"])),
+                    }
+                    for edge in self.extracted_edges
+                ]
+            }
         raise AssertionError(f"unexpected response model {model_name!r}")
+
+
+class RecordingExecutor(BaseCypherExecutor):
+    def __init__(
+        self,
+        *,
+        execute_result: int = 0,
+        search_result: tuple = (),
+    ) -> None:
+        self.execute_result = execute_result
+        self.search_result = search_result
+        self.validated = False
+        self.executed_statements: list[CypherStatement] = []
+        self.search_calls: list[dict[str, object]] = []
+
+    def validate_execute_config(self) -> None:
+        self.validated = True
+
+    def execute(self, statements) -> int:
+        self.executed_statements.extend(list(statements))
+        return self.execute_result
+
+    def search_context_nodes(
+        self,
+        *,
+        repo_id: str,
+        search_terms,
+        limit: int = 25,
+    ) -> tuple:
+        self.search_calls.append(
+            {
+                "repo_id": repo_id,
+                "search_terms": tuple(search_terms),
+                "limit": limit,
+            }
+        )
+        return self.search_result
 
 
 class FakeQueryLLMClient:
@@ -579,6 +643,19 @@ class FakeEmbeddingProvider:
                 ]
             )
         return vectors
+
+
+class RecordingEmbeddingProvider:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def embed_texts(self, texts):
+        batch = tuple(str(text) for text in texts)
+        self.calls.append(batch)
+        return [
+            [float(index + 1), float(len(text))]
+            for index, text in enumerate(batch)
+        ]
 
 
 class RecordingCursor:
@@ -640,6 +717,21 @@ def _statement_rows(statements, query_fragment: str) -> list[dict[str, object]]:
     return rows
 
 
+def _statement_parameters(statements, query_fragment: str) -> dict[str, object]:
+    for statement in statements:
+        if query_fragment in statement.query:
+            return dict(statement.parameters)
+    raise AssertionError(f"no statement matched {query_fragment!r}")
+
+
+def _code_node_rows(statements) -> list[dict[str, object]]:
+    return _statement_rows(statements, "MERGE (n:CodeNode:")
+
+
+def _context_entity_rows(statements) -> list[dict[str, object]]:
+    return _statement_rows(statements, "MERGE (n:Entity:")
+
+
 def _github_entity_rows(statements) -> list[dict[str, object]]:
     return _statement_rows(statements, "MERGE (n:GitHubEntity:")
 
@@ -657,7 +749,7 @@ def _github_entity_link_rows(statements, relation_type: str) -> list[dict[str, o
 
 
 def _episode_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (e:Episode:ContextNode")
+    return _statement_rows(statements, "MERGE (e:Episode:Episodic")
 
 
 def _episode_on_rows(statements) -> list[dict[str, object]]:
@@ -670,6 +762,10 @@ def _episode_on_rows(statements) -> list[dict[str, object]]:
 
 def _mention_rows(statements) -> list[dict[str, object]]:
     return _statement_rows(statements, "MERGE (episode)-[r:MENTIONS")
+
+
+def _fact_rows(statements) -> list[dict[str, object]]:
+    return _statement_rows(statements, "MERGE (source)-[r:RELATES_TO")
 
 
 class SnapshotBuilderTests(unittest.TestCase):
@@ -845,7 +941,7 @@ class DiffAndWriterTests(unittest.TestCase):
 
     def test_temporal_writer_records_and_updates_snapshot(self) -> None:
         metadata = InMemoryMetadataStore()
-        writer = TemporalGraphWriter(metadata_store=metadata, graph_sink=Neo4jGraphSink())
+        writer = TemporalGraphWriter(metadata_store=metadata, graph_sink=Neo4jGraphSink(executor=RecordingExecutor()))
 
         first = writer.apply_snapshot(make_snapshot("r1"), execute=False)
         second = writer.apply_snapshot(make_snapshot("r2", include_extra_call=True), execute=False)
@@ -862,8 +958,8 @@ class SinkPlanningTests(unittest.TestCase):
         after = make_snapshot("r2", include_extra_call=True)
         diff = diff_snapshots(before, after)
 
-        neo4j_statements = Neo4jGraphSink().plan_apply_diff(after, diff)
-        neptune_statements = NeptuneGraphSink().plan_apply_diff(after, diff)
+        neo4j_statements = Neo4jGraphSink(executor=RecordingExecutor()).plan_apply_diff(after, diff)
+        neptune_statements = NeptuneGraphSink(executor=RecordingExecutor()).plan_apply_diff(after, diff)
 
         neo4j_queries = "\n".join(statement.query for statement in neo4j_statements)
         neptune_queries = "\n".join(statement.query for statement in neptune_statements)
@@ -877,8 +973,299 @@ class SinkPlanningTests(unittest.TestCase):
         self.assertIn("CREATE (s)-[r:CALLS", neptune_queries)
         self.assertIn("edge_kind: row.edge_kind", neptune_queries)
 
+    def test_sink_execute_delegates_to_injected_executor(self) -> None:
+        executor = RecordingExecutor(execute_result=2)
+        sink = Neo4jGraphSink(executor=executor)
+        statements = (
+            CypherStatement("RETURN 1", {}),
+            CypherStatement("RETURN 2", {"value": 2}),
+        )
+
+        executed = sink.execute(statements)
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(executor.executed_statements, list(statements))
+
+    def test_sink_validate_and_search_delegate_to_injected_executor(self) -> None:
+        executor = RecordingExecutor()
+        sink = Neo4jGraphSink(executor=executor)
+
+        sink.validate_execute_config()
+        sink.search_context_nodes(repo_id="demo", search_terms=("helper",), limit=5)
+
+        self.assertTrue(executor.validated)
+        self.assertEqual(
+            executor.search_calls,
+            [{"repo_id": "demo", "search_terms": ("helper",), "limit": 5}],
+        )
+
+    def test_make_sink_uses_graphiti_executor_for_neo4j(self) -> None:
+        sink = cli_module._make_sink(
+            SimpleNamespace(
+                graph_backend="neo4j",
+                neo4j_uri="bolt://localhost:7687",
+                neo4j_user="neo4j",
+                neo4j_password="contextgraph",
+                neo4j_database="neo4j",
+                neptune_host=None,
+                neptune_port=8182,
+            )
+        )
+
+        self.assertIsInstance(sink, Neo4jGraphSink)
+        self.assertIsInstance(sink.executor, GraphitiNeo4jExecutor)
+        self.assertEqual(sink.executor.uri, "bolt://localhost:7687")
+        self.assertEqual(sink.executor.username, "neo4j")
+        self.assertEqual(sink.executor.password, "contextgraph")
+        self.assertEqual(sink.executor.database, "neo4j")
+
+    def test_neptune_executor_validate_requires_host(self) -> None:
+        executor = GraphitiNeptuneExecutor()
+        with self.assertRaises(RuntimeError):
+            executor.validate_execute_config()
+
+    def test_neptune_executor_validate_passes_with_driver(self) -> None:
+        executor = GraphitiNeptuneExecutor(driver=object())
+        executor.validate_execute_config()
+
+    def test_neptune_sink_defaults_to_neptune_executor(self) -> None:
+        sink = NeptuneGraphSink(host="my-neptune-endpoint")
+        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
+        self.assertEqual(sink.executor.host, "my-neptune-endpoint")
+        self.assertEqual(sink.executor.host_scheme, "neptune-db")
+        self.assertEqual(sink.executor.port, 8182)
+        self.assertIsNone(sink.executor.aoss_host)
+
+    def test_neptune_sink_passes_aoss_host(self) -> None:
+        sink = NeptuneGraphSink(
+            host="my-neptune-endpoint",
+            aoss_host="my-aoss-host",
+            host_scheme="neptune-graph",
+        )
+        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
+        self.assertEqual(sink.executor.aoss_host, "my-aoss-host")
+        self.assertEqual(sink.executor.host_scheme, "neptune-graph")
+
+    def test_make_sink_uses_neptune_executor_for_neptune_backend(self) -> None:
+        sink = cli_module._make_sink(
+            SimpleNamespace(
+                graph_backend="neptune",
+                neptune_host="my-neptune-cluster",
+                neptune_port=8182,
+                neptune_host_scheme="neptune-db",
+                aoss_host=None,
+                neo4j_uri=None,
+                neo4j_user=None,
+                neo4j_password=None,
+                neo4j_database=None,
+            )
+        )
+
+        self.assertIsInstance(sink, NeptuneGraphSink)
+        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
+        self.assertEqual(sink.executor.host, "my-neptune-cluster")
+        self.assertEqual(sink.executor.host_scheme, "neptune-db")
+
+    def test_make_sink_threads_embedding_provider_into_graph_sink(self) -> None:
+        provider = object()
+
+        with patch("context_graph.cli._make_embedding_provider", return_value=provider):
+            sink = cli_module._make_sink(
+                SimpleNamespace(
+                    graph_backend="neo4j",
+                    neo4j_uri="bolt://localhost:7687",
+                    neo4j_user="neo4j",
+                    neo4j_password="contextgraph",
+                    neo4j_database="neo4j",
+                    neptune_host=None,
+                    neptune_port=8182,
+                )
+            )
+
+        self.assertIs(sink.embedding_provider, provider)
+
+    def test_plan_apply_diff_enriches_project_and_code_nodes_for_graphiti_search(self) -> None:
+        snapshot = make_snapshot("r1", include_extra_call=True)
+        diff = diff_snapshots(None, snapshot)
+        embedder = RecordingEmbeddingProvider()
+        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
+
+        statements = sink.plan_apply_diff(
+            snapshot,
+            diff,
+            observed_at="2026-03-24T00:00:00+00:00",
+        )
+
+        project_params = _statement_parameters(statements, "MERGE (project:CodeNode:Project:Entity")
+        code_rows = _code_node_rows(statements)
+        main_row = next(row for row in code_rows if row["node_id"] == "symbol:demo:demo.app.main")
+
+        self.assertEqual(project_params["uuid"], "project:demo")
+        self.assertEqual(project_params["group_id"], "demo")
+        self.assertEqual(project_params["created_at"], "2026-03-24T00:00:00+00:00")
+        self.assertIn("Project demo", project_params["summary"])
+        self.assertIsNotNone(project_params["name_embedding"])
+
+        self.assertEqual(main_row["uuid"], "symbol:demo:demo.app.main")
+        self.assertEqual(main_row["group_id"], "demo")
+        self.assertEqual(main_row["created_at"], "2026-03-24T00:00:00+00:00")
+        self.assertIn("Function main", main_row["summary"])
+        self.assertIn("qualified demo.app.main", main_row["summary"])
+        self.assertIn("file app.py", main_row["summary"])
+        self.assertIsNotNone(main_row["name_embedding"])
+        self.assertTrue(any("main" in call for call in embedder.calls))
+
+    def test_plan_upsert_context_nodes_enriches_rows_and_skips_blank_names(self) -> None:
+        embedder = RecordingEmbeddingProvider()
+        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
+        statements = sink.plan_upsert_context_nodes(
+            [
+                make_entity_node(
+                    node_id="entity:demo:alice",
+                    repo_id="demo",
+                    kind="Entity",
+                    name="Alice Johnson",
+                    aliases=("Alice",),
+                    metadata={"origin": "episode_llm"},
+                ),
+                make_entity_node(
+                    node_id="entity:demo:blank",
+                    repo_id="demo",
+                    kind="Entity",
+                    name="",
+                    metadata={"origin": "test"},
+                ),
+            ],
+            observed_at="2026-03-24T01:00:00+00:00",
+        )
+
+        context_rows = _context_entity_rows(statements)
+        alice_row = next(row for row in context_rows if row["node_id"] == "entity:demo:alice")
+        blank_row = next(row for row in context_rows if row["node_id"] == "entity:demo:blank")
+
+        self.assertEqual(alice_row["uuid"], "entity:demo:alice")
+        self.assertEqual(alice_row["group_id"], "demo")
+        self.assertEqual(alice_row["created_at"], "2026-03-24T01:00:00+00:00")
+        self.assertIn("Entity Alice Johnson", alice_row["summary"])
+        self.assertIn("aliases Alice", alice_row["summary"])
+        self.assertIsNotNone(alice_row["name_embedding"])
+
+        self.assertEqual(blank_row["group_id"], "demo")
+        self.assertEqual(blank_row["created_at"], "2026-03-24T01:00:00+00:00")
+        self.assertEqual(blank_row["name_embedding"], None)
+        self.assertEqual(embedder.calls, [("Alice Johnson",)])
+
+    def test_plan_attach_github_provenance_normalizes_github_entities(self) -> None:
+        embedder = RecordingEmbeddingProvider()
+        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
+        bundle = GitHubProvenanceBundle(
+            repo_id="demo",
+            github_repo="octo/demo",
+            entities=(
+                GitHubEntity(
+                    node_id="github:pr:demo:7",
+                    kind="PullRequest",
+                    repo_id="demo",
+                    github_repo="octo/demo",
+                    external_id="700",
+                    number=7,
+                    url="https://github.com/octo/demo/pull/7",
+                    title="Feature rollout",
+                    state="closed",
+                    author_login="octocat",
+                    created_at="2026-03-21T00:00:00Z",
+                    updated_at="2026-03-21T00:06:00Z",
+                    raw={},
+                    metadata={},
+                ),
+                GitHubEntity(
+                    node_id="github:issue:demo:42",
+                    kind="Issue",
+                    repo_id="demo",
+                    github_repo="octo/demo",
+                    external_id="4200",
+                    number=42,
+                    url="https://github.com/octo/demo/issues/42",
+                    title=None,
+                    state="open",
+                    author_login="issue-author",
+                    created_at=None,
+                    updated_at="2026-03-21T00:05:00Z",
+                    raw={},
+                    metadata={},
+                ),
+            ),
+            project_links=(),
+            commit_links=(),
+            entity_links=(),
+            episode_work_items=(),
+        )
+
+        statements = sink.plan_attach_github_provenance(
+            bundle,
+            observed_at="2026-03-24T02:00:00+00:00",
+        )
+
+        entity_rows = _github_entity_rows(statements)
+        pr_row = next(row for row in entity_rows if row["node_id"] == "github:pr:demo:7")
+        issue_row = next(row for row in entity_rows if row["node_id"] == "github:issue:demo:42")
+
+        self.assertEqual(pr_row["uuid"], "github:pr:demo:7")
+        self.assertEqual(pr_row["group_id"], "demo")
+        self.assertEqual(pr_row["name"], "Feature rollout")
+        self.assertIn("repo octo/demo", pr_row["summary"])
+        self.assertIn("url https://github.com/octo/demo/pull/7", pr_row["summary"])
+        self.assertIsNotNone(pr_row["name_embedding"])
+
+        self.assertEqual(issue_row["uuid"], "github:issue:demo:42")
+        self.assertEqual(issue_row["group_id"], "demo")
+        self.assertEqual(issue_row["created_at"], "2026-03-24T02:00:00+00:00")
+        self.assertEqual(issue_row["name"], "Issue #42")
+        self.assertIn("number 42", issue_row["summary"])
+        self.assertIsNotNone(issue_row["name_embedding"])
+        self.assertTrue(any("Issue #42" in call for call in embedder.calls))
+
+    def test_plan_apply_fact_edges_sets_graphiti_edge_fields_and_embeds_only_nonempty_facts(self) -> None:
+        embedder = RecordingEmbeddingProvider()
+        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
+        statements = sink.plan_apply_fact_edges(
+            [
+                make_entity_edge(
+                    fact_id="fact:demo:1",
+                    repo_id="demo",
+                    source_node_id="symbol:demo:demo.app.main",
+                    target_node_id="symbol:demo:demo.app.helper",
+                    relation_type="JUSTIFIES",
+                    fact="main uses helper for shared logic",
+                ),
+                make_entity_edge(
+                    fact_id="fact:demo:2",
+                    repo_id="demo",
+                    source_node_id="symbol:demo:demo.app.helper",
+                    target_node_id="symbol:demo:demo.app.main",
+                    relation_type="RELATES_TO",
+                    fact="",
+                ),
+            ],
+            observed_at="2026-03-24T03:00:00+00:00",
+        )
+
+        fact_rows = _fact_rows(statements)
+        first_row = next(row for row in fact_rows if row["fact_id"] == "fact:demo:1")
+        second_row = next(row for row in fact_rows if row["fact_id"] == "fact:demo:2")
+
+        self.assertEqual(first_row["uuid"], "fact:demo:1")
+        self.assertEqual(first_row["group_id"], "demo")
+        self.assertEqual(first_row["episodes"], [])
+        self.assertIsNotNone(first_row["fact_embedding"])
+        self.assertEqual(second_row["uuid"], "fact:demo:2")
+        self.assertEqual(second_row["group_id"], "demo")
+        self.assertEqual(second_row["episodes"], [])
+        self.assertEqual(second_row["fact_embedding"], None)
+        self.assertEqual(embedder.calls, [("main uses helper for shared logic",)])
+
     def test_plan_reset_repo_emits_code_node_deletes(self) -> None:
-        statements = Neo4jGraphSink().plan_reset_repo("demo")
+        statements = Neo4jGraphSink(executor=RecordingExecutor()).plan_reset_repo("demo")
         queries = "\n".join(statement.query for statement in statements)
 
         self.assertEqual(len(statements), 6)
@@ -887,7 +1274,7 @@ class SinkPlanningTests(unittest.TestCase):
         self.assertIn("MATCH (c:Commit {repo_id: $repo_id})", queries)
         self.assertIn("MATCH (v:CodeNodeVersion {repo_id: $repo_id})", queries)
         self.assertIn("MATCH (n:CodeNode {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (n:ContextNode {repo_id: $repo_id})", queries)
+        self.assertIn("MATCH (n {repo_id: $repo_id}) WHERE (n:Entity OR n:Episodic)", queries)
         self.assertIn("AND NOT n:CodeNode", queries)
         self.assertTrue(all(statement.parameters == {"repo_id": "demo"} for statement in statements))
 
@@ -895,14 +1282,14 @@ class SinkPlanningTests(unittest.TestCase):
         metadata = InMemoryMetadataStore()
         metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
         processor = EpisodeProcessor(
-            graph_sink=Neo4jGraphSink(),
+            graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
             read_repository=GraphReadRepository(metadata_store=metadata),
         )
 
         batch = processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-1",
                         repo_id="demo",
                         source_type="user_message",
@@ -924,7 +1311,7 @@ class SinkPlanningTests(unittest.TestCase):
         mention_rows = _mention_rows(batch.statements)
         on_rows = _episode_on_rows(batch.statements)
 
-        self.assertIn("MERGE (e:Episode:ContextNode", queries)
+        self.assertIn("MERGE (e:Episode:Episodic", queries)
         self.assertIn("MERGE (episode)-[r:ON]->(target)", queries)
         self.assertIn("MERGE (episode)-[r:MENTIONS", queries)
         self.assertTrue(any(row["source_type"] == "user_message" for row in episode_rows))
@@ -935,19 +1322,17 @@ class SinkPlanningTests(unittest.TestCase):
         metadata = InMemoryMetadataStore()
         metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
         processor = EpisodeProcessor(
-            graph_sink=Neo4jGraphSink(),
+            graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
             read_repository=GraphReadRepository(metadata_store=metadata),
-            adapter=GraphitiAdapter(
-                llm_client=FakeEpisodeLLMClient(
-                    extracted_entity_names=("helper", "app.py"),
-                )
+            llm_client=FakeEpisodeLLMClient(
+                extracted_entity_names=("helper", "app.py"),
             ),
         )
 
         batch = processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-2",
                         repo_id="demo",
                         source_type="user_message",
@@ -980,22 +1365,21 @@ class SinkPlanningTests(unittest.TestCase):
 
     def test_episode_processor_creates_generic_entities_for_unresolved_llm_mentions(self) -> None:
         metadata = InMemoryMetadataStore()
-        sink = Neo4jGraphSink()
+        executor = RecordingExecutor()
+        sink = Neo4jGraphSink(executor=executor)
         sink.execute = lambda statements: 0  # type: ignore[method-assign]
         processor = EpisodeProcessor(
             graph_sink=sink,
             read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
-            adapter=GraphitiAdapter(
-                llm_client=FakeEpisodeLLMClient(
-                    extracted_entity_names=("Alice Johnson",),
-                )
+            llm_client=FakeEpisodeLLMClient(
+                extracted_entity_names=("Alice Johnson",),
             ),
         )
 
         batch = processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-3",
                         repo_id="demo",
                         source_type="user_message",
@@ -1012,7 +1396,7 @@ class SinkPlanningTests(unittest.TestCase):
         )
 
         mention_rows = _mention_rows(batch.statements)
-        entity_rows = _statement_rows(batch.statements, "MERGE (n:ContextNode:Entity")
+        entity_rows = _statement_rows(batch.statements, "MERGE (n:Entity:Entity")
 
         self.assertEqual(len(entity_rows), 1)
         self.assertEqual(entity_rows[0]["name"], "Alice Johnson")
@@ -1022,32 +1406,31 @@ class SinkPlanningTests(unittest.TestCase):
     def test_episode_processor_persists_semantic_fact_profiles_for_relates_to(self) -> None:
         metadata = InMemoryMetadataStore()
         metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
-        sink = Neo4jGraphSink()
+        executor = RecordingExecutor()
+        sink = Neo4jGraphSink(executor=executor)
         sink.execute = lambda statements: 0  # type: ignore[method-assign]
         processor = EpisodeProcessor(
             graph_sink=sink,
             read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
-            adapter=GraphitiAdapter(
-                llm_client=FakeEpisodeLLMClient(
-                    extracted_entity_names=("main", "helper"),
-                    extracted_edges=(
-                        {
-                            "source_entity_name": "main",
-                            "target_entity_name": "helper",
-                            "relation_type": "JUSTIFIES",
-                            "fact": "main uses helper for shared logic",
-                            "valid_at": None,
-                            "invalid_at": None,
-                        },
-                    ),
-                )
+            llm_client=FakeEpisodeLLMClient(
+                extracted_entity_names=("main", "helper"),
+                extracted_edges=(
+                    {
+                        "source_entity_name": "main",
+                        "target_entity_name": "helper",
+                        "relation_type": "JUSTIFIES",
+                        "fact": "main uses helper for shared logic",
+                        "valid_at": None,
+                        "invalid_at": None,
+                    },
+                ),
             ),
         )
 
         first_batch = processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-4",
                         repo_id="demo",
                         source_type="user_message",
@@ -1077,27 +1460,25 @@ class SinkPlanningTests(unittest.TestCase):
         processor = EpisodeProcessor(
             graph_sink=sink,
             read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
-            adapter=GraphitiAdapter(
-                llm_client=FakeEpisodeLLMClient(
-                    extracted_entity_names=("main", "helper"),
-                    extracted_edges=(
-                        {
-                            "source_entity_name": "main",
-                            "target_entity_name": "helper",
-                            "relation_type": "JUSTIFIES",
-                            "fact": "main delegates shared helper behavior",
-                            "valid_at": None,
-                            "invalid_at": None,
-                        },
-                    ),
-                )
+            llm_client=FakeEpisodeLLMClient(
+                extracted_entity_names=("main", "helper"),
+                extracted_edges=(
+                    {
+                        "source_entity_name": "main",
+                        "target_entity_name": "helper",
+                        "relation_type": "JUSTIFIES",
+                        "fact": "main delegates shared helper behavior",
+                        "valid_at": None,
+                        "invalid_at": None,
+                    },
+                ),
             ),
         )
 
         processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-5",
                         repo_id="demo",
                         source_type="user_message",
@@ -1125,26 +1506,25 @@ class SinkPlanningTests(unittest.TestCase):
     def test_episode_processor_can_sync_profiles_into_vector_index(self) -> None:
         metadata = InMemoryMetadataStore()
         metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
-        sink = Neo4jGraphSink()
+        executor = RecordingExecutor()
+        sink = Neo4jGraphSink(executor=executor)
         sink.execute = lambda statements: 0  # type: ignore[method-assign]
         vector_store = InMemoryProfileVectorStore()
         processor = EpisodeProcessor(
             graph_sink=sink,
             read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=sink),
-            adapter=GraphitiAdapter(
-                llm_client=FakeEpisodeLLMClient(
-                    extracted_entity_names=("main", "helper"),
-                    extracted_edges=(
-                        {
-                            "source_entity_name": "main",
-                            "target_entity_name": "helper",
-                            "relation_type": "JUSTIFIES",
-                            "fact": "main uses helper for shared logic",
-                            "valid_at": None,
-                            "invalid_at": None,
-                        },
-                    ),
-                )
+            llm_client=FakeEpisodeLLMClient(
+                extracted_entity_names=("main", "helper"),
+                extracted_edges=(
+                    {
+                        "source_entity_name": "main",
+                        "target_entity_name": "helper",
+                        "relation_type": "JUSTIFIES",
+                        "fact": "main uses helper for shared logic",
+                        "valid_at": None,
+                        "invalid_at": None,
+                    },
+                ),
             ),
             profile_indexer=ProfileVectorIndexer(
                 vector_store=vector_store,
@@ -1155,7 +1535,7 @@ class SinkPlanningTests(unittest.TestCase):
         processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id="turn-6",
                         repo_id="demo",
                         source_type="user_message",
@@ -1550,7 +1930,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1632,7 +2012,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1667,7 +2047,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1685,7 +2065,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1705,7 +2085,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1724,7 +2104,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -1739,7 +2119,7 @@ class CommitIndexerTests(unittest.TestCase):
             metadata = InMemoryMetadataStore()
             indexer = CommitIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
             )
 
@@ -2146,7 +2526,7 @@ class HostedIndexTests(unittest.TestCase):
             github_api = self._make_github_api(second_sha)
             hosted = HostedIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
                 github_api=github_api,  # type: ignore[arg-type]
                 repo_cache=RepoCacheManager(base_dir=os.path.join(temp_dir, "cache")),
@@ -2175,7 +2555,7 @@ class HostedIndexTests(unittest.TestCase):
             self.assertIn("MERGE (project)-[r:HAS_PULL_REQUEST]->(entity)", queries)
             self.assertIn("MERGE (commit)-[r:ASSOCIATED_WITH_PR]->(entity)", queries)
             self.assertIn("MERGE (source)-[r:REFERENCES_ISSUE]->(target)", queries)
-            self.assertIn("MERGE (e:Episode:ContextNode", queries)
+            self.assertIn("MERGE (e:Episode:Episodic", queries)
             self.assertIn("MERGE (episode)-[r:ON]->(target)", queries)
             self.assertEqual(metadata.load_repo_source_state("demo").last_github_sync_status, "applied")
 
@@ -2186,7 +2566,7 @@ class HostedIndexTests(unittest.TestCase):
             github_api = FakeGitHubApiClient(fail_on_commit_prs=True)
             hosted = HostedIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
                 github_api=github_api,  # type: ignore[arg-type]
                 repo_cache=RepoCacheManager(base_dir=os.path.join(temp_dir, "cache")),
@@ -2338,7 +2718,7 @@ class HostedIndexTests(unittest.TestCase):
             )
             hosted = HostedIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
                 github_api=github_api,  # type: ignore[arg-type]
                 repo_cache=RepoCacheManager(base_dir=os.path.join(temp_dir, "cache")),
@@ -2543,7 +2923,7 @@ class LiveGitHubPipelineTests(unittest.TestCase):
             github_api = GitHubApiClient(token=self._token())
             hosted = HostedIndexer(
                 metadata_store=metadata,
-                graph_sink=Neo4jGraphSink(),
+                graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
                 github_api=github_api,
                 repo_cache=RepoCacheManager(base_dir=os.path.join(temp_dir, "cache")),

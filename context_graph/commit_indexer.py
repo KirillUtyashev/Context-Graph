@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 from .episode_processor import EpisodeProcessor, EpisodeWorkItem
-from .episodes import ContextNodeRef, EpisodeRecord
+from .episodes import make_entity_node, make_episode
 from .git_metadata import CommitInfo, GitMetadata
 from .graph_read import GraphReadRepository
 from .graph_sinks import BaseCypherGraphSink, CypherStatement
@@ -278,7 +278,7 @@ class CommitIndexer:
         if not text:
             return ()
         extra_nodes = [
-            ContextNodeRef(
+            make_entity_node(
                 node_id=f"commit:{snapshot.repo_id}:{commit.sha}",
                 repo_id=snapshot.repo_id,
                 kind="Commit",
@@ -290,7 +290,7 @@ class CommitIndexer:
         batch = self.episode_processor.apply_batch(
             [
                 EpisodeWorkItem(
-                    episode=EpisodeRecord(
+                    episode=make_episode(
                         episode_id=f"git-commit-message:{commit.sha}",
                         repo_id=snapshot.repo_id,
                         source_type="git_commit_message",
@@ -353,13 +353,13 @@ def _commit_message_text(commit: CommitInfo) -> str:
     return "\n\n".join(parts)
 
 
-def _context_ref_from_node(node) -> ContextNodeRef:
+def _context_ref_from_node(node):
     aliases = []
     if node.file_path:
         aliases.append(node.file_path.rsplit("/", 1)[-1])
     if node.qualified_name:
         aliases.extend(part for part in node.qualified_name.split(".") if part)
-    return ContextNodeRef(
+    return make_entity_node(
         node_id=node.node_id,
         repo_id=node.repo_id,
         kind=node.kind,
@@ -371,8 +371,8 @@ def _context_ref_from_node(node) -> ContextNodeRef:
     )
 
 
-def _touched_node_refs(diff) -> list[ContextNodeRef]:
-    refs: dict[str, ContextNodeRef] = {}
+def _touched_node_refs(diff) -> list[EntityNode]:
+    refs: dict[str, EntityNode] = {}
     for node in diff.added_nodes.values():
         if node.kind != "Project":
             refs[node.node_id] = _context_ref_from_node(node)
@@ -383,7 +383,7 @@ def _touched_node_refs(diff) -> list[ContextNodeRef]:
     for node in diff.removed_nodes.values():
         if node.kind != "Project":
             refs[node.node_id] = _context_ref_from_node(node)
-    return sorted(refs.values(), key=lambda item: item.node_id)
+    return sorted(refs.values(), key=lambda item: item.uuid)
 
 
 def _normalize_snapshot(snapshot: GraphSnapshot, *, repo_path: str, commit: CommitInfo) -> GraphSnapshot:

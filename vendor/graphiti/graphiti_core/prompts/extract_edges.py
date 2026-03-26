@@ -45,6 +45,11 @@ class Edge(BaseModel):
         None,
         description='The date and time when the relationship described by the edge fact stopped being true or ended. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.SSSSSSZ)',
     )
+    relationship_keywords: list[str] = Field(
+        ...,
+        description='One or more high-level key words that summarize the overarching nature of the relationship, focusing on concepts or themes rather than specific details',
+    )
+
 
 
 class ExtractedEdges(BaseModel):

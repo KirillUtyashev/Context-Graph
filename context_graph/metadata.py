@@ -8,7 +8,14 @@ import json
 import sqlite3
 from typing import Any, Iterable, Iterator, Optional, Sequence
 
-from .episodes import ContextNodeRef
+from .episodes import (
+    EntityNode,
+    entity_node_aliases,
+    entity_node_file_path,
+    entity_node_kind,
+    entity_node_qualified_name,
+    make_entity_node,
+)
 from .models import GraphSnapshot, canonical_json, utc_now_iso
 from .profiles import ProfileDeactivation, ProfileRecord
 
@@ -71,11 +78,11 @@ class MetadataStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_context_nodes(self, repo_id: str) -> tuple[ContextNodeRef, ...]:
+    def load_context_nodes(self, repo_id: str) -> tuple[EntityNode, ...]:
         raise NotImplementedError
 
     @abstractmethod
-    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[ContextNodeRef]) -> None:
+    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[EntityNode]) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -121,7 +128,7 @@ class InMemoryMetadataStore(MetadataStore):
         self._snapshots: dict[str, GraphSnapshot] = {}
         self._repo_states: dict[str, RepoIndexState] = {}
         self._repo_sources: dict[str, RepoSourceState] = {}
-        self._context_nodes: dict[str, dict[str, ContextNodeRef]] = {}
+        self._context_nodes: dict[str, dict[str, EntityNode]] = {}
         self._profiles: dict[str, dict[str, ProfileRecord]] = {}
         self._runs: list[dict[str, Any]] = []
 
@@ -157,13 +164,13 @@ class InMemoryMetadataStore(MetadataStore):
     def save_repo_source_state(self, state: RepoSourceState) -> None:
         self._repo_sources[state.repo_id] = state
 
-    def load_context_nodes(self, repo_id: str) -> tuple[ContextNodeRef, ...]:
+    def load_context_nodes(self, repo_id: str) -> tuple[EntityNode, ...]:
         return tuple(self._context_nodes.get(repo_id, {}).values())
 
-    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[ContextNodeRef]) -> None:
+    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[EntityNode]) -> None:
         bucket = self._context_nodes.setdefault(repo_id, {})
         for node in nodes:
-            bucket[node.node_id] = node
+            bucket[node.uuid] = node
 
     def load_profiles(
         self,
@@ -683,7 +690,7 @@ class _DbApiMetadataStore(MetadataStore):
         )
         self.connection.commit()
 
-    def load_context_nodes(self, repo_id: str) -> tuple[ContextNodeRef, ...]:
+    def load_context_nodes(self, repo_id: str) -> tuple[EntityNode, ...]:
         self.bootstrap()
         sql = f"""
             SELECT node_json
@@ -694,7 +701,7 @@ class _DbApiMetadataStore(MetadataStore):
         rows = self._execute(sql, (repo_id,)).fetchall()
         return tuple(_context_node_from_payload(json.loads(row[0])) for row in rows)
 
-    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[ContextNodeRef]) -> None:
+    def upsert_context_nodes(self, repo_id: str, nodes: Sequence[EntityNode]) -> None:
         if not nodes:
             return
         self.bootstrap()
@@ -707,7 +714,7 @@ class _DbApiMetadataStore(MetadataStore):
         rows = [
             (
                 repo_id,
-                node.node_id,
+                node.uuid,
                 canonical_json(_context_node_to_payload(node)),
             )
             for node in nodes
@@ -922,7 +929,7 @@ class _DbApiMetadataStore(MetadataStore):
 
 class SQLiteMetadataStore(_DbApiMetadataStore):
     def __init__(self, path: str) -> None:
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(path, check_same_thread=False)
         super().__init__(connection=connection, placeholder="?")
 
 
@@ -990,21 +997,21 @@ def _stable_lock_id(value: str) -> int:
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
-def _context_node_to_payload(node: ContextNodeRef) -> dict[str, Any]:
+def _context_node_to_payload(node: EntityNode) -> dict[str, Any]:
     return {
-        "node_id": node.node_id,
-        "repo_id": node.repo_id,
-        "kind": node.kind,
+        "node_id": node.uuid,
+        "repo_id": node.group_id,
+        "kind": entity_node_kind(node),
         "name": node.name,
-        "qualified_name": node.qualified_name,
-        "file_path": node.file_path,
-        "aliases": list(node.aliases),
-        "metadata": dict(node.metadata),
+        "qualified_name": entity_node_qualified_name(node),
+        "file_path": entity_node_file_path(node),
+        "aliases": list(entity_node_aliases(node)),
+        "metadata": dict(node.attributes),
     }
 
 
-def _context_node_from_payload(payload: dict[str, Any]) -> ContextNodeRef:
-    return ContextNodeRef(
+def _context_node_from_payload(payload: dict[str, Any]) -> EntityNode:
+    return make_entity_node(
         node_id=str(payload["node_id"]),
         repo_id=str(payload["repo_id"]),
         kind=str(payload["kind"]),

@@ -1,24 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 import os
-import sys
-import types
 from typing import Any
-
-
-def ensure_graphiti_vendor_path() -> None:
-    root = Path(__file__).resolve().parent.parent / "vendor" / "graphiti"
-    path = str(root)
-    if root.exists() and path not in sys.path:
-        sys.path.insert(0, path)
-    package_root = root / "graphiti_core"
-    if package_root.exists() and "graphiti_core" not in sys.modules:
-        package = types.ModuleType("graphiti_core")
-        package.__path__ = [str(package_root)]  # type: ignore[attr-defined]
-        package.__file__ = str(package_root / "__init__.py")
-        sys.modules["graphiti_core"] = package
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +47,7 @@ def make_episode_llm_client(settings: EpisodeLLMSettings | None) -> Any | None:
     if settings is None:
         return None
 
-    ensure_graphiti_vendor_path()
-    from graphiti_core.llm_client.config import LLMConfig
+    from .runtime.llm.config import LLMConfig
 
     config = LLMConfig(
         api_key=settings.api_key,
@@ -74,12 +57,12 @@ def make_episode_llm_client(settings: EpisodeLLMSettings | None) -> Any | None:
     )
 
     if settings.provider == "openai":
-        from graphiti_core.llm_client.openai_client import OpenAIClient
+        from .runtime.llm.openai_client import OpenAIClient
 
         return OpenAIClient(config=config)
 
     if settings.provider == "bedrock":
-        from graphiti_core.llm_client.bedrock_client import BedrockLLMClient
+        from .runtime.llm.bedrock_client import BedrockLLMClient
 
         return BedrockLLMClient(config=config, region_name=settings.aws_region)
 
