@@ -229,17 +229,21 @@ async def edge_fulltext_search(
             for r in res['hits']['hits']:
                 input_ids.append({'id': r['_source']['uuid'], 'score': r['_score']})
 
-            # Match the edge ids and return the values
+            # Match the edge ids and return the values.
+            # Neptune: use e.uuid = id.id (AOSS returns uuids, not Neptune internal ids).
+            # Append extra filters as AND clauses — do not use a second WHERE.
+            neptune_extra = ''
+            if filter_queries:
+                neptune_extra = '\nAND ' + '\nAND '.join(filter_queries)
+
             query = (
                 """
-                                UNWIND $ids as id
-                                MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
-                                WHERE e.group_id IN $group_ids 
-                                AND id(e)=id 
-                                """
-                + filter_query
+                UNWIND $ids as id
+                MATCH (n:Entity)-[e:RELATES_TO]->(m:Entity)
+                WHERE e.uuid = id.id
+                """
+                + neptune_extra
                 + """
-                AND id(e)=id
                 WITH e, id.score as score, startNode(e) AS n, endNode(e) AS m
                 RETURN
                     e.uuid AS uuid,
@@ -255,7 +259,7 @@ async def edge_fulltext_search(
                     e.invalid_at AS invalid_at,
                     properties(e) AS attributes
                 ORDER BY score DESC LIMIT $limit
-                            """
+                """
             )
 
             records, _, _ = await driver.execute_query(
