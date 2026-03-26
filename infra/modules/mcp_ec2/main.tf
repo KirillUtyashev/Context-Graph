@@ -219,6 +219,28 @@ resource "aws_iam_role_policy" "aurora_secret_read" {
   })
 }
 
+resource "aws_iam_role_policy" "aoss_api_access" {
+  count = var.aoss_host != "" ? 1 : 0
+
+  name = "${var.name}-mcp-aoss-api-access"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "AOSSAPIAccess"
+        Effect = "Allow"
+        Action = ["aoss:APIAccessAll"]
+        # Scope to the specific collection ARN when provided; fall back to "*"
+        # (the AOSS data access policy in the opensearch_aoss module provides
+        # the fine-grained per-index authorization in that case).
+        Resource = var.aoss_collection_arn != "" ? [var.aoss_collection_arn] : ["*"]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "this" {
   name = "${var.name}-mcp-ec2-profile"
   role = aws_iam_role.ssm.name
@@ -226,7 +248,7 @@ resource "aws_iam_instance_profile" "this" {
 
 resource "aws_instance" "this" {
   ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.micro"
+  instance_type          = "t3.medium"
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.mcp.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
@@ -273,6 +295,7 @@ unit = textwrap.dedent('''
     Environment=AURORA_DB_NAME=${var.aurora_db_name}
     Environment=AURORA_USERNAME=${var.aurora_username}
     Environment=AURORA_PASSWORD_SECRET_ARN=${var.aurora_password_secret_arn}
+    Environment=AOSS_HOST=${var.aoss_host}
     Environment=CONTEXT_GRAPH_LLM_PROVIDER=bedrock
     ExecStart=/opt/mcp_server/venv/bin/python /opt/mcp_server/current/main.py
     Restart=on-failure
@@ -332,3 +355,13 @@ SCRIPT
   tags = merge(var.tags, { Name = "${var.name}-mcp" })
 }
 
+resource "aws_eip" "mcp" {
+  domain = "vpc"
+
+  tags = merge(var.tags, { Name = "${var.name}-mcp-eip" })
+}
+
+resource "aws_eip_association" "mcp" {
+  instance_id   = aws_instance.this.id
+  allocation_id = aws_eip.mcp.id
+}

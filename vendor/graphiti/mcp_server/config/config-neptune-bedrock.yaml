@@ -38,9 +38,8 @@ database:
       # Format: neptune-db://<cluster-endpoint>
       # The NEPTUNE_HOST env var overrides this value (see DatabaseDriverFactory).
       host: ${NEPTUNE_HOST}
-      # AOSS host for BM25/keyword search. Leave unset to use semantic+graph only.
-      # Uncomment and set when an OpenSearch Serverless collection is available:
-      # aoss_host: ${AOSS_HOST}
+      # AOSS host for BM25/keyword search. Leave AOSS_HOST unset (or empty) to use semantic+graph only.
+      aoss_host: ${AOSS_HOST}
 
 graphiti:
   group_id: main

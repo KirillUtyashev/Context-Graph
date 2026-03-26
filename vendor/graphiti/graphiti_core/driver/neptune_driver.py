@@ -21,6 +21,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 from langchain_aws.graphs import NeptuneAnalyticsGraph, NeptuneGraph
 from opensearchpy import OpenSearch, Urllib3AWSV4SignerAuth, Urllib3HttpConnection, helpers
 
@@ -155,10 +156,14 @@ class NeptuneDriver(GraphDriver):
         if not host:
             raise ValueError('You must provide an endpoint to create a NeptuneDriver')
 
+        # Neptune Serverless can take several minutes to resume from auto-pause.
+        # Increase read_timeout to 300s so cold-start writes don't time out.
+        _neptune_config = BotocoreConfig(read_timeout=300, connect_timeout=30)
+
         if host.startswith('neptune-db://'):
             # This is a Neptune Database Cluster
             endpoint = host.replace('neptune-db://', '')
-            self.client = NeptuneGraph(endpoint, port)
+            self.client = NeptuneGraph(endpoint, port, config=_neptune_config)
             logger.debug('Creating Neptune Database session for %s', host)
         elif host.startswith('neptune-graph://'):
             # This is a Neptune Analytics Graph

@@ -86,6 +86,7 @@ class EpisodeType(Enum):
     git_commit_message = 'git_commit_message'
     user_message = 'user_message'
     agent_message = 'agent_message'
+    agent_transcript = 'agent_transcript'
 
     @staticmethod
     def from_str(episode_type: str) -> 'EpisodeType':

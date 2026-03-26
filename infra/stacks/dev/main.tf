@@ -32,6 +32,8 @@ module "mcp" {
   aurora_password_secret_arn = module.aurora.master_password_secret_arn
   aurora_db_name             = module.aurora.db_name
   aurora_username            = module.aurora.master_username
+  aoss_host                  = module.opensearch_aoss.collection_endpoint
+  aoss_collection_arn        = module.opensearch_aoss.collection_arn
   tags                      = local.tags
 }
 
@@ -85,6 +87,13 @@ module "neptune" {
   min_capacity   = var.neptune_min_capacity
   max_capacity   = var.neptune_max_capacity
   tags           = local.tags
+}
+
+module "opensearch_aoss" {
+  source        = "../../modules/opensearch_aoss"
+  name          = local.name
+  ec2_role_name = "${local.name}-mcp-ec2-role"
+  tags          = local.tags
 }
 
 module "repo_cache_efs" {

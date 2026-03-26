@@ -60,6 +60,18 @@ variable "aurora_username" {
   default     = "postgres"
 }
 
+variable "aoss_host" {
+  type        = string
+  description = "AOSS collection endpoint hostname (no https:// prefix). When non-empty, BM25/keyword search is enabled. Leave empty to disable."
+  default     = ""
+}
+
+variable "aoss_collection_arn" {
+  type        = string
+  description = "AOSS collection ARN. Used to scope the aoss:APIAccessAll IAM policy. Required when aoss_host is set."
+  default     = ""
+}
+
 # Optional IAM tightening: if set non-empty, only allow invoking these model IDs/ARNs
 variable "bedrock_allowed_model_ids" {
   type    = list(string)

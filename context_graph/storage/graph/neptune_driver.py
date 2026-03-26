@@ -17,10 +17,13 @@ limitations under the License.
 import asyncio
 import datetime
 import logging
+import re
+import time
 from collections.abc import Coroutine
 from typing import Any
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 from langchain_aws.graphs import NeptuneAnalyticsGraph, NeptuneGraph
 from opensearchpy import OpenSearch, Urllib3AWSV4SignerAuth, Urllib3HttpConnection, helpers
 
@@ -155,10 +158,14 @@ class NeptuneDriver(GraphDriver):
         if not host:
             raise ValueError('You must provide an endpoint to create a NeptuneDriver')
 
+        # Neptune Serverless can take several minutes to resume from auto-pause.
+        # Increase read_timeout to 300s so cold-start writes don't time out.
+        _neptune_config = BotocoreConfig(read_timeout=300, connect_timeout=30)
+
         if host.startswith('neptune-db://'):
             # This is a Neptune Database Cluster
             endpoint = host.replace('neptune-db://', '')
-            self.client = NeptuneGraph(endpoint, port)
+            self.client = NeptuneGraph(endpoint, port, config=_neptune_config)
             logger.debug('Creating Neptune Database session for %s', host)
         elif host.startswith('neptune-graph://'):
             # This is a Neptune Analytics Graph
@@ -256,6 +263,7 @@ class NeptuneDriver(GraphDriver):
                 queries.append(self._sanitize_parameters(q, params))
             return queries
         else:
+            keys_to_inline = []
             for k, v in params.items():
                 if isinstance(v, datetime.datetime):
                     params[k] = v.isoformat()
@@ -264,26 +272,40 @@ class NeptuneDriver(GraphDriver):
                     for i, item in enumerate(v):
                         if isinstance(item, datetime.datetime):
                             v[i] = item.isoformat()
-                            query = str(query).replace(f'${k}', f'datetime(${k})')
                         if isinstance(item, dict):
                             query = self._sanitize_parameters(query, v[i])
 
-                    # If the list contains datetime objects, we need to wrap each element with datetime()
-                    if any(isinstance(item, str) and 'T' in item for item in v):
-                        # Create a new list expression with datetime() wrapped around each element
-                        datetime_list = (
-                            '['
-                            + ', '.join(
-                                f'datetime("{item}")'
-                                if isinstance(item, str) and 'T' in item
-                                else repr(item)
-                                for item in v
-                            )
-                            + ']'
-                        )
-                        query = str(query).replace(f'${k}', datetime_list)
+                    # Neptune's execute_open_cypher_query cannot handle list-typed
+                    # parameters for primitive types (LIST<STRING>, LIST<INTEGER>
+                    # etc.) — it raises "Type mismatch: expected List<T> but was
+                    # String". Fix: inline primitive-only lists as Cypher array
+                    # literals and remove them from the params dict so Neptune
+                    # never validates them. Lists of dicts (used for UNWIND batch
+                    # operations) are left as JSON parameters — Neptune handles
+                    # those correctly.
+                    if v and not any(isinstance(item, float) for item in v) and all(isinstance(item, (str, int, bool)) for item in v):
+                        _ISO_DT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}')
+
+                        def _cypher_lit(item):
+                            if isinstance(item, str):
+                                if _ISO_DT_RE.match(item):
+                                    # Looks like a datetime ISO string
+                                    return f'datetime("{item}")'
+                                escaped = item.replace('\\', '\\\\').replace("'", "\\'")
+                                return f"'{escaped}'"
+                            elif isinstance(item, bool):
+                                return 'true' if item else 'false'
+                            elif isinstance(item, (int, float)):
+                                return str(item)
+                            return repr(item)
+
+                        literal = '[' + ', '.join(_cypher_lit(item) for item in v) + ']'
+                        query = str(query).replace(f'${k}', literal)
+                        keys_to_inline.append(k)
                 elif isinstance(v, dict):
                     query = self._sanitize_parameters(query, v)
+            for k in keys_to_inline:
+                del params[k]
             return query
 
     async def execute_query(
@@ -329,22 +351,28 @@ class NeptuneDriver(GraphDriver):
     def _run_query(self, cypher_query_, params):
         import json as _json
         cypher_query_ = str(self._sanitize_parameters(cypher_query_, params))
-        try:
-            # langchain_aws NeptuneGraph.query() ignores the params dict — it calls
-            # execute_open_cypher_query without the parameters arg. We call the underlying
-            # boto3 client directly to pass params as a JSON string.
-            kwargs: dict = {'openCypherQuery': cypher_query_}
-            if params:
-                kwargs['parameters'] = _json.dumps(params, default=self._json_default)
-            raw = self.client.client.execute_open_cypher_query(**kwargs)
-            result = raw['results']
-        except Exception as e:
-            logger.error('Query: %s', cypher_query_)
-            logger.error('Parameters: %s', params)
-            logger.error('Error executing query: %s', e)
-            raise e
-
-        return result, None, None
+        kwargs: dict = {'openCypherQuery': cypher_query_}
+        if params:
+            kwargs['parameters'] = _json.dumps(params, default=self._json_default)
+        # Neptune Serverless uses OCC — ConcurrentModificationException is transient.
+        # Retry up to 8 times with exponential backoff (1s, 2s, 4s, …, 128s max).
+        max_retries = 8
+        for attempt in range(max_retries + 1):
+            try:
+                raw = self.client.client.execute_open_cypher_query(**kwargs)
+                return raw['results'], None, None
+            except Exception as e:
+                err_name = type(e).__name__
+                if 'ConcurrentModificationException' in err_name or 'ConcurrentModification' in str(e):
+                    if attempt < max_retries:
+                        wait = min(2 ** attempt, 128)
+                        logger.warning('ConcurrentModificationException on attempt %d/%d — retrying in %ds', attempt + 1, max_retries, wait)
+                        time.sleep(wait)
+                        continue
+                logger.error('Query: %s', cypher_query_)
+                logger.error('Parameters: %s', params)
+                logger.error('Error executing query: %s', e)
+                raise e
 
     def session(self, database: str | None = None) -> GraphDriverSession:
         return NeptuneDriverSession(driver=self)
