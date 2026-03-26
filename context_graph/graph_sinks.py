@@ -687,7 +687,7 @@ class BaseCypherGraphSink:
             )
 
         for index, embedding in zip(positions, embeddings, strict=True):
-            materialized[index][embedding_key] = list(embedding)
+            materialized[index][embedding_key] = ','.join(str(x) for x in embedding)
 
         return materialized
 
@@ -840,6 +840,7 @@ class BaseCypherGraphSink:
                             "    n.properties_json = row.properties_json, "
                             "    n.active = true, "
                             "    n.last_seen_revision = row.revision_id, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.updated_at = $observed_at"
                         ),
                         parameters={"rows": enriched_batch, "observed_at": observed_at},
@@ -968,6 +969,7 @@ class BaseCypherGraphSink:
                     "    commit.parent_shas_json = $parent_shas_json, "
                     "    commit.changed_files_json = $changed_files_json, "
                     "    commit.placeholder = false, "
+                    "    commit.name_embedding = $name_embedding, "
                     "    commit.updated_at = $observed_at"
                 ),
                 parameters={
@@ -1054,6 +1056,7 @@ class BaseCypherGraphSink:
                         "    parent.kind = row.kind, "
                         "    parent.name = row.name, "
                         "    parent.summary = row.summary, "
+                        "    parent.name_embedding = row.name_embedding, "
                         "    parent.updated_at = $observed_at "
                         "WITH row "
                         "MATCH (parent:Commit {repo_id: row.repo_id, sha: row.parent_sha}) "
@@ -1193,6 +1196,7 @@ class BaseCypherGraphSink:
                             "    n.updated_at = row.updated_at, "
                             "    n.metadata_json = row.metadata_json, "
                             "    n.raw_json = row.raw_json, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.last_synced_at = $observed_at"
                         ),
                         parameters={"rows": enriched_batch, "observed_at": observed_at},
@@ -1364,6 +1368,7 @@ class BaseCypherGraphSink:
                             "    n.aliases_json = row.aliases_json, "
                             "    n.summary = row.summary, "
                             "    n.metadata_json = row.metadata_json, "
+                            "    n.name_embedding = row.name_embedding, "
                             "    n.updated_at = $observed_at"
                         ),
                         parameters={"rows": enriched_batch, "observed_at": observed_at},
@@ -1456,6 +1461,7 @@ class BaseCypherGraphSink:
                         "    r.invalid_at = row.invalid_at, "
                         "    r.expired_at = row.expired_at, "
                         "    r.metadata_json = row.metadata_json, "
+                        "    r.fact_embedding = row.fact_embedding, "
                         "    r.updated_at = $observed_at"
                     ),
                     parameters={"rows": enriched_batch, "observed_at": observed_at},

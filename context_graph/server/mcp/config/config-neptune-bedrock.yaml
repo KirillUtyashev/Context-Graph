@@ -42,5 +42,5 @@ database:
       aoss_host: ${AOSS_HOST}
 
 graphiti:
-  group_id: main
+  group_id: order-management
   user_id: mcp_user
