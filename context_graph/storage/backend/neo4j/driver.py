@@ -1,7 +1,9 @@
+
 """Neo4j backend driver implementation."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -90,11 +92,21 @@ class Neo4jBackendDriver(BackendDriver):
     async def execute_query(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
         """Execute one query and normalize Neo4j records into plain dicts."""
 
-        eager_result = await self.client.execute_query(
-            query,
-            parameters_=kwargs,
-            database_=self.config.database,
-        )
+        try:
+            eager_result = await self.client.execute_query(
+                query,
+                parameters_=kwargs,
+                database_=self.config.database,
+                bookmark_manager_=None,
+            )
+        except TypeError:
+            # Test doubles and older adapter shims may not accept the
+            # bookmark_manager_ kwarg. Fall back to the minimal call shape.
+            eager_result = await self.client.execute_query(
+                query,
+                parameters_=kwargs,
+                database_=self.config.database,
+            )
         return [record.data() for record in eager_result.records]
 
     def session(self) -> BackendSession:
@@ -104,7 +116,8 @@ class Neo4jBackendDriver(BackendDriver):
     async def transaction(self) -> AsyncIterator[Transaction]:
         """Use Neo4j's native transaction semantics."""
 
-        async with self.client.session(database=self.config.database) as session:
+        session = self.client.session(database=self.config.database)
+        try:
             tx = await session.begin_transaction()
             try:
                 yield _Neo4jTransaction(tx)
@@ -112,6 +125,8 @@ class Neo4jBackendDriver(BackendDriver):
             except BaseException:
                 await tx.rollback()
                 raise
+        finally:
+            await session.close()
 
     async def close(self) -> None:
         await self.client.close()
@@ -152,7 +167,10 @@ class Neo4jBackendSession(BackendSession):
 
     async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
         cursor = await self._session.run(query, kwargs)
-        return await cursor.data()
+        data = cursor.data()
+        if inspect.isawaitable(data):
+            return await data
+        return data
 
     async def close(self) -> None:
         await self._session.close()
@@ -169,4 +187,7 @@ class _Neo4jTransaction(Transaction):
 
     async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
         cursor = await self._tx.run(query, kwargs)
-        return await cursor.data()
+        data = cursor.data()
+        if inspect.isawaitable(data):
+            return await data
+        return data
