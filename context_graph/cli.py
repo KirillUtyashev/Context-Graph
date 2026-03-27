@@ -957,8 +957,24 @@ def _github_sync_summary(result) -> dict[str, object] | None:
         "pull_request_numbers": list(result.pull_request_numbers),
         "issue_numbers": list(result.issue_numbers),
         "operations_emitted": result.operations.operation_count(),
+        "observation_operations_emitted": _observation_operation_count(result),
+        "evidence_operations_emitted": _evidence_operation_count(result),
         "operations_applied": result.operations_applied,
     }
+
+
+def _observation_operation_count(result) -> int:
+    observation_operations = getattr(result, "observation_operations", None)
+    if observation_operations is None:
+        return 0
+    return observation_operations.operation_count()
+
+
+def _evidence_operation_count(result) -> int:
+    evidence_operations = getattr(result, "evidence_operations", None)
+    if evidence_operations is None:
+        return 0
+    return evidence_operations.operation_count()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1003,6 +1019,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "snapshot": _snapshot_summary(result.snapshot) if result.snapshot else None,
                 "diff": _diff_summary(result.apply_result.diff) if result.apply_result else None,
                 "operations_emitted": result.operations.operation_count(),
+                "observation_operations_emitted": _observation_operation_count(result),
+                "evidence_operations_emitted": _evidence_operation_count(result),
                 "operations_applied": result.apply_result.operations_applied if result.apply_result else 0,
                 "operations_preview": _operations_preview(
                     result.operations,
@@ -1020,6 +1038,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         backend_driver = _make_backend_driver(args) if args.execute else None
         if args.execute and backend_driver is None:
             raise RuntimeError("deterministic execution requires a configured backend connection")
+        llm_settings = load_episode_llm_settings(args)
+        llm_client = make_episode_llm_client(llm_settings)
         try:
             driver = IngestionDriver(
                 metadata_store=metadata,
@@ -1027,6 +1047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 snapshot_producer=_producer(),
                 github_api=_make_github_api(args),
                 repo_cache=RepoCacheManager(base_dir=args.repo_cache_dir),
+                llm_client=llm_client,
             )
             result = driver.index_hosted(
                 HostedIndexRequest(
@@ -1055,10 +1076,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "snapshot": _snapshot_summary(result.commit_result.snapshot) if result.commit_result.snapshot else None,
                     "diff": _diff_summary(result.commit_result.apply_result.diff) if result.commit_result.apply_result else None,
                     "operations_emitted": result.commit_result.operations.operation_count(),
+                    "observation_operations_emitted": _observation_operation_count(result.commit_result),
+                    "evidence_operations_emitted": _evidence_operation_count(result.commit_result),
                     "operations_applied": result.commit_result.apply_result.operations_applied if result.commit_result.apply_result else 0,
                 },
                 "github_sync": _github_sync_summary(result.github_sync_result),
                 "operations_emitted": result.operations.operation_count(),
+                "observation_operations_emitted": _observation_operation_count(result),
+                "evidence_operations_emitted": _evidence_operation_count(result),
                 "operations_applied": result.operations_applied,
                 "operations_preview": _operations_preview(
                     result.operations,

@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import replace
 import re
 import uuid
+from typing import Any
 
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, GitHubRepoResolver
 from context_graph.ingestion.git.github_indexer import GitHubIndexer, GitHubSyncResult
-from context_graph.storage.backend import BackendDriver, MutationPlan
+from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .commit_indexing import CommitIndexingService, default_repo_id
 from .deterministic_planner import DeterministicMutationPlanner
@@ -32,6 +33,7 @@ class HostedIndexingService:
         repo_cache: RepoCacheManager | None = None,
         repo_resolver: GitHubRepoResolver | None = None,
         planner: DeterministicMutationPlanner | None = None,
+        llm_client: Any | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -40,6 +42,7 @@ class HostedIndexingService:
         self.github_api = github_api
         self.repo_cache = repo_cache or RepoCacheManager(git_metadata=self.git_metadata)
         self.planner = planner or DeterministicMutationPlanner()
+        self.llm_client = llm_client
         self.repo_resolver = repo_resolver or GitHubRepoResolver(
             git_metadata=self.git_metadata,
             github_api=github_api,
@@ -124,6 +127,22 @@ class HostedIndexingService:
                     commit_result.operations,
                     github_result.operations if github_result is not None else MutationPlan(),
                 )
+                observation_operations = merge_mutation_plans(
+                    getattr(commit_result, "observation_operations", MutationPlan()),
+                    (
+                        github_result.observation_operations
+                        if github_result is not None
+                        else MutationPlan()
+                    ),
+                )
+                evidence_operations = merge_mutation_plans(
+                    getattr(commit_result, "evidence_operations", MutationPlan()),
+                    (
+                        github_result.evidence_operations
+                        if github_result is not None
+                        else MutationPlan()
+                    ),
+                )
                 return DeterministicHostedIndexResult(
                     request_id=request_id,
                     repo_id=resolved_repo_id,
@@ -137,6 +156,8 @@ class HostedIndexingService:
                         (commit_result.apply_result.operations_applied if commit_result.apply_result else 0)
                         + (github_result.operations_applied if github_result is not None else 0)
                     ),
+                    observation_operations=observation_operations,
+                    evidence_operations=evidence_operations,
                 )
             finally:
                 self.repo_cache.cleanup_request_workspace(resolved_repo_id, request_id)
@@ -207,6 +228,7 @@ class HostedIndexingService:
         github_indexer = GitHubIndexer(
             github_api=self.github_api,
             backend_driver=self.backend_driver,
+            llm_client=self.llm_client,
         )
         sync_started_at = utc_now_iso()
         try:
@@ -214,6 +236,7 @@ class HostedIndexingService:
                 repo_id=repo_id,
                 repo_ref=repo_ref,
                 commit_shas=commit_result.applied_commit_shas,
+                snapshot=commit_result.snapshot,
                 execute=request.execute,
             )
         except Exception as exc:
@@ -235,6 +258,7 @@ class HostedIndexingService:
                 entity_counts={},
                 pull_request_numbers=(),
                 issue_numbers=(),
+                evidence_operations=MutationPlan(),
             ), failed_state
 
         if result.skipped or source_state is None:

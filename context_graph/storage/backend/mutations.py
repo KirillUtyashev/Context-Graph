@@ -104,6 +104,26 @@ class MutationPlan:
         return len(self.upsert_nodes) + len(self.upsert_edges) + len(self.upsert_search_documents)
 
 
+def merge_mutation_plans(*plans: MutationPlan) -> MutationPlan:
+    """Merge multiple plans while deduplicating by canonical record id."""
+
+    nodes: dict[str, NodeRecord] = {}
+    edges: dict[str, EdgeRecord] = {}
+    search_documents: dict[tuple[RecordKind, str], SearchDocumentRecord] = {}
+    for plan in plans:
+        for record in plan.upsert_nodes:
+            nodes[record.record_id] = record
+        for record in plan.upsert_edges:
+            edges[record.record_id] = record
+        for record in plan.upsert_search_documents:
+            search_documents[(record.record_kind, record.record_id)] = record
+    return MutationPlan(
+        upsert_nodes=tuple(nodes.values()),
+        upsert_edges=tuple(edges.values()),
+        upsert_search_documents=tuple(search_documents.values()),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MutationApplyResult:
     """Counts returned after applying a mutation plan."""
@@ -125,4 +145,3 @@ class MutationOperations(ABC):
     @abstractmethod
     async def apply(self, plan: MutationPlan) -> MutationApplyResult:
         """Apply the supplied plan and return aggregate write counts."""
-

@@ -961,7 +961,7 @@ class DeterministicPlannerTests(unittest.TestCase):
 
         self.assertEqual(len(commit_plan.upsert_nodes), 2)
         self.assertEqual(len(commit_plan.upsert_search_documents), 1)
-        self.assertEqual(len(commit_plan.upsert_edges), 7)
+        self.assertEqual(len(commit_plan.upsert_edges), 6)
         relationship_types = {edge.relationship_type for edge in commit_plan.upsert_edges}
         self.assertEqual(
             relationship_types,
@@ -969,7 +969,6 @@ class DeterministicPlannerTests(unittest.TestCase):
                 "HAS_COMMIT",
                 "PRECEDES",
                 "TOUCHED",
-                "TOUCHED_FILE",
                 "INTRODUCED_VERSION",
             },
         )
@@ -996,7 +995,8 @@ class DeterministicIngestionTests(unittest.TestCase):
         )
 
         self.assertFalse(result.skipped)
-        self.assertEqual(result.operations.operation_count(), 19)
+        self.assertEqual(result.operations.operation_count(), 21)
+        self.assertEqual(result.observation_operations.operation_count(), 3)
         self.assertEqual(result.apply_result.operations_applied, 0)
         self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, "r1")
 
@@ -1176,6 +1176,7 @@ class DeterministicIngestionTests(unittest.TestCase):
 
         self.assertIsNotNone(result.github_sync_result)
         self.assertEqual(result.operations.operation_count(), 1)
+        self.assertEqual(result.observation_operations.operation_count(), 0)
         saved_source = metadata.load_repo_source_state("demo")
         self.assertEqual(saved_source.last_github_sync_status, "applied")
         self.assertIsNone(saved_source.last_github_sync_error)
@@ -1252,9 +1253,10 @@ class DeterministicIngestionTests(unittest.TestCase):
                     limit=100,
                     execute=False,
                 )
-            )
+        )
 
         self.assertEqual(result.operations.operation_count(), commit_plan.operation_count())
+        self.assertEqual(result.observation_operations.operation_count(), 0)
         self.assertEqual(result.github_sync_result.error, "github exploded")
         saved_source = metadata.load_repo_source_state("demo")
         self.assertEqual(saved_source.last_github_sync_status, "failed")

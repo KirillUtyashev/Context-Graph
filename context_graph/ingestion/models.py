@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from context_graph.ingestion.git.git_metadata import CommitInfo
@@ -42,6 +42,8 @@ class CommitIndexResult:
     apply_result: SnapshotApplyResult | None
     operations: MutationPlan
     applied_commit_shas: tuple[str, ...]
+    observation_operations: MutationPlan = field(default_factory=MutationPlan)
+    evidence_operations: MutationPlan = field(default_factory=MutationPlan)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,3 +73,5 @@ class DeterministicHostedIndexResult:
     github_sync_result: GitHubSyncResult | None
     operations: MutationPlan
     operations_applied: int
+    observation_operations: MutationPlan = field(default_factory=MutationPlan)
+    evidence_operations: MutationPlan = field(default_factory=MutationPlan)

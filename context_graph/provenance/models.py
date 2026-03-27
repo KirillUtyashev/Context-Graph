@@ -1,0 +1,181 @@
+"""Domain models for the observation-first provenance ontology."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal, Mapping
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ObservationKind(str, Enum):
+    """Closed set of deterministic observation kinds supported in v1."""
+
+    GIT_COMMIT_MESSAGE = "git_commit_message"
+    GITHUB_PR_BODY = "github_pr_body"
+    GITHUB_ISSUE_BODY = "github_issue_body"
+    GITHUB_PR_REVIEW = "github_pr_review"
+    GITHUB_PR_REVIEW_COMMENT = "github_pr_review_comment"
+    GITHUB_ISSUE_COMMENT = "github_issue_comment"
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationSourceRef:
+    """Stable reference to the structural record an observation came from."""
+
+    source_kind: str
+    source_id: str
+    source_record_type: str
+    repo_id: str
+    display_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationLink:
+    """Deterministic relationship emitted from an observation."""
+
+    relation_type: str
+    target_record_id: str
+    target_record_type: str
+    properties: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    """Canonical raw provenance/event record."""
+
+    observation_id: str
+    repo_id: str
+    observation_kind: ObservationKind
+    source_kind: str
+    source_id: str
+    observed_at: str | None
+    author: str | None
+    title: str | None
+    text: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecord:
+    """Canonical bounded evidence derived from one raw observation."""
+
+    evidence_id: str
+    repo_id: str
+    evidence_kind: str
+    quote_text: str
+    summary_text: str
+    span_start: int | None
+    span_end: int | None
+    support_kind: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+def git_commit_message_observation_id(repo_id: str, commit_sha: str) -> str:
+    return f"observation:{ObservationKind.GIT_COMMIT_MESSAGE.value}:{repo_id}:{commit_sha}"
+
+
+def github_pr_body_observation_id(repo_id: str, pr_number: int) -> str:
+    return f"observation:{ObservationKind.GITHUB_PR_BODY.value}:{repo_id}:{pr_number}"
+
+
+def github_issue_body_observation_id(repo_id: str, issue_number: int) -> str:
+    return f"observation:{ObservationKind.GITHUB_ISSUE_BODY.value}:{repo_id}:{issue_number}"
+
+
+def github_pr_review_observation_id(repo_id: str, review_id: str | int) -> str:
+    return f"observation:{ObservationKind.GITHUB_PR_REVIEW.value}:{repo_id}:{review_id}"
+
+
+def github_pr_review_comment_observation_id(repo_id: str, comment_id: str | int) -> str:
+    return f"observation:{ObservationKind.GITHUB_PR_REVIEW_COMMENT.value}:{repo_id}:{comment_id}"
+
+
+def github_issue_comment_observation_id(repo_id: str, comment_id: str | int) -> str:
+    return f"observation:{ObservationKind.GITHUB_ISSUE_COMMENT.value}:{repo_id}:{comment_id}"
+
+
+def evidence_record_id(
+    *,
+    repo_id: str,
+    observation_id: str,
+    evidence_kind: str,
+    quote_text: str,
+    span_start: int | None,
+    span_end: int | None,
+) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(
+        "|".join(
+            [
+                repo_id,
+                observation_id,
+                evidence_kind,
+                quote_text,
+                str(span_start),
+                str(span_end),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"evidence:{repo_id}:{digest}"
+
+
+class ProvenanceBaseModel(BaseModel):
+    """Base model for structured provenance extraction outputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EvidenceCandidate(ProvenanceBaseModel):
+    evidence_kind: str
+    quote_text: str
+    summary_text: str
+    span_start: int | None = None
+    span_end: int | None = None
+    about_hints: list[str] = Field(default_factory=list)
+    support_kind: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClaimCandidate(ProvenanceBaseModel):
+    claim_text: str
+    claim_kind: str
+    about_hints: list[str] = Field(default_factory=list)
+    supported_evidence_ids: list[str] = Field(default_factory=list)
+    derivation_kind: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClaimRelationCandidate(ProvenanceBaseModel):
+    relation_type: Literal["contradicts", "supersedes", "supports", "unrelated"]
+    relation_rationale: str
+    confidence_note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchArtifactCandidate(ProvenanceBaseModel):
+    artifact_kind: str
+    title: str
+    summary: str
+    key_points: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    about_refs: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceExtractionResponse(ProvenanceBaseModel):
+    evidence: list[EvidenceCandidate] = Field(default_factory=list)
+
+
+class ClaimDerivationResponse(ProvenanceBaseModel):
+    claims: list[ClaimCandidate] = Field(default_factory=list)
+
+
+class ClaimRelationResponse(ProvenanceBaseModel):
+    relations: list[ClaimRelationCandidate] = Field(default_factory=list)
+
+
+class ResearchArtifactSynthesisResponse(ProvenanceBaseModel):
+    artifacts: list[ResearchArtifactCandidate] = Field(default_factory=list)

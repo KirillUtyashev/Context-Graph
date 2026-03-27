@@ -369,7 +369,7 @@ The CLI now supports git-aware temporal indexing for existing local checkouts. I
 - resolve `HEAD` and explicit commit SHAs from git
 - build snapshots from detached temporary worktrees for exact commits
 - replay missing commits in order when the last indexed commit is an ancestor of the current target
-- attach first-class `Commit` nodes plus `HAS_COMMIT`, `PRECEDES`, `TOUCHED`, and `TOUCHED_FILE` relationships into the persisted graph
+- attach first-class `Commit` nodes plus `HAS_COMMIT`, `PRECEDES`, and `TOUCHED` relationships into the persisted graph
 
 Current limitations:
 

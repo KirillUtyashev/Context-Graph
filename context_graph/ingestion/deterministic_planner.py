@@ -15,6 +15,7 @@ from context_graph.ingestion.git.git_metadata import CommitInfo
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
 from context_graph.storage.backend import (
     EdgeRecord,
+    merge_mutation_plans,
     MutationPlan,
     NodeRecord,
     RecordKind,
@@ -278,20 +279,6 @@ class DeterministicMutationPlanner:
                 )
             )
 
-        for row in self._touched_file_rows(snapshot=snapshot, diff=diff, commit=commit):
-            edges.append(
-                EdgeRecord(
-                    record_id=f"touched_file:{commit_record_id}:{row['node_id']}",
-                    record_type="touched_file",
-                    repo_id=snapshot.repo_id,
-                    group_id=snapshot.repo_id,
-                    relationship_type="TOUCHED_FILE",
-                    source_record_id=commit_record_id,
-                    target_record_id=row["node_id"],
-                    properties={"change_kind": row["change_kind"]},
-                )
-            )
-
         for row in self._introduced_version_rows(
             diff=diff,
             commit=commit,
@@ -337,21 +324,7 @@ class DeterministicMutationPlanner:
     def merge_plans(self, *plans: MutationPlan) -> MutationPlan:
         """Merge mutation plans while deduplicating by record id."""
 
-        nodes: dict[str, NodeRecord] = {}
-        edges: dict[str, EdgeRecord] = {}
-        search_documents: dict[tuple[RecordKind, str], SearchDocumentRecord] = {}
-        for plan in plans:
-            for record in plan.upsert_nodes:
-                nodes[record.record_id] = record
-            for record in plan.upsert_edges:
-                edges[record.record_id] = record
-            for record in plan.upsert_search_documents:
-                search_documents[(record.record_kind, record.record_id)] = record
-        return MutationPlan(
-            upsert_nodes=tuple(nodes.values()),
-            upsert_edges=tuple(edges.values()),
-            upsert_search_documents=tuple(search_documents.values()),
-        )
+        return merge_mutation_plans(*plans)
 
     def _touched_node_rows(self, *, diff: SnapshotDiff, commit: CommitInfo) -> list[dict[str, Any]]:
         if diff.previous_revision_id is None:
@@ -376,54 +349,6 @@ class DeterministicMutationPlanner:
             if node.kind == "Project":
                 continue
             rows[node.node_id] = _touch_row(commit=commit, node=node, change_kind="removed")
-        return sorted(rows.values(), key=lambda row: (row["change_kind"], row["node_id"]))
-
-    def _touched_file_rows(
-        self,
-        *,
-        snapshot: GraphSnapshot,
-        diff: SnapshotDiff,
-        commit: CommitInfo,
-    ) -> list[dict[str, Any]]:
-        if diff.previous_revision_id is None:
-            current_by_path = {
-                node.file_path: node for node in snapshot.nodes if node.kind == "File" and node.file_path
-            }
-            rows = [
-                _touch_row(commit=commit, node=node, change_kind="changed")
-                for file_path in commit.changed_files
-                if (node := current_by_path.get(file_path)) is not None
-            ]
-            return sorted(rows, key=lambda row: row["node_id"])
-
-        rows: dict[str, dict[str, Any]] = {}
-        current_by_path = {
-            node.file_path: node for node in snapshot.nodes if node.kind == "File" and node.file_path
-        }
-        removed_by_path = {
-            node.file_path: node for node in diff.removed_nodes.values() if node.kind == "File" and node.file_path
-        }
-
-        for node in diff.added_nodes.values():
-            if node.kind == "File":
-                rows[node.node_id] = _touch_row(commit=commit, node=node, change_kind="added")
-        for change in diff.changed_nodes.values():
-            if change.new.kind == "File":
-                rows[change.new.node_id] = _touch_row(
-                    commit=commit,
-                    node=change.new,
-                    change_kind="changed",
-                )
-        for node in diff.removed_nodes.values():
-            if node.kind == "File":
-                rows[node.node_id] = _touch_row(commit=commit, node=node, change_kind="removed")
-
-        for file_path in commit.changed_files:
-            node = current_by_path.get(file_path) or removed_by_path.get(file_path)
-            if node is None:
-                continue
-            rows.setdefault(node.node_id, _touch_row(commit=commit, node=node, change_kind="changed"))
-
         return sorted(rows.values(), key=lambda row: (row["change_kind"], row["node_id"]))
 
     def _introduced_version_rows(

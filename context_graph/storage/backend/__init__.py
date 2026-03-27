@@ -28,6 +28,7 @@ from .maintenance import (
 )
 from .mutations import (
     EdgeRecord,
+    merge_mutation_plans,
     MutationApplyResult,
     MutationOperations,
     MutationPlan,
@@ -83,6 +84,7 @@ __all__ = [
     "MutationApplyResult",
     "MutationOperations",
     "MutationPlan",
+    "merge_mutation_plans",
     "Neo4jConfig",
     "NeptuneConfig",
     "NodeRecord",

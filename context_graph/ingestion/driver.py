@@ -34,6 +34,7 @@ class IngestionDriver:
         git_metadata: GitMetadata | None = None,
         github_api: GitHubApiClient | None = None,
         repo_cache: RepoCacheManager | None = None,
+        llm_client=None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -41,6 +42,7 @@ class IngestionDriver:
         self.git_metadata = git_metadata or GitMetadata()
         self.github_api = github_api
         self.repo_cache = repo_cache or RepoCacheManager(git_metadata=self.git_metadata)
+        self.llm_client = llm_client
         self.planner = DeterministicMutationPlanner()
         self.repo_resolver = GitHubRepoResolver(
             git_metadata=self.git_metadata,
@@ -99,6 +101,7 @@ class IngestionDriver:
             snapshot_producer=self.snapshot_producer,
             git_metadata=self.git_metadata,
             planner=self.planner,
+            llm_client=self.llm_client,
         )
 
     def _make_hosted_indexing_service(self) -> HostedIndexingService:

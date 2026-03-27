@@ -5,7 +5,8 @@ import re
 from typing import Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
-from context_graph.storage.backend import BackendDriver, MutationPlan
+from context_graph.provenance import ObservationMutationPlanner
+from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .deterministic_planner import DeterministicMutationPlanner
 from .models import CommitIndexResult
@@ -69,12 +70,14 @@ class CommitIndexingService:
         git_metadata: GitMetadata | None = None,
         writer: TemporalGraphWriter | None = None,
         planner: DeterministicMutationPlanner | None = None,
+        observation_planner: ObservationMutationPlanner | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
         self.snapshot_producer = snapshot_producer or CodebaseMemorySnapshotProducer()
         self.git_metadata = git_metadata or GitMetadata()
         self.planner = planner or DeterministicMutationPlanner()
+        self.observation_planner = observation_planner or ObservationMutationPlanner()
         self.writer = writer or TemporalGraphWriter(
             metadata_store=metadata_store,
             backend_driver=backend_driver,
@@ -339,7 +342,11 @@ class CommitIndexingService:
             commit=commit,
             planning_state=structural_plan.state,
         )
-        all_operations = self.planner.merge_plans(structural_plan.plan, commit_plan)
+        observation_plan = self.observation_planner.plan_commit_message_observation(
+            repo_id=structural_plan.snapshot.repo_id,
+            commit=commit,
+        )
+        all_operations = self.planner.merge_plans(structural_plan.plan, commit_plan, observation_plan)
         apply_result = self.writer.apply_planned_snapshot(
             structural_plan.snapshot,
             structural_plan.diff,
@@ -370,6 +377,8 @@ class CommitIndexingService:
             apply_result=apply_result,
             operations=all_operations,
             applied_commit_shas=(commit.sha,),
+            observation_operations=observation_plan,
+            evidence_operations=MutationPlan(),
         )
 
     def _ensure_supported_lineage(
@@ -440,5 +449,11 @@ class CommitIndexingService:
                 sha
                 for result in results
                 for sha in result.applied_commit_shas
+            ),
+            observation_operations=merge_mutation_plans(
+                *(result.observation_operations for result in results)
+            ),
+            evidence_operations=merge_mutation_plans(
+                *(result.evidence_operations for result in results)
             ),
         )
