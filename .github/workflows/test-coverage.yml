@@ -1,0 +1,85 @@
+name: Test Coverage
+
+on:
+  push:
+    branches: ["main", "repo-indexing"]
+    paths:
+      - "context_graph/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "README.md"
+      - ".github/workflows/test-coverage.yml"
+      - ".github/scripts/render_coverage_badge.py"
+  pull_request:
+    paths:
+      - "context_graph/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "README.md"
+      - ".github/workflows/test-coverage.yml"
+      - ".github/scripts/render_coverage_badge.py"
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests with coverage
+        run: |
+          uv run python -m pytest \
+            --cov=context_graph \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            tests | tee coverage-report.txt
+
+      - name: Render coverage badge
+        run: |
+          uv run python .github/scripts/render_coverage_badge.py \
+            --coverage-xml coverage.xml \
+            --output badges/coverage.svg
+
+      - name: Build PR coverage comment
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo "## Test Coverage"
+            echo
+            echo '```text'
+            cat coverage-report.txt
+            echo '```'
+          } > coverage-comment.md
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: coverage-comment.md
+
+      - name: Commit updated coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if git diff --quiet -- badges/coverage.svg; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add badges/coverage.svg
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push

@@ -4,14 +4,25 @@ version = "0.1.0"
 requires-python = ">=3.10,<4"
 dependencies = [
     # Local editable fork of graphiti-core with neptune + bedrock support
-    "graphiti-core[neptune] @ file:./vendor/graphiti",
+    "graphiti-core[neptune]",
     # Context-graph pipeline deps (previously in context_graph/requirements-local.txt)
     "neo4j>=5.22,<6",
     "psycopg[binary]>=3.2,<4",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "pytest-cov>=7,<8",
+    "pydantic-settings>=2.10,<3",
+    "pyyaml>=6,<7",
+]
+
 [tool.uv.sources]
 graphiti-core = { path = "./vendor/graphiti", editable = true }
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]
@@ -19,3 +30,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["context_graph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["context_graph"]
+
+[tool.coverage.report]
+show_missing = true
