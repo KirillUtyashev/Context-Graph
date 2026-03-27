@@ -5,6 +5,9 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 import importlib
 import io
+import runpy
+import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -19,6 +22,8 @@ from context_graph.query_parser import (
     QueryParser,
 )
 from context_graph.runtime import tracing
+from context_graph.runtime.llm import config as runtime_llm_config
+from context_graph.runtime.llm import errors as runtime_llm_errors
 from context_graph.runtime.llm.token_tracker import TokenUsageTracker
 
 
@@ -76,6 +81,18 @@ class _FakeTracer:
 
 
 class SmallModuleTests(unittest.TestCase):
+    def test_package_main_entrypoints_raise_system_exit_with_main_return_code(self) -> None:
+        with patch("context_graph.cli.main", return_value=17):
+            with self.assertRaises(SystemExit) as exc:
+                runpy.run_module("context_graph", run_name="__main__")
+        self.assertEqual(exc.exception.code, 17)
+
+        fake_server_module = SimpleNamespace(main=lambda: 23)
+        with patch.dict(sys.modules, {"context_graph.server.mcp.server": fake_server_module}):
+            with self.assertRaises(SystemExit) as exc:
+                runpy.run_module("context_graph.server.mcp", run_name="__main__")
+        self.assertEqual(exc.exception.code, 23)
+
     def test_embedding_provider_cleans_texts_and_returns_async_results(self) -> None:
         client = _FakeEmbeddingClient()
         provider = embeddings.EmbeddingProvider(client)
@@ -160,6 +177,40 @@ class SmallModuleTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             llm.load_episode_llm_settings(SimpleNamespace(llm_provider="unsupported"))
 
+    def test_make_episode_llm_client_selects_provider_and_handles_none(self) -> None:
+        self.assertIsNone(llm.make_episode_llm_client(None))
+
+        openai_settings = llm.EpisodeLLMSettings(
+            provider="openai",
+            model="gpt-4.1-mini",
+            small_model="gpt-4.1-nano",
+            base_url="https://example.test",
+            api_key="secret",
+        )
+        bedrock_settings = llm.EpisodeLLMSettings(
+            provider="bedrock",
+            model="sonnet",
+            small_model="sonnet",
+            aws_region="ca-central-1",
+        )
+
+        with patch("context_graph.runtime.llm.openai_client.OpenAIClient", side_effect=lambda **kwargs: ("openai", kwargs)), patch(
+            "context_graph.runtime.llm.bedrock_client.BedrockLLMClient",
+            side_effect=lambda **kwargs: ("bedrock", kwargs),
+        ):
+            openai_client = llm.make_episode_llm_client(openai_settings)
+            self.assertEqual(openai_client[0], "openai")
+            self.assertEqual(openai_client[1]["config"].model, "gpt-4.1-mini")
+
+            bedrock_client = llm.make_episode_llm_client(bedrock_settings)
+            self.assertEqual(bedrock_client[0], "bedrock")
+            self.assertEqual(bedrock_client[1]["region_name"], "ca-central-1")
+
+        with self.assertRaises(RuntimeError):
+            llm.make_episode_llm_client(
+                llm.EpisodeLLMSettings(provider="unsupported")
+            )
+
     def test_datetime_helpers_normalize_and_stringify_nested_values(self) -> None:
         naive = datetime(2024, 1, 2, 3, 4, 5)
         eastern = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=-5)))
@@ -223,6 +274,22 @@ class SmallModuleTests(unittest.TestCase):
         invalid = errors.NodeLabelValidationError(["Bad-Label"])
         self.assertIsInstance(invalid, ValueError)
         self.assertIn('"Bad-Label"', str(invalid))
+
+    def test_runtime_llm_config_and_error_types(self) -> None:
+        config = runtime_llm_config.LLMConfig(api_key="secret")
+        self.assertEqual(config.api_key, "secret")
+        self.assertIsNone(config.model)
+        self.assertEqual(config.temperature, runtime_llm_config.DEFAULT_TEMPERATURE)
+        self.assertEqual(config.max_tokens, runtime_llm_config.DEFAULT_MAX_TOKENS)
+        self.assertEqual(runtime_llm_config.ModelSize.small.value, "small")
+        self.assertEqual(runtime_llm_config.ModelSize.medium.value, "medium")
+
+        self.assertEqual(
+            str(runtime_llm_errors.RateLimitError()),
+            "Rate limit exceeded. Please try again later.",
+        )
+        self.assertEqual(str(runtime_llm_errors.RefusalError("nope")), "nope")
+        self.assertEqual(str(runtime_llm_errors.EmptyResponseError("empty")), "empty")
 
     def test_token_usage_tracker_accumulates_resets_and_prints_summary(self) -> None:
         tracker = TokenUsageTracker()
@@ -379,6 +446,38 @@ class SmallModuleTests(unittest.TestCase):
         self.assertEqual(graphiti_config.graphiti.group_id, "course-team")
         self.assertEqual(graphiti_config.graphiti.user_id, "student1")
 
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = importlib.import_module("pathlib").Path(temp_dir) / "config.yaml"
+            config_path.write_text(
+                "server:\n"
+                "  host: ${HOST:127.0.0.1}\n"
+                "  port: 9000\n"
+                "graphiti:\n"
+                "  episode_id_prefix: ${PREFIX:cg}\n",
+                encoding="utf-8",
+            )
+            yaml_source = mcp_config.YamlSettingsSource(mcp_config.GraphitiConfig, config_path)
+            with patch.dict("os.environ", {"HOST": "0.0.0.0"}, clear=True):
+                loaded = yaml_source()
+            self.assertEqual(loaded["server"]["host"], "0.0.0.0")
+            self.assertEqual(loaded["server"]["port"], 9000)
+            self.assertEqual(loaded["graphiti"]["episode_id_prefix"], "cg")
+
+            missing_source = mcp_config.YamlSettingsSource(
+                mcp_config.GraphitiConfig,
+                config_path.with_name("missing.yaml"),
+            )
+            self.assertEqual(missing_source(), {})
+
+            customized = mcp_config.GraphitiConfig.settings_customise_sources(
+                mcp_config.GraphitiConfig,
+                mcp_config.PydanticBaseSettingsSource,
+                mcp_config.PydanticBaseSettingsSource,
+                mcp_config.PydanticBaseSettingsSource,
+                mcp_config.PydanticBaseSettingsSource,
+            )
+            self.assertEqual(len(customized), 4)
+
     def test_runtime_factories_validate_and_build_expected_clients(self) -> None:
         try:
             factories = importlib.import_module("context_graph.runtime.providers.factories")
@@ -416,6 +515,24 @@ class SmallModuleTests(unittest.TestCase):
             bedrock_client = factories.LLMClientFactory.create(llm_bedrock)
             self.assertEqual(bedrock_client[0], "bedrock")
             self.assertEqual(bedrock_client[1]["config"].temperature, 1.0)
+
+            non_reasoning_client = factories.LLMClientFactory.create(
+                mcp_config.LLMConfig(
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    temperature=0.3,
+                    max_tokens=111,
+                    providers=mcp_config.LLMProvidersConfig(
+                        openai=mcp_config.OpenAIProviderConfig(
+                            api_key="secret",
+                            api_url="https://example.test",
+                        )
+                    ),
+                )
+            )
+            self.assertEqual(non_reasoning_client[0], "openai")
+            self.assertIsNone(non_reasoning_client[1]["reasoning"])
+            self.assertIsNone(non_reasoning_client[1]["verbosity"])
 
         with self.assertRaises(ValueError):
             factories.LLMClientFactory.create(
@@ -524,6 +641,30 @@ class SmallModuleTests(unittest.TestCase):
             factories.DatabaseDriverFactory.create_config(
                 mcp_config.DatabaseConfig(provider="unsupported")
             )
+
+    def test_mcp_formatting_helpers_strip_embeddings(self) -> None:
+        formatting = importlib.import_module("context_graph.server.mcp.formatting")
+
+        node = SimpleNamespace(
+            model_dump=lambda **kwargs: {
+                "uuid": "n1",
+                "attributes": {"name_embedding": [1.0, 2.0], "kind": "Function"},
+            }
+        )
+        edge = SimpleNamespace(
+            model_dump=lambda **kwargs: {
+                "uuid": "e1",
+                "attributes": {"fact_embedding": [1.0, 2.0], "weight": 0.7},
+            }
+        )
+
+        formatted_node = formatting.format_node_result(node)
+        formatted_edge = formatting.format_fact_result(edge)
+
+        self.assertEqual(formatted_node["uuid"], "n1")
+        self.assertEqual(formatted_node["attributes"], {"kind": "Function"})
+        self.assertEqual(formatted_edge["uuid"], "e1")
+        self.assertEqual(formatted_edge["attributes"], {"weight": 0.7})
 
 
 if __name__ == "__main__":
