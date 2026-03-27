@@ -4,39 +4,38 @@
 import argparse
 import asyncio
 from datetime import datetime
+import fnmatch
 import logging
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dotenv import load_dotenv
-from context_graph.memory.models.edges import EntityEdge
-from context_graph.memory.models.nodes import EpisodeType, EpisodicNode
-from context_graph.memory.search.search_filters import SearchFilters
-from context_graph.memory.extraction.graph_data_operations import clear_data
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
 from context_graph.server.mcp.config import GraphitiConfig, ServerConfig
+from context_graph.server.mcp import code_graph as code_graph_queries
 from context_graph.server.mcp.response_types import (
-    EpisodeSearchResponse,
+    CodeGraphSchemaResponse,
+    CodeSnippetResponse,
     ErrorResponse,
-    FactSearchResponse,
-    NodeResult,
-    NodeSearchResponse,
     ProfileResult,
+    SearchCodeResponse,
+    SearchCodeGraphResponse,
     SearchMemoryResponse,
-    StatusResponse,
     SuccessResponse,
+    TraceCallPathResponse,
 )
 from context_graph.embeddings import EmbeddingProvider
-from context_graph.runtime.providers.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
-from context_graph.server.mcp.memory_client import ContextGraphMemoryClient
-from context_graph.server.mcp.queue import QueueService
-from context_graph.server.mcp.formatting import format_fact_result
+from context_graph.models import GraphSnapshot
+
+if TYPE_CHECKING:
+    from context_graph.server.mcp.memory_client import ContextGraphMemoryClient
+    from context_graph.server.mcp.queue import QueueService
 
 # Load .env file from mcp_server directory
 mcp_server_dir = Path(__file__).parent.parent
@@ -131,10 +130,12 @@ Facts contain temporal metadata, allowing you to track the time of creation and 
 
 Key capabilities:
 1. Add episodes (text, messages, or JSON) to the knowledge graph with the add_memory tool
-2. Search for nodes (entities) in the graph using natural language queries with search_nodes
-3. Find relevant facts (relationships between entities) with search_facts
-4. Retrieve specific entity edges or episodes by UUID
-5. Manage the knowledge graph with tools like delete_episode, delete_entity_edge, and clear_graph
+2. Search memory for relevant context with the search_memory tool
+3. Search indexed repository files with search_code
+4. Inspect structural code-graph schema with get_code_graph_schema
+5. Search structural code nodes with search_code_graph
+6. Trace function call relationships with trace_call_path
+7. Read indexed symbol source with get_code_snippet
 
 The server connects to a database for persistent storage and uses language models for certain operations. 
 Each piece of information is organized by group_id, allowing you to maintain separate knowledge domains.
@@ -154,19 +155,18 @@ mcp = FastMCP(
 
 # Global services
 graphiti_service: Optional['GraphitiService'] = None
-queue_service: QueueService | None = None
+queue_service: Any | None = None
 aurora_ingestion_service: Optional['AuroraIngestionService'] = None
 
 # Global client for backward compatibility
-graphiti_client: ContextGraphMemoryClient | None = None
+graphiti_client: Any | None = None
 semaphore: asyncio.Semaphore
-
 
 class AuroraIngestionService:
     """Drives context_graph EpisodeProcessor to write episodic ingestion into Aurora + Neptune.
 
     Can be configured for cloud (AWS Neptune + Aurora) or local (Neo4j + SQLite/Postgres).
-    
+
     Reads provider settings from the global GraphitiConfig:
       - LLM: config.llm
       - Embedder: config.embedder
@@ -182,6 +182,7 @@ class AuroraIngestionService:
         self._profile_search_service: Any = None  # context_graph.profile_vectors.ProfileSearchService
         self._ready: bool = False
         self._init_error: str | None = None
+        self._metadata_init_error: str | None = None
 
     def _build_dsn(self) -> str | None:
         # Priority 1: Explicit DSN or DATABASE_URL (for local development)
@@ -231,26 +232,22 @@ class AuroraIngestionService:
         if self._init_error:
             return False
         try:
-            metadata_dsn = self._build_dsn()
-            if metadata_dsn is None:
-                self._init_error = 'Metadata storage (Postgres/SQLite) could not be configured'
+            if not self.initialize_metadata_store():
+                self._init_error = (
+                    self._metadata_init_error
+                    or 'Metadata storage (Postgres/SQLite) could not be configured'
+                )
                 return False
 
-            from context_graph.metadata import PostgresMetadataStore, SQLiteMetadataStore
-            from context_graph.graph_sinks import BaseCypherGraphSink, CypherStatement
+            from context_graph.legacy_graph_backend import BaseCypherGraphSink, CypherStatement
             from context_graph.graph_read import GraphReadRepository
             from context_graph.episode_processor import EpisodeProcessor
             from typing import Iterable as _Iterable
 
-            # Determine metadata store type
-            if metadata_dsn.startswith('sqlite:///'):
-                sqlite_path = metadata_dsn.replace('sqlite:///', '')
-                metadata = SQLiteMetadataStore(sqlite_path)
-            else:
-                metadata = PostgresMetadataStore.from_dsn(metadata_dsn)
-            
-            metadata.bootstrap()
-            self._metadata = metadata
+            metadata = self._metadata
+            if metadata is None:
+                self._init_error = 'Metadata storage initialized without a metadata handle'
+                return False
 
             class _NullGraphSink(BaseCypherGraphSink):
                 """Collects planned Cypher statements without executing them.
@@ -266,6 +263,8 @@ class AuroraIngestionService:
             graph_sink = _NullGraphSink()
 
             # Create LLM client using MCP factory (supports OpenAI, Claude, Bedrock, etc.)
+            from context_graph.runtime.providers.factories import EmbedderFactory, LLMClientFactory
+
             llm_client = LLMClientFactory.create(self.config.llm)
 
             # Set up profile vector store and search service
@@ -282,17 +281,17 @@ class AuroraIngestionService:
                 # This ensures we use the same embedding model for both backends.
                 raw_embedder = EmbedderFactory.create(self.config.embedder)
                 self._embed_provider = EmbeddingProvider(raw_embedder)
-                
+
                 # Choose vector store based on metadata type
                 if isinstance(metadata, PostgresMetadataStore):
                     self._profile_vector_store = AuroraProfileVectorStore.from_metadata_store(
-                        metadata, 
+                        metadata,
                         embedding_dim=self.config.embedder.dimensions
                     )
                 else:
                     logger.warning('Using In-Memory vector store (profiles will not persist across restarts)')
                     self._profile_vector_store = InMemoryProfileVectorStore()
-                
+
                 self._profile_vector_store.bootstrap()
                 self._profile_indexer = ProfileVectorIndexer(
                     vector_store=self._profile_vector_store,
@@ -325,6 +324,36 @@ class AuroraIngestionService:
         except Exception as exc:
             self._init_error = str(exc)
             logger.error(f'AuroraIngestionService init failed: {exc}')
+            return False
+
+    def initialize_metadata_store(self) -> bool:
+        """Initialize only the metadata store needed by deterministic MCP tools."""
+
+        if self._metadata is not None:
+            return True
+        if self._metadata_init_error:
+            return False
+
+        try:
+            metadata_dsn = self._build_dsn()
+            if metadata_dsn is None:
+                self._metadata_init_error = 'Metadata storage (Postgres/SQLite) could not be configured'
+                return False
+
+            from context_graph.metadata import PostgresMetadataStore, SQLiteMetadataStore
+
+            if metadata_dsn.startswith('sqlite:///'):
+                sqlite_path = metadata_dsn.replace('sqlite:///', '')
+                metadata = SQLiteMetadataStore(sqlite_path)
+            else:
+                metadata = PostgresMetadataStore.from_dsn(metadata_dsn)
+
+            metadata.bootstrap()
+            self._metadata = metadata
+            return True
+        except Exception as exc:
+            self._metadata_init_error = str(exc)
+            logger.error(f'AuroraIngestionService metadata init failed: {exc}')
             return False
 
     def search_profiles_sync(
@@ -468,12 +497,21 @@ class GraphitiService:
         self.config = config
         self.semaphore_limit = semaphore_limit
         self.semaphore = asyncio.Semaphore(semaphore_limit)
-        self.client: ContextGraphMemoryClient | None = None
+        self.client: Any | None = None
         self.entity_types = None
 
     async def initialize(self) -> None:
         """Initialize the internal memory client with factory-created components."""
         try:
+            from pydantic import BaseModel
+
+            from context_graph.runtime.providers.factories import (
+                DatabaseDriverFactory,
+                EmbedderFactory,
+                LLMClientFactory,
+            )
+            from context_graph.server.mcp.memory_client import ContextGraphMemoryClient
+
             llm_client = None
             embedder_client = None
 
@@ -506,7 +544,7 @@ class GraphitiService:
 
             try:
                 if self.config.database.provider.lower() == 'neptune':
-                    from context_graph.storage.graph.neptune_driver import NeptuneDriver
+                    from context_graph.storage.graph import NeptuneDriver
 
                     neptune_driver = NeptuneDriver(
                         host=db_config['host'],
@@ -520,7 +558,7 @@ class GraphitiService:
                         entity_types=custom_types,
                     )
                 else:
-                    from context_graph.storage.graph.neo4j_driver import Neo4jDriver
+                    from context_graph.storage.graph import Neo4jDriver
 
                     neo4j_driver = Neo4jDriver(
                         uri=db_config['uri'],
@@ -590,7 +628,7 @@ class GraphitiService:
             logger.error(f'Failed to initialize memory client: {e}')
             raise
 
-    async def get_client(self) -> ContextGraphMemoryClient:
+    async def get_client(self) -> Any:
         """Get the memory client, initializing if necessary."""
         if self.client is None:
             await self.initialize()
@@ -599,594 +637,247 @@ class GraphitiService:
         return self.client
 
 
-@mcp.tool()
-async def add_memory(
-    name: str,
-    episode_body: str,
-    group_id: str | None = None,
-    source: str = 'text',
-    source_description: str = '',
-    uuid: str | None = None,
-    repo_id: str | None = None,
-    source_type: str | None = None,
-    source_id: str | None = None,
-    author: str | None = None,
-    thread_id: str | None = None,
-) -> SuccessResponse | ErrorResponse:
-    """Add an episode to memory. This is the primary way to add information to the graph.
+def _normalize_repo_file_path(root_path: str, file_path: str | None) -> Path | None:
+    if not file_path:
+        return None
+    return (Path(root_path) / file_path).resolve()
 
-    This function returns immediately and processes the episode addition in the background.
-    Episodes for the same group_id are processed sequentially to avoid race conditions.
 
-    The episode is written to two backends:
-    1. Neptune (Graphiti knowledge graph — entity/fact extraction).
-    2. Aurora PostgreSQL (context_graph metadata store — episodic records and semantic
-       relation profiles for LightRAG-style retrieval). Aurora ingestion requires
-       repo_id, source_type, and source_id.
+async def _get_metadata_snapshot(repo_id: str) -> GraphSnapshot | None:
+    global aurora_ingestion_service
 
-    Args:
-        name (str): Name of the episode
-        episode_body (str): The content of the episode to persist to memory. When source='json', this must be a
-                           properly escaped JSON string, not a raw Python dictionary. The JSON data will be
-                           automatically processed to extract entities and relationships.
-        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
-                                 or a generated one.
-        source (str, optional): Source type, must be one of:
-                               - 'text': For plain text content (default)
-                               - 'json': For structured data
-                               - 'message': For conversation-style content
-        source_description (str, optional): Description of the source
-        uuid (str, optional): Optional UUID for the episode
-        repo_id (str, optional): Repository/project identifier for Aurora ingestion (e.g. 'context-graph').
-                                 Required to enable Aurora write path.
-        source_type (str, optional): Episode source type for Aurora (e.g. 'agent_transcript', 'message').
-                                     Defaults to the value of `source` if not set.
-        source_id (str, optional): Stable identifier for this episode within the source
-                                   (e.g. 'transcript-001'). Defaults to `name` if not set.
-        author (str, optional): Author login for Aurora metadata.
-        thread_id (str, optional): Logical thread identifier for grouping related episodes in Aurora.
-
-    Examples:
-        # Adding an agent transcript to both Neptune and Aurora
-        add_memory(
-            name="Implement auth PR discussion",
-            episode_body="Agent: I'll implement JWT auth...",
-            source="message",
-            repo_id="my-project",
-            source_type="agent_transcript",
-            source_id="transcript-2026-03-22-001",
-            author="kai",
-        )
-    """
-    global graphiti_service, queue_service, aurora_ingestion_service
-
-    if graphiti_service is None or queue_service is None:
-        return ErrorResponse(error='Services not initialized')
-
-    try:
-        # Use the provided group_id or fall back to the default from config
-        effective_group_id = group_id or config.graphiti.group_id
-
-        # Try to parse the source as an EpisodeType enum, with fallback to text
-        episode_type = EpisodeType.text  # Default
-        if source:
-            try:
-                episode_type = EpisodeType[source.lower()]
-            except (KeyError, AttributeError):
-                # If the source doesn't match any enum value, use text as default
-                logger.warning(f"Unknown source type '{source}', using 'text' as default")
-                episode_type = EpisodeType.text
-
-        # Submit to queue service for async Neptune processing
-        await queue_service.add_episode(
-            group_id=effective_group_id,
-            name=name,
-            content=episode_body,
-            source_description=source_description,
-            episode_type=episode_type,
-            entity_types=graphiti_service.entity_types,
-            uuid=uuid or None,  # Ensure None is passed if uuid is None
+    if aurora_ingestion_service is None:
+        raise code_graph_queries.CodeGraphQueryError(
+            f'No indexed snapshot found for repo_id={repo_id}'
         )
 
-        # Also ingest into Aurora via context_graph EpisodeProcessor in the background.
-        # The MCP tool should return quickly after queueing work instead of blocking
-        # on the full profile extraction/indexing path.
-        aurora_result: dict | None = None
-        if aurora_ingestion_service is not None and repo_id:
-            effective_source_type = source_type or source or 'text'
-            effective_source_id = source_id or name
-            
-            async def _run_aurora_ingest() -> None:
-                try:
-                    result = await asyncio.to_thread(
-                        aurora_ingestion_service.ingest_episode_sync,
-                        repo_id=repo_id,
-                        source_type=effective_source_type,
-                        source_id=effective_source_id,
-                        text=episode_body,
-                        author=author,
-                        thread_id=thread_id,
-                    )
-                    if result.get('ok'):
-                        logger.info(
-                            "Aurora ingestion completed for repo_id=%s source_id=%s with %s statements and %s facts",
-                            repo_id,
-                            effective_source_id,
-                            result.get('statements_executed', 0),
-                            len(result.get('facts', [])),
-                        )
-                    else:
-                        logger.warning(
-                            "Aurora ingestion skipped for repo_id=%s source_id=%s: %s",
-                            repo_id,
-                            effective_source_id,
-                            result.get('error', 'unknown error'),
-                        )
-                except Exception as aurora_exc:
-                    logger.error(
-                        'Aurora ingestion error (non-fatal) for repo_id=%s source_id=%s: %s',
-                        repo_id,
-                        effective_source_id,
-                        aurora_exc,
-                    )
+    initializer = getattr(
+        aurora_ingestion_service,
+        'initialize_metadata_store',
+        aurora_ingestion_service.initialize,
+    )
+    ready = await asyncio.to_thread(initializer)
+    if not ready or aurora_ingestion_service._metadata is None:
+        metadata_error = getattr(aurora_ingestion_service, '_metadata_init_error', None)
+        if metadata_error:
+            raise code_graph_queries.CodeGraphQueryError(
+                f'Metadata store is unavailable: {metadata_error}'
+            )
+        raise code_graph_queries.CodeGraphQueryError(
+            f'No indexed snapshot found for repo_id={repo_id}'
+        )
 
-            asyncio.create_task(_run_aurora_ingest())
-            aurora_result = {'ok': True, 'queued': True}
-
-        msg = f"Episode '{name}' queued for processing in group '{effective_group_id}'"
-        if aurora_result is not None:
-            if aurora_result.get('queued'):
-                msg += '; Aurora: queued for background ingestion'
-            elif aurora_result.get('ok'):
-                facts_count = len(aurora_result.get('facts', []))
-                msg += f'; Aurora: {aurora_result["statements_executed"]} graph writes, {facts_count} facts extracted'
-            else:
-                msg += f'; Aurora: skipped ({aurora_result.get("error", "unknown error")})'
-        elif repo_id is None:
-            msg += '; Aurora: skipped (provide repo_id to enable)'
-
-        return SuccessResponse(message=msg)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error queuing episode: {error_msg}')
-        return ErrorResponse(error=f'Error queuing episode: {error_msg}')
+    return await asyncio.to_thread(
+        code_graph_queries.load_latest_snapshot,
+        aurora_ingestion_service._metadata,
+        repo_id,
+    )
 
 
-@mcp.tool()
-async def search_nodes(
-    query: str,
-    group_ids: list[str] | None = None,
-    max_nodes: int = 10,
-    entity_types: list[str] | None = None,
-) -> NodeSearchResponse | ErrorResponse:
-    """Search for nodes in the graph memory.
+async def _ensure_graphiti_runtime_initialized() -> None:
+    """Lazily initialize legacy memory runtime pieces only when they are needed."""
 
-    Args:
-        query: The search query
-        group_ids: Optional list of group IDs to filter results
-        max_nodes: Maximum number of nodes to return (default: 10)
-        entity_types: Optional list of entity type names to filter by
-    """
-    global graphiti_service
+    global graphiti_service, queue_service, graphiti_client, semaphore
 
     if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
+        raise RuntimeError('Graphiti service not configured')
+    if queue_service is None:
+        from context_graph.server.mcp.queue import QueueService
+
+        queue_service = QueueService()
+    if graphiti_client is not None:
+        return
+
+    await graphiti_service.initialize()
+    graphiti_client = await graphiti_service.get_client()
+    semaphore = graphiti_service.semaphore
+    await queue_service.initialize(graphiti_client)
+
+
+def _iter_file_matches(
+    *,
+    snapshot: GraphSnapshot,
+    query: str,
+    file_pattern: str | None,
+    limit: int,
+    regex: bool,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    matcher = re.compile(query) if regex else None
+    seen_files: set[str] = set()
+    matches: list[dict[str, Any]] = []
+
+    for node in snapshot.nodes:
+        file_path = node.file_path
+        if not file_path or file_path in seen_files:
+            continue
+        seen_files.add(file_path)
+
+        if file_pattern and not fnmatch.fnmatch(file_path, file_pattern):
+            continue
+
+        absolute_path = _normalize_repo_file_path(snapshot.root_path, file_path)
+        if absolute_path is None or not absolute_path.exists():
+            continue
+
+        try:
+            lines = absolute_path.read_text(encoding='utf-8', errors='replace').splitlines()
+        except OSError:
+            continue
+
+        for index, line in enumerate(lines, start=1):
+            is_match = bool(matcher.search(line)) if matcher else query.lower() in line.lower()
+            if not is_match:
+                continue
+            matches.append(
+                {
+                    'file_path': file_path,
+                    'line_number': index,
+                    'line_text': line.strip(),
+                }
+            )
+            if len(matches) >= limit:
+                return matches
+
+    return matches
+
+
+@mcp.tool()
+async def search_code(
+    repo_id: str,
+    query: str,
+    file_pattern: str | None = None,
+    limit: int = 20,
+    regex: bool = False,
+) -> SearchCodeResponse | ErrorResponse:
+    """Search indexed repository files by text, replacing the old graph-first search flow."""
 
     try:
-        client = await graphiti_service.get_client()
+        if limit <= 0:
+            return ErrorResponse(error='limit must be a positive integer')
 
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
-        )
+        snapshot = await _get_metadata_snapshot(repo_id)
 
-        # Create search filters
-        search_filters = SearchFilters(
-            node_labels=entity_types,
-        )
-
-        # Use the search_ method with node search config
-        from context_graph.memory.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
-
-        results = await client.search_(
+        matches = await asyncio.to_thread(
+            _iter_file_matches,
+            snapshot=snapshot,
             query=query,
-            config=NODE_HYBRID_SEARCH_RRF,
-            group_ids=effective_group_ids,
-            search_filter=search_filters,
+            file_pattern=file_pattern,
+            limit=limit,
+            regex=regex,
         )
-
-        # Extract nodes from results
-        nodes = results.nodes[:max_nodes] if results.nodes else []
-
-        if not nodes:
-            return NodeSearchResponse(message='No relevant nodes found', nodes=[])
-
-        # Format the results
-        node_results = []
-        for node in nodes:
-            # Get attributes and ensure no embeddings are included
-            attrs = node.attributes if hasattr(node, 'attributes') else {}
-            # Remove any embedding keys that might be in attributes
-            attrs = {k: v for k, v in attrs.items() if 'embedding' not in k.lower()}
-
-            node_results.append(
-                NodeResult(
-                    uuid=node.uuid,
-                    name=node.name,
-                    labels=node.labels if node.labels else [],
-                    created_at=node.created_at.isoformat() if node.created_at else None,
-                    summary=node.summary,
-                    group_id=node.group_id,
-                    attributes=attrs,
-                )
+        if not matches:
+            return SearchCodeResponse(
+                message=f"No code matches found for '{query}' in repo '{repo_id}'",
+                matches=[],
             )
 
-        return NodeSearchResponse(message='Nodes retrieved successfully', nodes=node_results)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error searching nodes: {error_msg}')
-        return ErrorResponse(error=f'Error searching nodes: {error_msg}')
+        return SearchCodeResponse(
+            message=f"Found {len(matches)} code match{'es' if len(matches) != 1 else ''} for '{query}' in repo '{repo_id}'",
+            matches=matches,
+        )
+    except code_graph_queries.CodeGraphQueryError as exc:
+        return ErrorResponse(error=str(exc))
+    except re.error as exc:
+        return ErrorResponse(error=f'Invalid regex: {exc}')
+    except Exception as exc:
+        logger.error(f'Error in search_code: {exc}')
+        return ErrorResponse(error=f'Error in search_code: {exc}')
 
 
 @mcp.tool()
-async def search_memory_facts(
-    query: str,
-    group_ids: list[str] | None = None,
-    max_facts: int = 10,
-    center_node_uuid: str | None = None,
-) -> FactSearchResponse | ErrorResponse:
-    """Search the graph memory for relevant facts.
-
-    Args:
-        query: The search query
-        group_ids: Optional list of group IDs to filter results
-        max_facts: Maximum number of facts to return (default: 10)
-        center_node_uuid: Optional UUID of a node to center the search around
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
+async def get_code_graph_schema(
+    repo_id: str,
+) -> CodeGraphSchemaResponse | ErrorResponse:
+    """Return structural node kinds, edge types, and relationship patterns for the latest snapshot."""
 
     try:
-        # Validate max_facts parameter
-        if max_facts <= 0:
-            return ErrorResponse(error='max_facts must be a positive integer')
+        snapshot = await _get_metadata_snapshot(repo_id)
+        return await asyncio.to_thread(code_graph_queries.get_code_graph_schema, snapshot)
+    except code_graph_queries.CodeGraphQueryError as exc:
+        return ErrorResponse(error=str(exc))
+    except Exception as exc:
+        logger.error(f'Error in get_code_graph_schema: {exc}')
+        return ErrorResponse(error=f'Error in get_code_graph_schema: {exc}')
 
-        client = await graphiti_service.get_client()
 
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
-        )
+@mcp.tool()
+async def search_code_graph(
+    repo_id: str,
+    query: str | None = None,
+    node_kinds: list[str] | None = None,
+    file_pattern: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> SearchCodeGraphResponse | ErrorResponse:
+    """Search structural code nodes in the latest indexed snapshot."""
 
-        relevant_edges = await client.search(
-            group_ids=effective_group_ids,
+    try:
+        snapshot = await _get_metadata_snapshot(repo_id)
+        return await asyncio.to_thread(
+            code_graph_queries.search_code_graph,
+            snapshot,
             query=query,
-            num_results=max_facts,
-            center_node_uuid=center_node_uuid,
+            node_kinds=node_kinds,
+            file_pattern=file_pattern,
+            limit=limit,
+            offset=offset,
         )
-
-        if not relevant_edges:
-            return FactSearchResponse(message='No relevant facts found', facts=[])
-
-        facts = [format_fact_result(edge) for edge in relevant_edges]
-        return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error searching facts: {error_msg}')
-        return ErrorResponse(error=f'Error searching facts: {error_msg}')
+    except code_graph_queries.CodeGraphQueryError as exc:
+        return ErrorResponse(error=str(exc))
+    except Exception as exc:
+        logger.error(f'Error in search_code_graph: {exc}')
+        return ErrorResponse(error=f'Error in search_code_graph: {exc}')
 
 
 @mcp.tool()
-async def search_memory(
-    query: str,
-    group_ids: list[str] | None = None,
-    repo_id: str | None = None,
-    max_facts: int = 10,
-    max_profiles: int = 5,
-) -> SearchMemoryResponse | ErrorResponse:
-    """Search memory for context relevant to a query.
-
-    Combines Neptune (Graphiti structured entity facts) with Aurora PostgreSQL
-    (LightRAG-style semantic relation profiles) when repo_id is provided.
-
-    Args:
-        query: Natural language search query
-        group_ids: Optional list of Graphiti group IDs to filter Neptune results
-        repo_id: Repository identifier for Aurora profile search (enables Aurora path)
-        max_facts: Maximum number of Neptune facts to return (default: 10)
-        max_profiles: Maximum number of Aurora semantic profiles to return (default: 5)
-    """
-    global graphiti_service, aurora_ingestion_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
+async def trace_call_path(
+    repo_id: str,
+    qualified_name: str,
+    direction: str = 'both',
+    depth: int = 3,
+) -> TraceCallPathResponse | ErrorResponse:
+    """Trace bounded BFS call relationships from one exact qualified name."""
 
     try:
-        if max_facts < 0:
-            return ErrorResponse(error='max_facts must be a non-negative integer')
-        if max_profiles < 0:
-            return ErrorResponse(error='max_profiles must be a non-negative integer')
-
-        client = await graphiti_service.get_client()
-
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
+        snapshot = await _get_metadata_snapshot(repo_id)
+        return await asyncio.to_thread(
+            code_graph_queries.trace_call_path,
+            snapshot,
+            qualified_name=qualified_name,
+            direction=direction,
+            depth=depth,
         )
-
-        # Neptune facts (skipped when max_facts=0)
-        facts = []
-        if max_facts > 0:
-            relevant_edges = await client.search(
-                group_ids=effective_group_ids,
-                query=query,
-                num_results=max_facts,
-            )
-            facts = [format_fact_result(edge) for edge in (relevant_edges or [])]
-
-        # Aurora profiles (when repo_id provided)
-        profiles: list[ProfileResult] = []
-        if repo_id and aurora_ingestion_service is not None and max_profiles > 0:
-            raw_profiles = await asyncio.to_thread(
-                aurora_ingestion_service.search_profiles_sync,
-                query=query,
-                repo_id=repo_id,
-                limit=max_profiles,
-            )
-            profiles = [ProfileResult(**p) for p in raw_profiles]
-
-        n_facts = len(facts)
-        n_profiles = len(profiles)
-        if n_facts == 0 and n_profiles == 0:
-            return SearchMemoryResponse(
-                message=f"No results found for: '{query}'",
-                facts=[],
-                profiles=[],
-            )
-
-        parts = []
-        if n_facts:
-            parts.append(f'{n_facts} fact{"s" if n_facts != 1 else ""}')
-        if n_profiles:
-            parts.append(f'{n_profiles} profile{"s" if n_profiles != 1 else ""}')
-        msg = f"Found {' and '.join(parts)} for: '{query}'"
-        if repo_id and aurora_ingestion_service is None:
-            msg += ' (Aurora unavailable — Neptune only)'
-        elif repo_id is None:
-            msg += ' (Neptune only — provide repo_id to include Aurora profiles)'
-
-        return SearchMemoryResponse(message=msg, facts=facts, profiles=profiles)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error in search_memory: {error_msg}')
-        return ErrorResponse(error=f'Error in search_memory: {error_msg}')
+    except code_graph_queries.CodeGraphQueryError as exc:
+        return ErrorResponse(error=str(exc))
+    except Exception as exc:
+        logger.error(f'Error in trace_call_path: {exc}')
+        return ErrorResponse(error=f'Error in trace_call_path: {exc}')
 
 
 @mcp.tool()
-async def delete_entity_edge(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an entity edge from the graph memory.
-
-    Args:
-        uuid: UUID of the entity edge to delete
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
+async def get_code_snippet(
+    repo_id: str,
+    qualified_name: str,
+    include_neighbors: bool = False,
+) -> CodeSnippetResponse | ErrorResponse:
+    """Return source code for one exact qualified name in the latest snapshot."""
 
     try:
-        client = await graphiti_service.get_client()
-
-        # Get the entity edge by UUID
-        entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
-        # Delete the edge using its delete method
-        await entity_edge.delete(client.driver)
-        return SuccessResponse(message=f'Entity edge with UUID {uuid} deleted successfully')
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error deleting entity edge: {error_msg}')
-        return ErrorResponse(error=f'Error deleting entity edge: {error_msg}')
-
-
-@mcp.tool()
-async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an episode from the graph memory.
-
-    Args:
-        uuid: UUID of the episode to delete
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
-
-    try:
-        client = await graphiti_service.get_client()
-
-        # Get the episodic node by UUID
-        episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
-        # Delete the node using its delete method
-        await episodic_node.delete(client.driver)
-        return SuccessResponse(message=f'Episode with UUID {uuid} deleted successfully')
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error deleting episode: {error_msg}')
-        return ErrorResponse(error=f'Error deleting episode: {error_msg}')
-
-
-@mcp.tool()
-async def get_entity_edge(uuid: str) -> dict[str, Any] | ErrorResponse:
-    """Get an entity edge from the graph memory by its UUID.
-
-    Args:
-        uuid: UUID of the entity edge to retrieve
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
-
-    try:
-        client = await graphiti_service.get_client()
-
-        # Get the entity edge directly using the EntityEdge class method
-        entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
-
-        # Use the format_fact_result function to serialize the edge
-        # Return the Python dict directly - MCP will handle serialization
-        return format_fact_result(entity_edge)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error getting entity edge: {error_msg}')
-        return ErrorResponse(error=f'Error getting entity edge: {error_msg}')
-
-
-@mcp.tool()
-async def get_episodes(
-    group_ids: list[str] | None = None,
-    max_episodes: int = 10,
-) -> EpisodeSearchResponse | ErrorResponse:
-    """Get episodes from the graph memory.
-
-    Args:
-        group_ids: Optional list of group IDs to filter results
-        max_episodes: Maximum number of episodes to return (default: 10)
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
-
-    try:
-        client = await graphiti_service.get_client()
-
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
+        snapshot = await _get_metadata_snapshot(repo_id)
+        return await asyncio.to_thread(
+            code_graph_queries.get_code_snippet,
+            snapshot,
+            qualified_name=qualified_name,
+            include_neighbors=include_neighbors,
         )
-
-        # Get episodes from the driver directly
-        from context_graph.memory.models.nodes import EpisodicNode
-
-        if effective_group_ids:
-            episodes = await EpisodicNode.get_by_group_ids(
-                client.driver, effective_group_ids, limit=max_episodes
-            )
-        else:
-            # If no group IDs, we need to use a different approach
-            # For now, return empty list when no group IDs specified
-            episodes = []
-
-        if not episodes:
-            return EpisodeSearchResponse(message='No episodes found', episodes=[])
-
-        # Format the results
-        episode_results = []
-        for episode in episodes:
-            episode_dict = {
-                'uuid': episode.uuid,
-                'name': episode.name,
-                'content': episode.content,
-                'created_at': episode.created_at.isoformat() if episode.created_at else None,
-                'source': episode.source.value
-                if hasattr(episode.source, 'value')
-                else str(episode.source),
-                'source_description': episode.source_description,
-                'group_id': episode.group_id,
-            }
-            episode_results.append(episode_dict)
-
-        return EpisodeSearchResponse(
-            message='Episodes retrieved successfully', episodes=episode_results
-        )
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error getting episodes: {error_msg}')
-        return ErrorResponse(error=f'Error getting episodes: {error_msg}')
-
-
-@mcp.tool()
-async def clear_graph(group_ids: list[str] | None = None) -> SuccessResponse | ErrorResponse:
-    """Clear all data from the graph for specified group IDs.
-
-    Args:
-        group_ids: Optional list of group IDs to clear. If not provided, clears the default group.
-    """
-    global graphiti_service
-
-    if graphiti_service is None:
-        return ErrorResponse(error='Graphiti service not initialized')
-
-    try:
-        client = await graphiti_service.get_client()
-
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids or [config.graphiti.group_id] if config.graphiti.group_id else []
-        )
-
-        if not effective_group_ids:
-            return ErrorResponse(error='No group IDs specified for clearing')
-
-        # Clear data for the specified group IDs
-        await clear_data(client.driver, group_ids=effective_group_ids)
-
-        return SuccessResponse(
-            message=f'Graph data cleared successfully for group IDs: {", ".join(effective_group_ids)}'
-        )
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error clearing graph: {error_msg}')
-        return ErrorResponse(error=f'Error clearing graph: {error_msg}')
-
-
-@mcp.tool()
-async def get_status() -> StatusResponse:
-    """Get the status of the Graphiti MCP server and database connection."""
-    global graphiti_service
-
-    if graphiti_service is None:
-        return StatusResponse(status='error', message='Graphiti service not initialized')
-
-    try:
-        client = await graphiti_service.get_client()
-
-        # Test database connection with a simple query.
-        # NeptuneDriver.execute_query returns a (list, None, None) tuple directly;
-        # Neo4j/FalkorDB return async-iterable results via session.run().
-        # Using execute_query is safe for both because all drivers implement it.
-        await client.driver.execute_query('MATCH (n) RETURN count(n) AS count LIMIT 1')
-
-        # Use the provider from the service's config, not the global
-        provider_name = graphiti_service.config.database.provider
-        return StatusResponse(
-            status='ok',
-            message=f'Graphiti MCP server is running and connected to {provider_name} database',
-        )
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f'Error checking database connection: {error_msg}')
-        return StatusResponse(
-            status='error',
-            message=f'Graphiti MCP server is running but database connection failed: {error_msg}',
-        )
+    except code_graph_queries.CodeGraphQueryError as exc:
+        return ErrorResponse(error=str(exc))
+    except Exception as exc:
+        logger.error(f'Error in get_code_snippet: {exc}')
+        return ErrorResponse(error=f'Error in get_code_snippet: {exc}')
 
 
 @mcp.custom_route('/health', methods=['GET'])
@@ -1303,25 +994,23 @@ async def initialize_server() -> ServerConfig:
         temp_service = GraphitiService(config, SEMAPHORE_LIMIT)
         await temp_service.initialize()
         client = await temp_service.get_client()
+        from context_graph.memory.extraction.graph_data_operations import clear_data
+
         await clear_data(client.driver)
         logger.info('All graphs destroyed')
 
     # Initialize services
     graphiti_service = GraphitiService(config, SEMAPHORE_LIMIT)
+    from context_graph.server.mcp.queue import QueueService
+
     queue_service = QueueService()
-    await graphiti_service.initialize()
-
-    # Set global client for backward compatibility
-    graphiti_client = await graphiti_service.get_client()
-    semaphore = graphiti_service.semaphore
-
-    # Initialize queue service with the client
-    await queue_service.initialize(graphiti_client)
+    graphiti_client = None
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
 
     # Initialize Aurora ingestion service (optional — only active when AURORA_ENDPOINT or DATABASE_URL is set)
     global aurora_ingestion_service
     has_aurora_config = (
-        os.getenv('AURORA_ENDPOINT', '').strip() 
+        os.getenv('AURORA_ENDPOINT', '').strip()
         or os.getenv('DATABASE_URL', '').strip()
         or os.getenv('POSTGRES_DSN', '').strip()
         or os.getenv('METADATA_SQLITE_PATH', '').strip()

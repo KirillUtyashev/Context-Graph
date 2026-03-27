@@ -11,7 +11,7 @@ from .episodes import (
     entity_node_searchable_terms,
     make_entity_node,
 )
-from .graph_sinks import BaseCypherGraphSink
+from .legacy_graph_backend import BaseCypherGraphSink
 from .metadata import MetadataStore
 from .models import CanonicalNode
 

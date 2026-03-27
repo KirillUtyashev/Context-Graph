@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from .episodes import (
+from .entity_nodes import (
     EntityNode,
-    FactInvalidation,
-    EntityEdge,
     entity_node_file_path,
     entity_node_kind,
     entity_node_searchable_terms,
 )
 from .models import canonical_json
+
+if TYPE_CHECKING:
+    from .episodes import EntityEdge, FactInvalidation
+else:  # pragma: no cover - runtime uses duck typing for these richer graph objects
+    EntityEdge = Any
+    FactInvalidation = Any
 
 
 SEMANTIC_FACT_PROFILE_KIND = "semantic_fact_profile"
