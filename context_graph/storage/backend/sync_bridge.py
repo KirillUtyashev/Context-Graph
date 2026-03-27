@@ -101,3 +101,9 @@ _persistent_loop = _PersistentLoop()
 
 def _run_coroutine_sync(coro: Any) -> Any:
     return _persistent_loop.run(coro)
+
+
+def run_backend_coroutine_sync(coro: Any) -> Any:
+    """Public helper for sync callers that must share the backend event loop."""
+
+    return _run_coroutine_sync(coro)

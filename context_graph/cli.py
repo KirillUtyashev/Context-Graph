@@ -705,11 +705,7 @@ def _make_profile_indexer(args, *, metadata: MetadataStore, embedding_provider=N
 
 def _make_github_api(args) -> GitHubApiClient | None:
     token_env = getattr(args, "github_token_env", None)
-    if not token_env:
-        return None
-    token = os.getenv(token_env)
-    if not token:
-        return None
+    token = os.getenv(token_env) if token_env else None
     return GitHubApiClient(token=token)
 
 

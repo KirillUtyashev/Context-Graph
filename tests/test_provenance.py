@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from context_graph.code_identity import CodeIdentityCanonicalizer, SnapshotCodeResolver
 from context_graph.ingestion.commit_indexing import CommitIndexingService
@@ -14,6 +15,7 @@ from context_graph.provenance import (
     ClaimCanonicalizationService,
     ClaimBundleValidator,
     ClaimCandidate,
+    ClaimWithEvidenceCandidate,
     ClaimDedupCandidate,
     ClaimDerivationResponse,
     ClaimDerivationService,
@@ -42,8 +44,9 @@ from context_graph.provenance.prompts import (
     resolve_fact_conflicts,
     synthesize_research_artifact,
 )
-from context_graph.provenance.grounding import resolve_about_record_ids
+from context_graph.provenance.grounding import resolve_about_record_ids, resolve_mention_record_ids
 from context_graph.provenance.canonicalization import canonical_claim_key
+from context_graph.provenance.hint_enrichment import collect_grounding_hints
 
 
 def make_snapshot() -> GraphSnapshot:
@@ -156,6 +159,52 @@ def make_tree_snapshot() -> GraphSnapshot:
                 "login",
                 qualified_name="demo.src.auth.login",
                 file_path="src/auth/login.py",
+            ),
+        ),
+        edges=(),
+        metadata={},
+    )
+
+
+def make_harness_like_snapshot() -> GraphSnapshot:
+    return GraphSnapshot(
+        repo_id="test",
+        revision_id="r1",
+        root_path="/tmp/test",
+        generated_at="2026-03-27T00:00:00+00:00",
+        nodes=(
+            CanonicalNode("project:test", "test", "Project", "test", qualified_name="test"),
+            CanonicalNode(
+                "file:test:test.src.auth.__file__",
+                "test",
+                "File",
+                "auth.py",
+                qualified_name="test.src.auth.__file__",
+                file_path="src/auth.py",
+            ),
+            CanonicalNode(
+                "file:test:test.src.tasks.__file__",
+                "test",
+                "File",
+                "tasks.py",
+                qualified_name="test.src.tasks.__file__",
+                file_path="src/tasks.py",
+            ),
+            CanonicalNode(
+                "variable:test:test.src.auth.SECRET_KEY",
+                "test",
+                "Variable",
+                "SECRET_KEY",
+                qualified_name="test.src.auth.SECRET_KEY",
+                file_path="src/auth.py",
+            ),
+            CanonicalNode(
+                "variable:test:test.src.tasks.MAX_RETRIES",
+                "test",
+                "Variable",
+                "MAX_RETRIES",
+                qualified_name="test.src.tasks.MAX_RETRIES",
+                file_path="src/tasks.py",
             ),
         ),
         edges=(),
@@ -339,6 +388,76 @@ class FakeMetadataStore:
         return None
 
 
+class FakeGitHubApi:
+    def __init__(
+        self,
+        *,
+        commit_prs: list[dict[str, object]] | None = None,
+        pull_request_payload: dict[str, object] | None = None,
+        review_comments: list[dict[str, object]] | None = None,
+        issue_comments: list[dict[str, object]] | None = None,
+        reviews: list[dict[str, object]] | None = None,
+        linked_issue_numbers: tuple[int, ...] = (),
+    ) -> None:
+        self.commit_prs = list(commit_prs or [])
+        self.pull_request_payload = dict(
+            pull_request_payload
+            or {
+                "id": 700,
+                "number": 7,
+                "html_url": "https://github.com/octo/demo/pull/7",
+                "title": "Enable main",
+                "state": "open",
+                "user": {"login": "octocat"},
+                "created_at": "2026-03-26T00:00:00+00:00",
+                "updated_at": "2026-03-26T00:01:00+00:00",
+                "body": "demo.app.main is enabled",
+            }
+        )
+        self.review_comments = list(review_comments or [])
+        self.issue_comments = list(issue_comments or [])
+        self.reviews = list(reviews or [])
+        self.linked_issue_numbers = tuple(linked_issue_numbers)
+
+    def list_commit_pull_requests(self, owner: str, repo: str, sha: str) -> list[dict[str, object]]:
+        _ = owner, repo, sha
+        return list(self.commit_prs)
+
+    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, object]:
+        _ = owner, repo, number
+        return dict(self.pull_request_payload)
+
+    def list_pull_request_linked_issue_numbers(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> tuple[int, ...]:
+        _ = owner, repo, number
+        return self.linked_issue_numbers
+
+    def list_pull_request_reviews(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
+        _ = owner, repo, number
+        return list(self.reviews)
+
+    def list_pull_request_review_comments(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> list[dict[str, object]]:
+        _ = owner, repo, number
+        return list(self.review_comments)
+
+    def list_issue_comments(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
+        _ = owner, repo, number
+        return list(self.issue_comments)
+
+    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, object]:
+        _ = owner, repo, number
+        raise AssertionError("linked issues are not expected in this test")
+
+
 class ObservationPlannerTests(unittest.TestCase):
     def test_commit_message_observation_emits_node_and_source_link_only(self):
         plan = ObservationMutationPlanner().plan_commit_message_observation(
@@ -364,6 +483,102 @@ class ObservationPlannerTests(unittest.TestCase):
         )
 
         self.assertTrue(plan.is_empty())
+
+    def test_observation_emits_mentions_for_deterministic_symbol_matches(self):
+        planned = ObservationMutationPlanner().build_github_observations(
+            bundle=GitHubProvenanceBundle(
+                repo_id="demo",
+                github_repo="octo/demo",
+                entities=(),
+                project_links=(),
+                commit_links=(),
+                entity_links=(),
+                observation_sources=(
+                    GitHubObservationSource(
+                        observation_kind=ObservationKind.GITHUB_PR_BODY,
+                        source_kind="pull_request",
+                        source_id="github:pr:demo:7",
+                        source_record_type="github_pull_request",
+                        external_id="700",
+                        number=7,
+                        url="https://github.com/octo/demo/pull/7",
+                        title="Enable demo.app.main",
+                        author_login="octocat",
+                        created_at="2026-03-26T00:00:00+00:00",
+                        updated_at="2026-03-26T00:01:00+00:00",
+                        text="This PR updates demo.app.main after init_db().",
+                        metadata={"pull_request_number": 7},
+                    ),
+                ),
+            )
+        )[0]
+
+        plan = ObservationMutationPlanner().plan_observations(planned, snapshot=make_snapshot())
+
+        mentions = {
+            edge.target_record_id
+            for edge in plan.upsert_edges
+            if edge.relationship_type == "MENTIONS"
+        }
+        self.assertEqual(
+            mentions,
+            {
+                "symbol:demo:demo.app.main",
+            },
+        )
+
+    def test_observation_emits_mentions_for_metadata_file_paths(self):
+        planned = ObservationMutationPlanner().build_commit_message_observation(
+            repo_id="demo",
+            commit=make_commit(subject="Refine startup order", body="No explicit file names here."),
+        )
+
+        plan = ObservationMutationPlanner().plan_observations(planned, snapshot=make_snapshot())
+
+        mentions = {
+            edge.target_record_id
+            for edge in plan.upsert_edges
+            if edge.relationship_type == "MENTIONS"
+        }
+        self.assertIn("file:demo:demo.app.__file__", mentions)
+
+    def test_observation_mentions_fail_closed_for_ambiguous_file_basename(self):
+        planned = ObservationMutationPlanner().build_github_observations(
+            bundle=GitHubProvenanceBundle(
+                repo_id="demo",
+                github_repo="octo/demo",
+                entities=(),
+                project_links=(),
+                commit_links=(),
+                entity_links=(),
+                observation_sources=(
+                    GitHubObservationSource(
+                        observation_kind=ObservationKind.GITHUB_PR_BODY,
+                        source_kind="pull_request",
+                        source_id="github:pr:demo:7",
+                        source_record_type="github_pull_request",
+                        external_id="700",
+                        number=7,
+                        url="https://github.com/octo/demo/pull/7",
+                        title="Fix startup order",
+                        author_login="octocat",
+                        created_at="2026-03-26T00:00:00+00:00",
+                        updated_at="2026-03-26T00:01:00+00:00",
+                        text="This PR fixes main.py startup order.",
+                        metadata={"pull_request_number": 7},
+                    ),
+                ),
+            )
+        )[0]
+
+        plan = ObservationMutationPlanner().plan_observations(planned, snapshot=make_snapshot())
+
+        mentions = {
+            edge.target_record_id
+            for edge in plan.upsert_edges
+            if edge.relationship_type == "MENTIONS"
+        }
+        self.assertEqual(mentions, set())
 
     def test_github_observations_cover_bodies_reviews_and_comments(self):
         bundle = GitHubProvenanceBundle(
@@ -471,6 +686,58 @@ class ObservationPlannerTests(unittest.TestCase):
         )
         self.assertEqual({edge.relationship_type for edge in first.upsert_edges}, {"FROM_SOURCE"})
 
+    def test_github_bundle_includes_pull_request_issue_comments_as_observations(self):
+        github_api = FakeGitHubApi(
+            commit_prs=[{"number": 2, "id": 2002}],
+            pull_request_payload={
+                "id": 2002,
+                "number": 2,
+                "html_url": "https://github.com/octo/demo/pull/2",
+                "title": "Rotate SECRET_KEY",
+                "state": "closed",
+                "user": {"login": "octocat"},
+                "created_at": "2026-03-27T20:58:00Z",
+                "updated_at": "2026-03-27T20:58:13Z",
+                "body": "Rotate SECRET_KEY in auth.py",
+            },
+            issue_comments=[
+                {
+                    "id": 4145222468,
+                    "html_url": "https://github.com/octo/demo/pull/2#issuecomment-4145222468",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T20:58:11Z",
+                    "updated_at": "2026-03-27T20:58:11Z",
+                    "body": "Correction: APP_PORT in config.py should be 9000.",
+                }
+            ],
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("merge-sha",),
+        )
+
+        comment_observations = [
+            source
+            for source in bundle.observation_sources
+            if source.observation_kind == ObservationKind.GITHUB_ISSUE_COMMENT
+        ]
+        self.assertEqual(len(comment_observations), 1)
+        self.assertEqual(comment_observations[0].source_kind, "pull_request")
+        self.assertEqual(comment_observations[0].source_id, "github:pr:demo:2")
+        self.assertEqual(comment_observations[0].metadata["pull_request_number"], 2)
+        self.assertEqual(comment_observations[0].metadata["comment_id"], 4145222468)
+
 
 class CodeIdentityTests(unittest.TestCase):
     def test_canonicalizer_preserves_stable_node_and_edge_ids(self):
@@ -547,6 +814,87 @@ class CodeIdentityTests(unittest.TestCase):
         self.assertEqual(
             resolve_about_record_ids(snapshot, ["demo.app.main", "demo.app.main"]),
             resolver.resolve_about_record_ids(["demo.app.main", "demo.app.main"]),
+        )
+
+    def test_observation_grounding_wrapper_returns_stable_node_ids(self):
+        snapshot = make_snapshot()
+        resolver = SnapshotCodeResolver(snapshot)
+
+        self.assertEqual(
+            resolve_mention_record_ids(snapshot, ["app.py", "demo.app.main"]),
+            tuple(node.node_id for node in resolver.resolve_about_hints(["app.py", "demo.app.main"])),
+        )
+
+    def test_grounding_resolves_max_retries_summary_to_variable(self):
+        observation = make_observation(text="Correction: `MAX_RETRIES` in `tasks.py` changed.")
+        evidence = EvidenceCandidate.model_validate(
+            {
+                "evidence_kind": "change_summary",
+                "quote_text": "MAX_RETRIES changed",
+                "summary_text": "Change made to `MAX_RETRIES` due to alignment with timeout.",
+                "span_start": None,
+                "span_end": None,
+                "about_hints": [],
+                "support_kind": "direct_statement",
+                "metadata": {},
+            }
+        )
+        claim = ClaimWithEvidenceCandidate.model_validate(
+            {
+                "claim_text": "Increased `MAX_RETRIES` in `tasks.py` from 3 to 5 to align with the new timeout window.",
+                "claim_kind": "change_claim",
+                "about_hints": [],
+                "confidence": "high",
+                "derivation_kind": "direct_from_observation",
+                "metadata": {},
+                "supporting_evidence": [],
+            }
+        )
+
+        hints = collect_grounding_hints(observation=observation, claim=claim, evidence=evidence)
+
+        self.assertEqual(
+            resolve_about_record_ids(make_harness_like_snapshot(), hints),
+            (
+                "variable:test:test.src.tasks.MAX_RETRIES@r1",
+                "file:test:test.src.tasks.__file__@r1",
+            ),
+        )
+
+    def test_grounding_resolves_secret_key_summary_to_variable_and_auth_file(self):
+        observation = make_observation(text="Rotate `SECRET_KEY` in `auth.py`.")
+        evidence = EvidenceCandidate.model_validate(
+            {
+                "evidence_kind": "change_summary",
+                "quote_text": "SECRET_KEY rotated",
+                "summary_text": "The secret key in `auth.py` was updated to enhance security.",
+                "span_start": None,
+                "span_end": None,
+                "about_hints": [],
+                "support_kind": "direct_statement",
+                "metadata": {},
+            }
+        )
+        claim = ClaimWithEvidenceCandidate.model_validate(
+            {
+                "claim_text": "Rotated `SECRET_KEY` in `auth.py` to a new value.",
+                "claim_kind": "change_claim",
+                "about_hints": [],
+                "confidence": "high",
+                "derivation_kind": "direct_from_observation",
+                "metadata": {},
+                "supporting_evidence": [],
+            }
+        )
+
+        hints = collect_grounding_hints(observation=observation, claim=claim, evidence=evidence)
+
+        self.assertEqual(
+            resolve_about_record_ids(make_harness_like_snapshot(), hints),
+            (
+                "variable:test:test.src.auth.SECRET_KEY@r1",
+                "file:test:test.src.auth.__file__@r1",
+            ),
         )
 
 
@@ -928,6 +1276,21 @@ class CurrentEvidenceReaderTests(unittest.TestCase):
         self.assertEqual(facts[0].claim_text, "demo.app.main is disabled.")
         self.assertEqual(facts[0].claim_kind, "state_claim")
         self.assertEqual(facts[0].observed_at, "2026-03-24T00:00:00+00:00")
+
+    def test_reader_uses_backend_sync_bridge_runner(self):
+        backend_driver = FakeBackendDriver([])
+
+        with patch(
+            "context_graph.provenance.invalidation.run_backend_coroutine_sync",
+            return_value=[],
+        ) as runner:
+            CurrentEvidenceReader(backend_driver=backend_driver).load_current_facts(
+                repo_id="demo",
+                claim_kind="state_claim",
+                about_record_ids=("symbol:demo:demo.app.main@r1",),
+            )
+
+        self.assertEqual(runner.call_count, 1)
 
 
 class EvidenceInvalidationPlannerTests(unittest.TestCase):

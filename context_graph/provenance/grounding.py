@@ -18,6 +18,16 @@ def resolve_about_record_ids(
     return resolver.resolve_about_record_ids(_resolver_hints(hints))
 
 
+def resolve_mention_record_ids(
+    snapshot: GraphSnapshot | None,
+    hints: list[str | EnrichedAboutHint] | tuple[str | EnrichedAboutHint, ...],
+) -> tuple[str, ...]:
+    if snapshot is None:
+        return ()
+    resolver = SnapshotCodeResolver(snapshot)
+    return tuple(node.node_id for node in resolver.resolve_about_hints(_resolver_hints(hints)))
+
+
 def resolve_about_record_id(snapshot: GraphSnapshot | None, hint: str | EnrichedAboutHint) -> str | None:
     if snapshot is None:
         return None

@@ -39,14 +39,16 @@ class HostedIndexingService:
         self.backend_driver = backend_driver
         self.snapshot_producer = snapshot_producer or CodebaseMemorySnapshotProducer()
         self.git_metadata = git_metadata or GitMetadata()
-        self.github_api = github_api
+        self.github_api = github_api or GitHubApiClient(token=None)
         self.repo_cache = repo_cache or RepoCacheManager(git_metadata=self.git_metadata)
         self.planner = planner or DeterministicMutationPlanner()
         self.llm_client = llm_client
         self.repo_resolver = repo_resolver or GitHubRepoResolver(
             git_metadata=self.git_metadata,
-            github_api=github_api,
+            github_api=self.github_api,
         )
+        if getattr(self.repo_resolver, "github_api", None) is None:
+            self.repo_resolver.github_api = self.github_api
 
     def index(self, request: HostedIndexRequest) -> DeterministicHostedIndexResult:
         """Resolve a repo source, materialize a checkout, and run deterministic indexing."""
@@ -57,8 +59,6 @@ class HostedIndexingService:
             )
 
         require_github = request.repo_path is None or bool(request.github_url or request.github_repo)
-        if require_github and self.github_api is None:
-            raise RuntimeError("hosted GitHub indexing requires a GitHub API token")
 
         repo_ref = self.repo_resolver.resolve(
             github_url=request.github_url,

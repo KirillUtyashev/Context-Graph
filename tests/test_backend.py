@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from context_graph.ingestion.commit_indexing import CommitIndexingService, normalize_snapshot_for_commit
 from context_graph.ingestion.deterministic_planner import DeterministicMutationPlanner
-from context_graph.ingestion.git.github_client import GitHubRepoRef
+from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef
 from context_graph.ingestion.git.github_indexer import (
     GitHubCommitLink,
     GitHubEntity,
@@ -1242,8 +1242,12 @@ class DeterministicIngestionTests(unittest.TestCase):
         )
 
         self.assertFalse(result.skipped)
-        self.assertEqual(result.operations.operation_count(), 21)
-        self.assertEqual(result.observation_operations.operation_count(), 3)
+        self.assertEqual(result.operations.operation_count(), 22)
+        self.assertEqual(result.observation_operations.operation_count(), 4)
+        self.assertIn(
+            "MENTIONS",
+            {edge.relationship_type for edge in result.observation_operations.upsert_edges},
+        )
         self.assertEqual(result.evidence_operations.operation_count(), 0)
         self.assertEqual(result.claim_candidates_extracted, 0)
         self.assertEqual(result.claim_candidates_validated, 0)
@@ -1298,12 +1302,16 @@ class DeterministicIngestionTests(unittest.TestCase):
         )
 
         self.assertFalse(result.skipped)
-        self.assertEqual(result.observation_operations.operation_count(), 3)
+        self.assertEqual(result.observation_operations.operation_count(), 4)
+        self.assertIn(
+            "MENTIONS",
+            {edge.relationship_type for edge in result.observation_operations.upsert_edges},
+        )
         self.assertEqual(result.evidence_operations.operation_count(), 4)
         self.assertEqual(result.claim_candidates_extracted, 1)
         self.assertEqual(result.claim_candidates_validated, 1)
         self.assertEqual(result.claim_candidates_rejected, 0)
-        self.assertEqual(result.operations.operation_count(), 25)
+        self.assertEqual(result.operations.operation_count(), 26)
         self.assertEqual(
             llm_client.calls[0]["prompt_name"],
             "provenance.extract_claims_and_evidence.from_commit_message.v1",
@@ -1589,6 +1597,15 @@ class DeterministicIngestionTests(unittest.TestCase):
 
         self.assertIs(result, expected_result)
 
+    def test_hosted_service_defaults_to_unauthenticated_github_client(self):
+        service = HostedIndexingService(
+            metadata_store=InMemoryMetadataStore(),
+            backend_driver=None,
+        )
+
+        self.assertIsInstance(service.github_api, GitHubApiClient)
+        self.assertIsNone(service.github_api.token)
+
     def test_hosted_indexing_records_github_sync_success_in_repo_source_state(self):
         metadata = InMemoryMetadataStore()
         source_state = RepoSourceState(
@@ -1679,6 +1696,84 @@ class DeterministicIngestionTests(unittest.TestCase):
         saved_source = metadata.load_repo_source_state("demo")
         self.assertEqual(saved_source.last_github_sync_status, "applied")
         self.assertIsNone(saved_source.last_github_sync_error)
+
+    def test_hosted_indexing_can_sync_github_without_explicit_token(self):
+        metadata = InMemoryMetadataStore()
+        source_state = RepoSourceState(
+            repo_id="demo",
+            provider="github",
+            canonical_repo="octo/demo",
+            clone_url="https://github.com/octo/demo.git",
+            default_branch="main",
+            clone_path="/tmp/demo",
+        )
+        managed_repo = ManagedRepo(
+            repo_id="demo",
+            repo_path="/tmp/demo",
+            request_id="req-1",
+            work_root="/tmp/work",
+            repo_ref=None,
+            source_state=source_state,
+        )
+        repo_ref = GitHubRepoRef(
+            owner="octo",
+            name="demo",
+            canonical_repo="octo/demo",
+            clone_url="https://github.com/octo/demo.git",
+            html_url="https://github.com/octo/demo",
+            default_branch="main",
+            source="github_url",
+        )
+        commit_result = SimpleNamespace(
+            operations=MutationPlan(),
+            applied_commit_shas=("abc123",),
+            apply_result=SimpleNamespace(operations_applied=0),
+            commit=make_commit(),
+            skipped=False,
+            skip_reason=None,
+            previous_commit_sha=None,
+            snapshot=make_snapshot(),
+        )
+        github_result = GitHubSyncResult(
+            repo_ref=repo_ref,
+            skipped=False,
+            skip_reason=None,
+            error=None,
+            operations=MutationPlan(),
+            operations_applied=0,
+            entity_counts={"PullRequest": 1},
+            pull_request_numbers=(7,),
+            issue_numbers=(),
+        )
+        service = HostedIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            github_api=None,
+            repo_cache=FakeRepoCache(managed_repo),
+            repo_resolver=FakeRepoResolver(repo_ref),
+        )
+        service._index_commits = lambda **kwargs: commit_result  # type: ignore[method-assign]
+
+        with patch(
+            "context_graph.ingestion.hosted_indexing.GitHubIndexer.sync_for_commits",
+            return_value=github_result,
+        ) as sync_mock:
+            result = service.index(
+                SimpleNamespace(
+                    repo_path=None,
+                    github_url="https://github.com/octo/demo",
+                    github_repo=None,
+                    repo_id="demo",
+                    ref=None,
+                    commit_sha=None,
+                    limit=100,
+                    execute=False,
+                )
+            )
+
+        self.assertIsNotNone(result.github_sync_result)
+        self.assertEqual(result.github_sync_result.pull_request_numbers, (7,))
+        sync_mock.assert_called_once()
 
     def test_hosted_indexing_preserves_commit_result_when_github_sync_fails(self):
         metadata = InMemoryMetadataStore()

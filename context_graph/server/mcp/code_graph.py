@@ -195,20 +195,30 @@ def trace_call_path(
 
     start_node = _require_exact_node(snapshot, qualified_name)
     node_map = snapshot.node_map()
-    outbound: dict[str, list[CanonicalEdge]] = defaultdict(list)
-    inbound: dict[str, list[CanonicalEdge]] = defaultdict(list)
+    node_sort_names = {
+        node.node_id: (node.qualified_name or node.name).lower()
+        for node in snapshot.nodes
+    }
+    outbound: dict[str, list[tuple[tuple[str, str, str, str], CanonicalEdge]]] = defaultdict(list)
+    inbound: dict[str, list[tuple[tuple[str, str, str, str], CanonicalEdge]]] = defaultdict(list)
     allowed_types = {edge_type.upper() for edge_type in DEFAULT_CALL_EDGE_TYPES}
 
     for edge in snapshot.edges:
         if edge.edge_type.upper() not in allowed_types:
             continue
-        outbound[edge.source_id].append(edge)
-        inbound[edge.target_id].append(edge)
+        outbound[edge.source_id].append(
+            (_edge_sort_key(edge, node_sort_names, traversal_direction="outbound"), edge)
+        )
+        inbound[edge.target_id].append(
+            (_edge_sort_key(edge, node_sort_names, traversal_direction="inbound"), edge)
+        )
 
     for bucket in outbound.values():
-        bucket.sort(key=lambda edge: _edge_sort_key(edge, node_map, traversal_direction="outbound"))
+        if len(bucket) > 1:
+            bucket.sort(key=lambda item: item[0])
     for bucket in inbound.values():
-        bucket.sort(key=lambda edge: _edge_sort_key(edge, node_map, traversal_direction="inbound"))
+        if len(bucket) > 1:
+            bucket.sort(key=lambda item: item[0])
 
     steps: list[CallTraceStep] = []
     visited_edges: set[str] = set()
@@ -221,9 +231,9 @@ def trace_call_path(
 
         adjacent: list[tuple[str, CanonicalEdge]] = []
         if normalized_direction in {"outbound", "both"}:
-            adjacent.extend(("outbound", edge) for edge in outbound.get(current_node_id, ()))
+            adjacent.extend(("outbound", edge) for _, edge in outbound.get(current_node_id, ()))
         if normalized_direction in {"inbound", "both"}:
-            adjacent.extend(("inbound", edge) for edge in inbound.get(current_node_id, ()))
+            adjacent.extend(("inbound", edge) for _, edge in inbound.get(current_node_id, ()))
 
         for traversal_direction, edge in adjacent:
             if edge.edge_id in visited_edges:
@@ -318,7 +328,7 @@ def _node_ref(node: CanonicalNode) -> CodeGraphNodeRef:
 
 def _edge_sort_key(
     edge: CanonicalEdge,
-    node_map: dict[str, CanonicalNode],
+    node_sort_names: dict[str, str],
     *,
     traversal_direction: str,
 ) -> tuple[str, str, str, str]:
@@ -331,11 +341,9 @@ def _edge_sort_key(
         source_id = edge.target_id
         target_id = edge.source_id
 
-    source = node_map.get(source_id)
-    target = node_map.get(target_id)
     return (
         edge.edge_type,
-        (source.qualified_name or source.name if source else "").lower(),
-        (target.qualified_name or target.name if target else "").lower(),
+        node_sort_names.get(source_id, ""),
+        node_sort_names.get(target_id, ""),
         edge.edge_id,
     )

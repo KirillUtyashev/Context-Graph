@@ -51,7 +51,7 @@ from .profile_vectors import (
 )
 from .query_executor import QueryExecutor, Transaction
 from .search import SearchOperations
-from .sync_bridge import BackendSyncBridge
+from .sync_bridge import BackendSyncBridge, run_backend_coroutine_sync
 from .traversal import TraversalOperations
 from .types import (
     BackendCapabilities,
@@ -108,6 +108,7 @@ __all__ = [
     "SearchOperations",
     "SearchQuery",
     "BackendSyncBridge",
+    "run_backend_coroutine_sync",
     "SQLiteMetadataConfig",
     "SQLiteMetadataStore",
     "Transaction",

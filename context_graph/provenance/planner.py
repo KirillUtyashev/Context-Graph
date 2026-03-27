@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from context_graph.ingestion.git.git_metadata import CommitInfo
+from context_graph.models import GraphSnapshot
 from context_graph.storage.backend import (
     EdgeRecord,
     MutationPlan,
@@ -16,6 +17,8 @@ from context_graph.storage.backend import (
     merge_mutation_plans,
 )
 
+from .grounding import resolve_mention_record_ids
+from .hint_enrichment import collect_observation_grounding_hints
 from .models import (
     Observation,
     ObservationKind,
@@ -83,11 +86,12 @@ class ObservationMutationPlanner:
         *,
         repo_id: str,
         commit: CommitInfo,
+        snapshot: GraphSnapshot | None = None,
     ) -> MutationPlan:
         planned = self.build_commit_message_observation(repo_id=repo_id, commit=commit)
         if planned is None:
             return MutationPlan()
-        return self.plan_observations(planned)
+        return self.plan_observations(planned, snapshot=snapshot)
 
     def build_github_observations(self, *, bundle: Any) -> tuple[PlannedObservation, ...]:
         observations: list[PlannedObservation] = []
@@ -132,20 +136,35 @@ class ObservationMutationPlanner:
             )
         return tuple(observations)
 
-    def plan_github_observations(self, *, bundle: Any) -> MutationPlan:
-        return self.plan_observations(*self.build_github_observations(bundle=bundle))
+    def plan_github_observations(
+        self,
+        *,
+        bundle: Any,
+        snapshot: GraphSnapshot | None = None,
+    ) -> MutationPlan:
+        return self.plan_observations(*self.build_github_observations(bundle=bundle), snapshot=snapshot)
 
-    def plan_github_entity_observations(self, *, bundle: Any) -> MutationPlan:
+    def plan_github_entity_observations(
+        self,
+        *,
+        bundle: Any,
+        snapshot: GraphSnapshot | None = None,
+    ) -> MutationPlan:
         """Compatibility wrapper for older callers."""
 
-        return self.plan_github_observations(bundle=bundle)
+        return self.plan_github_observations(bundle=bundle, snapshot=snapshot)
 
-    def plan_observations(self, *planned_observations: PlannedObservation) -> MutationPlan:
+    def plan_observations(
+        self,
+        *planned_observations: PlannedObservation,
+        snapshot: GraphSnapshot | None = None,
+    ) -> MutationPlan:
         return merge_mutation_plans(
             *(self.plan_observation(
                 observation=item.observation,
                 source=item.source,
                 about_links=item.about_links,
+                snapshot=snapshot,
             ) for item in planned_observations)
         )
 
@@ -155,6 +174,7 @@ class ObservationMutationPlanner:
         observation: Observation,
         source: ObservationSourceRef,
         about_links: tuple[ObservationLink, ...] = (),
+        snapshot: GraphSnapshot | None = None,
     ) -> MutationPlan:
         node = NodeRecord(
             record_id=observation.observation_id,
@@ -200,6 +220,22 @@ class ObservationMutationPlanner:
             )
             for link in about_links
         )
+        mention_edges = tuple(
+            EdgeRecord(
+                record_id=f"mentions:{observation.observation_id}:{target_record_id}",
+                record_type="mentions",
+                repo_id=observation.repo_id,
+                group_id=observation.repo_id,
+                relationship_type="MENTIONS",
+                source_record_id=observation.observation_id,
+                target_record_id=target_record_id,
+                properties={},
+            )
+            for target_record_id in resolve_mention_record_ids(
+                snapshot,
+                collect_observation_grounding_hints(observation=observation),
+            )
+        )
         search_document = SearchDocumentRecord(
             record_kind=RecordKind.NODE,
             record_id=observation.observation_id,
@@ -216,7 +252,7 @@ class ObservationMutationPlanner:
         )
         return MutationPlan(
             upsert_nodes=(node,),
-            upsert_edges=(source_edge, *about_edges),
+            upsert_edges=(source_edge, *about_edges, *mention_edges),
             upsert_search_documents=(search_document,),
         )
 

@@ -397,7 +397,10 @@ class CommitIndexingService:
             commit=commit,
         )
         observation_plan = (
-            self.observation_planner.plan_observations(planned_observation)
+            self.observation_planner.plan_observations(
+                planned_observation,
+                snapshot=structural_plan.snapshot,
+            )
             if planned_observation is not None
             else MutationPlan()
         )
@@ -406,12 +409,14 @@ class CommitIndexingService:
             snapshot=structural_plan.snapshot,
             commit=commit,
         )
-        all_operations = self.planner.merge_plans(
-            structural_plan.plan,
-            commit_plan,
-            observation_plan,
-            evidence_plan,
-        )
+        all_operation_plans = [structural_plan.plan]
+        if not commit_plan.is_empty():
+            all_operation_plans.append(commit_plan)
+        if not observation_plan.is_empty():
+            all_operation_plans.append(observation_plan)
+        if not evidence_plan.is_empty():
+            all_operation_plans.append(evidence_plan)
+        all_operations = self.planner.merge_plans(*all_operation_plans)
         apply_result = self.writer.apply_planned_snapshot(
             structural_plan.snapshot,
             structural_plan.diff,

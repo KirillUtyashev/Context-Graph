@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from context_graph.models import GraphSnapshot
 from context_graph.provenance import (
@@ -179,7 +180,10 @@ class GitHubIndexer:
         )
         structural_operations = self.planner.plan_bundle(bundle)
         planned_observations = self.observation_planner.build_github_observations(bundle=bundle)
-        observation_operations = self.observation_planner.plan_observations(*planned_observations)
+        observation_operations = self.observation_planner.plan_observations(
+            *planned_observations,
+            snapshot=snapshot,
+        )
         evidence_operations, claim_counts = self._plan_evidence_operations(
             planned_observations=planned_observations,
             snapshot=snapshot,
@@ -331,7 +335,14 @@ class GitHubIndexer:
         observation_sources: dict[str, GitHubObservationSource] = {}
 
         for number, pr in pr_payloads.items():
-            pr_entity = _build_pull_request_entity(repo_id=repo_id, repo_ref=repo_ref, payload=pr)
+            pr_author_login = _author_login(pr)
+            pr_body_text = _normalized_optional_text(pr.get("body"))
+            pr_entity = _build_pull_request_entity(
+                repo_id=repo_id,
+                repo_ref=repo_ref,
+                payload=pr,
+                author_login=pr_author_login,
+            )
             entities[pr_entity.node_id] = pr_entity
             project_links[("HAS_PULL_REQUEST", pr_entity.node_id)] = GitHubProjectLink(
                 target_node_id=pr_entity.node_id,
@@ -353,9 +364,13 @@ class GitHubIndexer:
                     repo_id=repo_id,
                     repo_ref=repo_ref,
                     payload=pr,
+                    author_login=pr_author_login,
+                    body_text=pr_body_text,
                 ),
             )
             for review in self.github_api.list_pull_request_reviews(owner, repo_name, number):
+                review_author_login = _author_login(review)
+                review_body_text = _normalized_optional_text(review.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_review_observation_source(
@@ -363,9 +378,13 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         pull_request_payload=pr,
                         payload=review,
+                        author_login=review_author_login,
+                        body_text=review_body_text,
                     ),
                 )
             for comment in self.github_api.list_pull_request_review_comments(owner, repo_name, number):
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_review_comment_observation_source(
@@ -373,11 +392,34 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         pull_request_payload=pr,
                         payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
+                    ),
+                )
+            for comment in self.github_api.list_issue_comments(owner, repo_name, number):
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
+                _maybe_add_observation_source(
+                    observation_sources,
+                    _build_pull_request_issue_comment_observation_source(
+                        repo_id=repo_id,
+                        repo_ref=repo_ref,
+                        pull_request_payload=pr,
+                        payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
                     ),
                 )
 
         for number, issue in issue_payloads.items():
-            issue_entity = _build_issue_entity(repo_id=repo_id, repo_ref=repo_ref, payload=issue)
+            issue_author_login = _author_login(issue)
+            issue_body_text = _normalized_optional_text(issue.get("body"))
+            issue_entity = _build_issue_entity(
+                repo_id=repo_id,
+                repo_ref=repo_ref,
+                payload=issue,
+                author_login=issue_author_login,
+            )
             entities[issue_entity.node_id] = issue_entity
             project_links[("HAS_ISSUE", issue_entity.node_id)] = GitHubProjectLink(
                 target_node_id=issue_entity.node_id,
@@ -390,9 +432,13 @@ class GitHubIndexer:
                     repo_id=repo_id,
                     repo_ref=repo_ref,
                     payload=issue,
+                    author_login=issue_author_login,
+                    body_text=issue_body_text,
                 ),
             )
             for comment in self.github_api.list_issue_comments(owner, repo_name, number):
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_issue_comment_observation_source(
@@ -400,6 +446,8 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         issue_payload=issue,
                         payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
                     ),
                 )
 
@@ -437,6 +485,7 @@ def _build_pull_request_entity(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
 ) -> GitHubEntity:
     number = int(payload["number"])
     return GitHubEntity(
@@ -449,7 +498,7 @@ def _build_pull_request_entity(
         url=payload.get("html_url"),
         title=payload.get("title"),
         state=payload.get("state"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
         metadata={
@@ -468,10 +517,11 @@ def _build_pull_request_body_observation_source(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     number = int(payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     return GitHubObservationSource(
         observation_kind=ObservationKind.GITHUB_PR_BODY,
@@ -482,10 +532,10 @@ def _build_pull_request_body_observation_source(
         number=number,
         url=payload.get("html_url"),
         title=payload.get("title"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": number,
@@ -500,6 +550,7 @@ def _build_issue_entity(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
 ) -> GitHubEntity:
     number = int(payload["number"])
     return GitHubEntity(
@@ -512,7 +563,7 @@ def _build_issue_entity(
         url=payload.get("html_url"),
         title=payload.get("title"),
         state=payload.get("state"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
         metadata={
@@ -527,10 +578,11 @@ def _build_issue_body_observation_source(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     number = int(payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     return GitHubObservationSource(
         observation_kind=ObservationKind.GITHUB_ISSUE_BODY,
@@ -541,10 +593,10 @@ def _build_issue_body_observation_source(
         number=number,
         url=payload.get("html_url"),
         title=payload.get("title"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "issue_number": number,
@@ -560,11 +612,12 @@ def _build_review_observation_source(
     repo_ref: GitHubRepoRef,
     pull_request_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     review_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     pr_title = pull_request_payload.get("title")
     title = f"Review on PR #{pull_number}"
@@ -579,10 +632,10 @@ def _build_review_observation_source(
         number=pull_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("submitted_at") or payload.get("created_at"),
         updated_at=payload.get("submitted_at") or payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": pull_number,
@@ -600,11 +653,12 @@ def _build_review_comment_observation_source(
     repo_ref: GitHubRepoRef,
     pull_request_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     pr_title = pull_request_payload.get("title")
     title = f"Review comment on PR #{pull_number}"
@@ -619,10 +673,10 @@ def _build_review_comment_observation_source(
         number=pull_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": pull_number,
@@ -641,11 +695,12 @@ def _build_issue_comment_observation_source(
     repo_ref: GitHubRepoRef,
     issue_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     issue_number = int(issue_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     issue_title = issue_payload.get("title")
     title = f"Comment on issue #{issue_number}"
@@ -660,13 +715,52 @@ def _build_issue_comment_observation_source(
         number=issue_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "issue_number": issue_number,
+            "comment_id": comment_id,
+            "url": payload.get("html_url"),
+        },
+    )
+
+
+def _build_pull_request_issue_comment_observation_source(
+    *,
+    repo_id: str,
+    repo_ref: GitHubRepoRef,
+    pull_request_payload: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
+) -> GitHubObservationSource | None:
+    comment_id = int(payload["id"])
+    pull_number = int(pull_request_payload["number"])
+    if not body_text:
+        return None
+    pr_title = pull_request_payload.get("title")
+    title = f"Comment on PR #{pull_number}"
+    if pr_title:
+        title = f"{title}: {pr_title}"
+    return GitHubObservationSource(
+        observation_kind=ObservationKind.GITHUB_ISSUE_COMMENT,
+        source_kind="pull_request",
+        source_id=_pull_request_node_id(repo_id, pull_number),
+        source_record_type="github_pull_request",
+        external_id=str(comment_id),
+        number=pull_number,
+        url=payload.get("html_url"),
+        title=title,
+        author_login=author_login,
+        created_at=payload.get("created_at"),
+        updated_at=payload.get("updated_at"),
+        text=body_text,
+        metadata={
+            "github_repo": repo_ref.canonical_repo,
+            "pull_request_number": pull_number,
             "comment_id": comment_id,
             "url": payload.get("html_url"),
         },
@@ -809,7 +903,14 @@ def _maybe_add_observation_source(
 
 
 def _has_text(value: object) -> bool:
-    return bool(" ".join(str(value).split()).strip()) if value is not None else False
+    return _normalized_optional_text(value) is not None
+
+
+def _normalized_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).split()).strip()
+    return normalized or None
 
 
 def _merge_reason_counts(*reason_maps: Mapping[str, int]) -> dict[str, int]:

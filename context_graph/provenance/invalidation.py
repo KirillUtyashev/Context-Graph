@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import inspect
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from context_graph.models import GraphSnapshot
-from context_graph.storage.backend import BackendDriver, MutationPlan, merge_mutation_plans
+from context_graph.storage.backend import (
+    BackendDriver,
+    MutationPlan,
+    merge_mutation_plans,
+    run_backend_coroutine_sync,
+)
 
 from .canonicalization import canonical_claim_key
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
 from .models import EvidenceRecord, Observation, PersistedEvidenceFact, PersistedEvidenceRecord
-from .services import FactConflictResolutionService, _run_coroutine_sync
+from .services import FactConflictResolutionService
 from .validation import ClaimValidationResult, ValidatedClaimBundle
 
 _CURRENT_EVIDENCE_QUERY = """
@@ -57,18 +64,21 @@ class CurrentEvidenceReader:
         excluded_fact_keys: Sequence[str] = (),
         limit: int = 10,
     ) -> tuple[PersistedEvidenceFact, ...]:
-        if self.backend_driver is None or not about_record_ids:
+        ordered_about_record_ids = tuple(dict.fromkeys(about_record_ids))
+        if self.backend_driver is None or not ordered_about_record_ids:
             return ()
+        about_record_id_set = set(ordered_about_record_ids)
+        query_coro = self.backend_driver.execute_query(
+            _CURRENT_EVIDENCE_QUERY,
+            repo_id=repo_id,
+            about_record_ids=list(ordered_about_record_ids),
+        )
         try:
-            rows = _run_coroutine_sync(
-                self.backend_driver.execute_query(
-                    _CURRENT_EVIDENCE_QUERY,
-                    repo_id=repo_id,
-                    about_record_ids=list(dict.fromkeys(about_record_ids)),
-                )
-            )
+            rows = run_backend_coroutine_sync(query_coro)
         except Exception:
+            _close_unstarted_coroutine(query_coro)
             return ()
+        _close_unstarted_coroutine(query_coro)
 
         excluded = set(excluded_fact_keys)
         records = [
@@ -78,7 +88,7 @@ class CurrentEvidenceReader:
             if record is not None
             and record.evidence.claim_kind == claim_kind
             and record.evidence.is_current
-            and set(record.about_record_ids).intersection(about_record_ids)
+            and any(record_id in about_record_id_set for record_id in record.about_record_ids)
             and record.evidence.fact_key not in excluded
         ]
         grouped: dict[str, list[PersistedEvidenceRecord]] = {}
@@ -505,3 +515,8 @@ def _int_or_none(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _close_unstarted_coroutine(value: object) -> None:
+    if inspect.iscoroutine(value) and inspect.getcoroutinestate(value) == inspect.CORO_CREATED:
+        value.close()
