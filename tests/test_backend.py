@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from context_graph.ingestion.commit_indexing import CommitIndexingService
+from context_graph.ingestion.commit_indexing import CommitIndexingService, normalize_snapshot_for_commit
 from context_graph.ingestion.deterministic_planner import DeterministicMutationPlanner
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 from context_graph.ingestion.git.github_indexer import (
@@ -137,6 +137,16 @@ class FakeNeo4jClient:
         self.closed = True
 
 
+class FakeLLMClient:
+    def __init__(self, response: dict):
+        self.response = response
+        self.calls: list[dict] = []
+
+    async def generate_response(self, messages, **kwargs):
+        self.calls.append({"messages": messages, **kwargs})
+        return self.response
+
+
 class FakeNeptuneOpenCypherClient:
     def __init__(self, responses: list[list[dict]] | None = None):
         self.responses = list(responses or [])
@@ -203,6 +213,9 @@ class FakeSnapshotProducer:
 class FakeGitMetadata:
     def __init__(self, commit: CommitInfo):
         self.commit = commit
+        self.first_parent_ancestor = True
+        self.first_parent_between_result: tuple[str, ...] = (commit.sha,)
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
 
     def resolve_repo_root(self, repo_path: str) -> str:
         return repo_path
@@ -215,13 +228,29 @@ class FakeGitMetadata:
         _ = repo_path, ancestor_sha, descendant_sha
         return True
 
+    def is_first_parent_ancestor(self, repo_path: str, ancestor_sha: str, descendant_sha: str) -> bool:
+        _ = repo_path
+        self.calls.append(("is_first_parent_ancestor", (ancestor_sha, descendant_sha)))
+        return self.first_parent_ancestor
+
     def has_new_commit(self, repo_path: str, previous_commit_sha: str | None) -> bool:
         _ = repo_path, previous_commit_sha
         return True
 
     def list_commits_between(self, repo_path: str, old_sha: str, new_sha: str) -> tuple[str, ...]:
+        self.calls.append(("list_commits_between", (old_sha, new_sha)))
         _ = repo_path, old_sha, new_sha
         return (new_sha,)
+
+    def list_first_parent_commits_between(
+        self,
+        repo_path: str,
+        old_sha: str,
+        new_sha: str,
+    ) -> tuple[str, ...]:
+        _ = repo_path
+        self.calls.append(("list_first_parent_commits_between", (old_sha, new_sha)))
+        return self.first_parent_between_result
 
     def list_commit_window(
         self,
@@ -378,6 +407,77 @@ def make_snapshot() -> GraphSnapshot:
         generated_at="2026-03-26T00:00:00+00:00",
         nodes=(node_repo, node_file, node_func),
         edges=(edge,),
+        metadata={"source": "test"},
+    )
+
+
+def make_tree_snapshot(
+    *,
+    revision_id: str = "r1",
+    root_path: str = "/tmp/demo",
+    file_path: str = "src/auth/login.py",
+    file_name: str = "login.py",
+    folder_qualified_names: tuple[str, ...] = ("demo.src", "demo.src.auth"),
+    file_qualified_name: str = "demo.src.auth.login.__file__",
+    function_qualified_name: str | None = "demo.src.auth.login",
+) -> GraphSnapshot:
+    nodes = [
+        CanonicalNode(
+            "project:demo",
+            "demo",
+            "Project",
+            "demo",
+            qualified_name="demo",
+            properties={"root_path": root_path},
+        )
+    ]
+    for qualified_name in folder_qualified_names:
+        nodes.append(
+            CanonicalNode(
+                f"folder:demo:{qualified_name}",
+                "demo",
+                "Folder",
+                qualified_name.rsplit(".", 1)[-1],
+                qualified_name=qualified_name,
+            )
+        )
+    file_node = CanonicalNode(
+        f"file:demo:{file_qualified_name}",
+        "demo",
+        "File",
+        file_name,
+        qualified_name=file_qualified_name,
+        file_path=file_path,
+    )
+    nodes.append(file_node)
+    edges: list[CanonicalEdge] = []
+    if function_qualified_name is not None:
+        function_node = CanonicalNode(
+            f"function:demo:{function_qualified_name}",
+            "demo",
+            "Function",
+            function_qualified_name.rsplit(".", 1)[-1],
+            qualified_name=function_qualified_name,
+            file_path=file_path,
+        )
+        nodes.append(function_node)
+        edges.append(
+            CanonicalEdge(
+                f"edge:demo:DEFINES:{file_node.node_id}:{function_node.node_id}",
+                "demo",
+                "DEFINES",
+                file_node.node_id,
+                function_node.node_id,
+            )
+        )
+
+    return GraphSnapshot(
+        repo_id="demo",
+        revision_id=revision_id,
+        root_path=root_path,
+        generated_at="2026-03-26T00:00:00+00:00",
+        nodes=tuple(nodes),
+        edges=tuple(edges),
         metadata={"source": "test"},
     )
 
@@ -972,6 +1072,153 @@ class DeterministicPlannerTests(unittest.TestCase):
                 "INTRODUCED_VERSION",
             },
         )
+        touched_targets = {
+            edge.target_record_id
+            for edge in commit_plan.upsert_edges
+            if edge.relationship_type == "TOUCHED"
+        }
+        introduced_targets = {
+            edge.target_record_id
+            for edge in commit_plan.upsert_edges
+            if edge.relationship_type == "INTRODUCED_VERSION"
+        }
+        self.assertTrue(all("@" not in record_id for record_id in touched_targets))
+        self.assertTrue(all("@" in record_id for record_id in introduced_targets))
+
+    def test_commit_provenance_adds_file_and_folder_touches_without_structural_diff(self):
+        previous_snapshot = make_tree_snapshot(revision_id="r0")
+        snapshot = make_tree_snapshot(revision_id="r1")
+        planner = DeterministicMutationPlanner()
+        diff = diff_snapshots(previous_snapshot, snapshot)
+        structural = planner.plan_snapshot_diff(
+            previous_snapshot=previous_snapshot,
+            snapshot=snapshot,
+            diff=diff,
+        )
+
+        commit_plan = planner.plan_commit_provenance(
+            snapshot=structural.snapshot,
+            diff=structural.diff,
+            commit=make_commit(
+                sha="r1",
+                parents=(),
+                changed_files=("src/auth/login.py",),
+            ),
+            planning_state=structural.state,
+        )
+
+        touched_targets = {
+            edge.target_record_id
+            for edge in commit_plan.upsert_edges
+            if edge.relationship_type == "TOUCHED"
+        }
+        self.assertEqual(
+            touched_targets,
+            {
+                "file:demo:demo.src.auth.login.__file__",
+                "folder:demo:demo.src",
+                "folder:demo:demo.src.auth",
+            },
+        )
+        self.assertNotIn("project:demo", touched_targets)
+
+    def test_commit_provenance_deduplicates_file_touches_when_changed_files_overlap_structural_diff(self):
+        snapshot = make_tree_snapshot()
+        planner = DeterministicMutationPlanner()
+        structural = planner.plan_snapshot_diff(
+            previous_snapshot=None,
+            snapshot=snapshot,
+            diff=diff_snapshots(None, snapshot),
+        )
+
+        commit_plan = planner.plan_commit_provenance(
+            snapshot=structural.snapshot,
+            diff=structural.diff,
+            commit=make_commit(
+                sha="r1",
+                parents=(),
+                changed_files=("src/auth/login.py",),
+            ),
+            planning_state=structural.state,
+        )
+
+        touched_targets = [
+            edge.target_record_id
+            for edge in commit_plan.upsert_edges
+            if edge.relationship_type == "TOUCHED"
+        ]
+        self.assertEqual(
+            touched_targets.count("file:demo:demo.src.auth.login.__file__"),
+            1,
+        )
+
+    def test_normalize_snapshot_for_commit_stabilizes_project_root_path_across_replays(self):
+        previous_raw = make_tree_snapshot(revision_id="r0", root_path="/tmp/worktree-a")
+        current_raw = make_tree_snapshot(revision_id="r1", root_path="/tmp/worktree-b")
+
+        previous_snapshot = normalize_snapshot_for_commit(
+            previous_raw,
+            repo_path="/tmp/demo",
+            commit=make_commit(sha="r0", parents=()),
+        )
+        current_snapshot = normalize_snapshot_for_commit(
+            current_raw,
+            repo_path="/tmp/demo",
+            commit=make_commit(sha="r1", parents=("r0",), changed_files=("src/auth/login.py",)),
+        )
+
+        diff = diff_snapshots(previous_snapshot, current_snapshot)
+
+        self.assertNotIn("project:demo", diff.changed_nodes)
+
+    def test_markdown_only_commit_still_touches_file_and_folder_nodes(self):
+        previous_snapshot = make_tree_snapshot(
+            revision_id="r0",
+            file_path="test_events/GROUND_TRUTH.md",
+            file_name="GROUND_TRUTH.md",
+            folder_qualified_names=("demo.test_events",),
+            file_qualified_name="demo.test_events.GROUND_TRUTH.__file__",
+            function_qualified_name=None,
+        )
+        snapshot = make_tree_snapshot(
+            revision_id="r1",
+            file_path="test_events/GROUND_TRUTH.md",
+            file_name="GROUND_TRUTH.md",
+            folder_qualified_names=("demo.test_events",),
+            file_qualified_name="demo.test_events.GROUND_TRUTH.__file__",
+            function_qualified_name=None,
+        )
+        planner = DeterministicMutationPlanner()
+        diff = diff_snapshots(previous_snapshot, snapshot)
+        structural = planner.plan_snapshot_diff(
+            previous_snapshot=previous_snapshot,
+            snapshot=snapshot,
+            diff=diff,
+        )
+
+        commit_plan = planner.plan_commit_provenance(
+            snapshot=structural.snapshot,
+            diff=structural.diff,
+            commit=make_commit(
+                sha="r1",
+                parents=(),
+                changed_files=("test_events/GROUND_TRUTH.md",),
+            ),
+            planning_state=structural.state,
+        )
+
+        touched_targets = {
+            edge.target_record_id
+            for edge in commit_plan.upsert_edges
+            if edge.relationship_type == "TOUCHED"
+        }
+        self.assertEqual(
+            touched_targets,
+            {
+                "file:demo:demo.test_events.GROUND_TRUTH.__file__",
+                "folder:demo:demo.test_events",
+            },
+        )
 
 
 class DeterministicIngestionTests(unittest.TestCase):
@@ -997,8 +1244,260 @@ class DeterministicIngestionTests(unittest.TestCase):
         self.assertFalse(result.skipped)
         self.assertEqual(result.operations.operation_count(), 21)
         self.assertEqual(result.observation_operations.operation_count(), 3)
+        self.assertEqual(result.evidence_operations.operation_count(), 0)
+        self.assertEqual(result.claim_candidates_extracted, 0)
+        self.assertEqual(result.claim_candidates_validated, 0)
+        self.assertEqual(result.claim_candidates_rejected, 0)
         self.assertEqual(result.apply_result.operations_applied, 0)
         self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, "r1")
+
+    def test_apply_commit_extracts_evidence_when_llm_is_configured(self):
+        snapshot = make_snapshot()
+        commit = make_commit(sha="r1", parents=(), changed_files=("app.py",))
+        producer = FakeSnapshotProducer(snapshot)
+        metadata = InMemoryMetadataStore()
+        llm_client = FakeLLMClient(
+            {
+                "claims": [
+                    {
+                        "claim_text": "Helper support was added to demo.app.main.",
+                        "claim_kind": "change_claim",
+                        "about_hints": ["demo.app.main"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Add helper support",
+                                "summary_text": "The commit adds helper support to demo.app.main.",
+                                "span_start": 0,
+                                "span_end": 18,
+                                "about_hints": ["demo.app.main"],
+                                "support_kind": "direct_statement",
+                                "metadata": {},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=FakeGitMetadata(commit),
+            llm_client=llm_client,
+        )
+
+        result = service.apply_commit(
+            "/tmp/demo",
+            commit_sha="r1",
+            repo_id="demo",
+            execute=False,
+        )
+
+        self.assertFalse(result.skipped)
+        self.assertEqual(result.observation_operations.operation_count(), 3)
+        self.assertEqual(result.evidence_operations.operation_count(), 4)
+        self.assertEqual(result.claim_candidates_extracted, 1)
+        self.assertEqual(result.claim_candidates_validated, 1)
+        self.assertEqual(result.claim_candidates_rejected, 0)
+        self.assertEqual(result.operations.operation_count(), 25)
+        self.assertEqual(
+            llm_client.calls[0]["prompt_name"],
+            "provenance.extract_claims_and_evidence.from_commit_message.v1",
+        )
+
+    def test_apply_commit_does_not_invoke_dedup_scaffolding_services(self):
+        snapshot = make_snapshot()
+        commit = make_commit(sha="r1", parents=(), changed_files=("app.py",))
+        producer = FakeSnapshotProducer(snapshot)
+        metadata = InMemoryMetadataStore()
+        llm_client = FakeLLMClient(
+            {
+                "claims": [
+                    {
+                        "claim_text": "Helper support was added to demo.app.main.",
+                        "claim_kind": "change_claim",
+                        "about_hints": ["demo.app.main"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Add helper support",
+                                "summary_text": "The commit adds helper support to demo.app.main.",
+                                "span_start": 0,
+                                "span_end": 18,
+                                "about_hints": ["demo.app.main"],
+                                "support_kind": "direct_statement",
+                                "metadata": {},
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=FakeGitMetadata(commit),
+            llm_client=llm_client,
+        )
+
+        with patch(
+            "context_graph.provenance.services.EvidenceDedupService.pregroup",
+            side_effect=AssertionError("evidence dedup scaffolding should stay inactive during indexing"),
+        ), patch(
+            "context_graph.provenance.services.ClaimCanonicalizationService.pregroup",
+            side_effect=AssertionError("claim canonicalization scaffolding should stay inactive during indexing"),
+        ):
+            result = service.apply_commit(
+                "/tmp/demo",
+                commit_sha="r1",
+                repo_id="demo",
+                execute=False,
+            )
+
+        self.assertFalse(result.skipped)
+        self.assertEqual(result.claim_candidates_validated, 1)
+
+    def test_apply_commit_with_history_seeded_replays_first_parent_commits(self):
+        snapshot = make_snapshot()
+        commit = make_commit(sha="head123", parents=("prev123",), changed_files=("app.py",))
+        producer = FakeSnapshotProducer(snapshot)
+        metadata = InMemoryMetadataStore()
+        metadata.save_repo_index_state(
+            RepoIndexState(
+                repo_id="demo",
+                root_path="/tmp/demo",
+                latest_revision_id="prev123",
+                latest_indexed_at="2026-03-26T00:00:00+00:00",
+                metadata={},
+                latest_commit_sha="prev123",
+                latest_branch="main",
+                last_commit_indexed_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+        git_metadata = FakeGitMetadata(commit)
+        git_metadata.first_parent_between_result = ("mid456", "head123")
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=git_metadata,
+        )
+        captured: dict[str, object] = {}
+        expected_result = SimpleNamespace(repo_id="demo")
+        service.apply_commit_sequence = lambda repo_path, **kwargs: (
+            captured.update({"repo_path": repo_path, **kwargs}),
+            expected_result,
+        )[1]  # type: ignore[method-assign]
+
+        result = service.apply_commit_with_history(
+            "/tmp/demo",
+            commit_sha="head123",
+            repo_id="demo",
+            execute=False,
+            history_window=5,
+        )
+
+        self.assertIs(result, expected_result)
+        self.assertEqual(captured["commit_shas"], ("mid456", "head123"))
+        self.assertIn(
+            ("list_first_parent_commits_between", ("prev123", "head123")),
+            git_metadata.calls,
+        )
+        self.assertNotIn(
+            ("list_commits_between", ("prev123", "head123")),
+            git_metadata.calls,
+        )
+
+    def test_apply_latest_commit_seeded_replays_first_parent_commits(self):
+        snapshot = make_snapshot()
+        commit = make_commit(sha="head123", parents=("prev123",), changed_files=("app.py",))
+        producer = FakeSnapshotProducer(snapshot)
+        metadata = InMemoryMetadataStore()
+        metadata.save_repo_index_state(
+            RepoIndexState(
+                repo_id="demo",
+                root_path="/tmp/demo",
+                latest_revision_id="prev123",
+                latest_indexed_at="2026-03-26T00:00:00+00:00",
+                metadata={},
+                latest_commit_sha="prev123",
+                latest_branch="main",
+                last_commit_indexed_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+        git_metadata = FakeGitMetadata(commit)
+        git_metadata.first_parent_between_result = ("mid456", "head123")
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=git_metadata,
+        )
+        captured: dict[str, object] = {}
+        expected_result = SimpleNamespace(repo_id="demo")
+        service.apply_commit_sequence = lambda repo_path, **kwargs: (
+            captured.update({"repo_path": repo_path, **kwargs}),
+            expected_result,
+        )[1]  # type: ignore[method-assign]
+
+        result = service.apply_latest_commit(
+            "/tmp/demo",
+            repo_id="demo",
+            execute=False,
+        )
+
+        self.assertIs(result, expected_result)
+        self.assertEqual(captured["commit_shas"], ("mid456", "head123"))
+        self.assertIn(
+            ("list_first_parent_commits_between", ("prev123", "head123")),
+            git_metadata.calls,
+        )
+        self.assertNotIn(
+            ("list_commits_between", ("prev123", "head123")),
+            git_metadata.calls,
+        )
+
+    def test_apply_commit_rejects_target_off_first_parent_chain(self):
+        snapshot = make_snapshot()
+        commit = make_commit(sha="head123", parents=("prev123",), changed_files=("app.py",))
+        producer = FakeSnapshotProducer(snapshot)
+        metadata = InMemoryMetadataStore()
+        metadata.save_repo_index_state(
+            RepoIndexState(
+                repo_id="demo",
+                root_path="/tmp/demo",
+                latest_revision_id="prev123",
+                latest_indexed_at="2026-03-26T00:00:00+00:00",
+                metadata={},
+                latest_commit_sha="prev123",
+                latest_branch="main",
+                last_commit_indexed_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+        git_metadata = FakeGitMetadata(commit)
+        git_metadata.first_parent_ancestor = False
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=git_metadata,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "first-parent chain; reset or reseed this repo id"):
+            service.apply_commit(
+                "/tmp/demo",
+                commit_sha="head123",
+                repo_id="demo",
+                execute=False,
+            )
 
     def test_hosted_explicit_commit_indexes_target_plus_previous_four_when_unseeded(self):
         metadata = InMemoryMetadataStore()
@@ -1025,7 +1524,7 @@ class DeterministicIngestionTests(unittest.TestCase):
 
         self.assertIs(result, expected_result)
 
-    def test_hosted_explicit_commit_only_replays_missing_descendants_when_seeded(self):
+    def test_hosted_explicit_commit_only_replays_missing_first_parent_commits_when_seeded(self):
         metadata = InMemoryMetadataStore()
         metadata.save_repo_index_state(
             RepoIndexState(

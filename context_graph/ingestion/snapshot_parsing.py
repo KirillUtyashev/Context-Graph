@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any, Mapping
 
+from context_graph.code_identity import DEFAULT_CODE_IDENTITY_CANONICALIZER
+
 from ..models import CanonicalEdge, CanonicalNode, GraphSnapshot, utc_now_iso
 
 
@@ -13,16 +15,16 @@ def _slugify(value: str) -> str:
 
 
 def _edge_id(repo_id: str, edge_type: str, source_id: str, target_id: str) -> str:
-    return f"edge:{repo_id}:{edge_type}:{source_id}:{target_id}"
+    return DEFAULT_CODE_IDENTITY_CANONICALIZER.stable_edge_id(
+        repo_id,
+        edge_type,
+        source_id,
+        target_id,
+    )
 
 
 def _normalized_rel_path(rel_path: str) -> str:
-    rel_path = rel_path.replace("\\", "/")
-    while rel_path.startswith("./"):
-        rel_path = rel_path[2:]
-    if rel_path == ".":
-        return ""
-    return rel_path
+    return DEFAULT_CODE_IDENTITY_CANONICALIZER.normalize_rel_path(rel_path)
 
 
 def _stable_node_id(
@@ -33,16 +35,13 @@ def _stable_node_id(
     file_path: str | None,
     name: str,
 ) -> str:
-    if kind == "Project":
-        return f"project:{repo_id}"
-
-    if qualified_name:
-        return f"{kind.lower()}:{repo_id}:{qualified_name}"
-
-    rel_path = _normalized_rel_path(file_path or "")
-    if rel_path:
-        return f"{kind.lower()}:{repo_id}:{rel_path}:{name}"
-    return f"{kind.lower()}:{repo_id}:{name}"
+    return DEFAULT_CODE_IDENTITY_CANONICALIZER.stable_node_id(
+        repo_id,
+        kind=kind,
+        qualified_name=qualified_name,
+        file_path=file_path,
+        name=name,
+    )
 
 
 def _coerce_properties(properties_json: str | None) -> dict[str, Any]:

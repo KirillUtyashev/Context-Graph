@@ -111,6 +111,19 @@ class GitMetadata:
         commits = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
         return commits or (() if old_sha == new_sha else (new_sha,))
 
+    def list_first_parent_commits_between(
+        self,
+        repo_path: str,
+        old_sha: str,
+        new_sha: str,
+    ) -> tuple[str, ...]:
+        completed = self._run_git(
+            repo_path,
+            ["rev-list", "--reverse", "--first-parent", f"{old_sha}..{new_sha}"],
+        )
+        commits = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+        return commits or (() if old_sha == new_sha else (new_sha,))
+
     def list_commit_window(
         self,
         repo_path: str,
@@ -152,6 +165,19 @@ class GitMetadata:
         raise RuntimeError(
             f"git merge-base --is-ancestor failed for {repo_path}: {detail}"
         )
+
+    def is_first_parent_ancestor(self, repo_path: str, ancestor_sha: str, descendant_sha: str) -> bool:
+        if ancestor_sha == descendant_sha:
+            return True
+        completed = self._run_git(
+            repo_path,
+            ["rev-list", "--first-parent", descendant_sha],
+        )
+        return ancestor_sha in {
+            line.strip()
+            for line in completed.stdout.splitlines()
+            if line.strip()
+        }
 
     def has_new_commit(self, repo_path: str, last_indexed_sha: str | None) -> bool:
         if last_indexed_sha is None:

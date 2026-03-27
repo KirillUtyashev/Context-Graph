@@ -69,7 +69,39 @@ class EvidenceRecord:
     span_start: int | None
     span_end: int | None
     support_kind: str
+    fact_key: str | None = None
+    claim_text: str | None = None
+    claim_kind: str | None = None
+    claim_confidence: str | None = None
+    claim_derivation_kind: str | None = None
+    observation_id: str | None = None
+    observed_at: str | None = None
+    is_current: bool = True
+    invalidated_at: str | None = None
+    invalidated_by_fact_key: str | None = None
+    invalidated_by_observation_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedEvidenceRecord:
+    """One evidence record hydrated from the backend with grounded targets."""
+
+    evidence: EvidenceRecord
+    about_record_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedEvidenceFact:
+    """One current fact candidate aggregated from persisted evidence records."""
+
+    fact_key: str
+    claim_text: str
+    claim_kind: str
+    observation_id: str | None
+    observed_at: str | None
+    about_record_ids: tuple[str, ...]
+    evidence_records: tuple[PersistedEvidenceRecord, ...] = ()
 
 
 def git_commit_message_observation_id(repo_id: str, commit_sha: str) -> str:
@@ -104,6 +136,7 @@ def evidence_record_id(
     quote_text: str,
     span_start: int | None,
     span_end: int | None,
+    claim_text: str | None = None,
 ) -> str:
     import hashlib
 
@@ -116,6 +149,7 @@ def evidence_record_id(
                 quote_text,
                 str(span_start),
                 str(span_end),
+                claim_text or "",
             ]
         ).encode("utf-8")
     ).hexdigest()
@@ -128,7 +162,16 @@ class ProvenanceBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class EvidenceCandidate(ProvenanceBaseModel):
+class ExtractionMetadata(ProvenanceBaseModel):
+    """Closed metadata envelope for structured extraction responses.
+
+    OpenAI structured output requires object schemas to explicitly disallow
+    arbitrary keys. We keep the response metadata closed in v1 and rely on
+    typed top-level fields for the values we actually use.
+    """
+
+
+class SupportingEvidenceCandidate(ProvenanceBaseModel):
     evidence_kind: str
     quote_text: str
     summary_text: str
@@ -136,7 +179,25 @@ class EvidenceCandidate(ProvenanceBaseModel):
     span_end: int | None = None
     about_hints: list[str] = Field(default_factory=list)
     support_kind: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+
+
+class ClaimWithEvidenceCandidate(ProvenanceBaseModel):
+    claim_text: str
+    claim_kind: str
+    about_hints: list[str] = Field(default_factory=list)
+    confidence: str
+    derivation_kind: str
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+    supporting_evidence: list[SupportingEvidenceCandidate] = Field(default_factory=list)
+
+
+class ClaimEvidenceExtractionResponse(ProvenanceBaseModel):
+    claims: list[ClaimWithEvidenceCandidate] = Field(default_factory=list)
+
+
+class EvidenceCandidate(SupportingEvidenceCandidate):
+    """Compatibility alias for older derivation helpers that still consume evidence sets."""
 
 
 class ClaimCandidate(ProvenanceBaseModel):
@@ -145,14 +206,55 @@ class ClaimCandidate(ProvenanceBaseModel):
     about_hints: list[str] = Field(default_factory=list)
     supported_evidence_ids: list[str] = Field(default_factory=list)
     derivation_kind: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+
+
+class EvidenceDedupCandidate(ProvenanceBaseModel):
+    observation_id: str
+    evidence_kind: str
+    quote_text: str
+    summary_text: str
+    span_start: int | None = None
+    span_end: int | None = None
+    support_kind: str
+    about_record_ids: list[str] = Field(default_factory=list)
+    claim_kind: str | None = None
+    claim_text: str | None = None
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+
+
+class ClaimDedupCandidate(ProvenanceBaseModel):
+    observation_id: str
+    claim_text: str
+    claim_kind: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    about_record_ids: list[str] = Field(default_factory=list)
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+
+
+class EvidenceDedupGroup(ProvenanceBaseModel):
+    canonical_key: str
+    candidates: list[EvidenceDedupCandidate] = Field(default_factory=list)
+
+
+class ClaimCanonicalizationGroup(ProvenanceBaseModel):
+    canonical_key: str
+    candidates: list[ClaimDedupCandidate] = Field(default_factory=list)
+
+
+class EvidenceDedupResult(ProvenanceBaseModel):
+    groups: list[EvidenceDedupGroup] = Field(default_factory=list)
+
+
+class ClaimCanonicalizationResult(ProvenanceBaseModel):
+    groups: list[ClaimCanonicalizationGroup] = Field(default_factory=list)
 
 
 class ClaimRelationCandidate(ProvenanceBaseModel):
     relation_type: Literal["contradicts", "supersedes", "supports", "unrelated"]
     relation_rationale: str
     confidence_note: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
 
 
 class ResearchArtifactCandidate(ProvenanceBaseModel):
@@ -162,10 +264,12 @@ class ResearchArtifactCandidate(ProvenanceBaseModel):
     key_points: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     about_refs: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
 
 
 class EvidenceExtractionResponse(ProvenanceBaseModel):
+    """Compatibility wrapper for legacy evidence-only extraction flows."""
+
     evidence: list[EvidenceCandidate] = Field(default_factory=list)
 
 
@@ -179,3 +283,7 @@ class ClaimRelationResponse(ProvenanceBaseModel):
 
 class ResearchArtifactSynthesisResponse(ProvenanceBaseModel):
     artifacts: list[ResearchArtifactCandidate] = Field(default_factory=list)
+
+
+class FactConflictResolutionResponse(ProvenanceBaseModel):
+    contradicted_fact_ids: list[str] = Field(default_factory=list)

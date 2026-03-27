@@ -250,6 +250,27 @@ def create_git_repo_with_branch_divergence(root_dir: str) -> tuple[str, str, str
     return repo_path, first_sha, second_sha, feature_sha
 
 
+def create_git_repo_with_merge_commit(root_dir: str) -> tuple[str, str, str, str, str]:
+    repo_path, first_sha, second_sha = create_git_repo(root_dir)
+    _git(repo_path, "branch", "-M", "main")
+    _git(repo_path, "checkout", "-b", "feature", first_sha)
+
+    Path(repo_path, "feature.py").write_text(
+        "def feature_flag():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    _git(repo_path, "add", "feature.py")
+    _git(repo_path, "commit", "-m", "feature branch change")
+    feature_sha = _git(repo_path, "rev-parse", "HEAD")
+
+    _git(repo_path, "checkout", "main")
+    _git(repo_path, "merge", "--no-ff", "feature", "-m", "merge feature")
+    merge_sha = _git(repo_path, "rev-parse", "HEAD")
+
+    return repo_path, first_sha, second_sha, feature_sha, merge_sha
+
+
 def create_git_remote_repo(root_dir: str) -> tuple[str, str, str, str]:
     repo_path, first_sha, second_sha = create_git_repo(root_dir)
     _git(repo_path, "branch", "-M", "main")
@@ -1652,6 +1673,30 @@ class GitMetadataTests(unittest.TestCase):
             self.assertTrue(metadata.is_ancestor(repo_path, first_sha, second_sha))
             self.assertFalse(metadata.is_ancestor(repo_path, second_sha, first_sha))
 
+    def test_first_parent_helpers_follow_branch_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path, first_sha, second_sha, feature_sha = create_git_repo_with_branch_divergence(temp_dir)
+            metadata = GitMetadata()
+
+            self.assertTrue(metadata.is_first_parent_ancestor(repo_path, first_sha, second_sha))
+            self.assertFalse(metadata.is_first_parent_ancestor(repo_path, feature_sha, second_sha))
+            self.assertEqual(
+                metadata.list_first_parent_commits_between(repo_path, first_sha, second_sha),
+                (second_sha,),
+            )
+
+    def test_first_parent_replay_excludes_side_branch_commits_but_keeps_merge_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path, first_sha, second_sha, feature_sha, merge_sha = create_git_repo_with_merge_commit(temp_dir)
+            metadata = GitMetadata()
+
+            self.assertTrue(metadata.is_first_parent_ancestor(repo_path, second_sha, merge_sha))
+            self.assertFalse(metadata.is_first_parent_ancestor(repo_path, feature_sha, merge_sha))
+            self.assertEqual(
+                metadata.list_first_parent_commits_between(repo_path, first_sha, merge_sha),
+                (second_sha, merge_sha),
+            )
+
     def test_lists_remotes_and_resolves_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, bare_path, _first_sha, second_sha = create_git_remote_repo(temp_dir)
@@ -2084,7 +2129,7 @@ class CommitIndexerTests(unittest.TestCase):
 
             self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, second_sha)
 
-    def test_apply_commit_rejects_non_descendant_target(self) -> None:
+    def test_apply_commit_rejects_target_off_first_parent_chain(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, first_sha, second_sha = create_git_repo(temp_dir)
             metadata = InMemoryMetadataStore()
@@ -2096,7 +2141,7 @@ class CommitIndexerTests(unittest.TestCase):
 
             indexer.apply_commit(repo_path, commit_sha=second_sha, repo_id="demo", execute=False)
 
-            with self.assertRaisesRegex(RuntimeError, "is not an ancestor of target commit"):
+            with self.assertRaisesRegex(RuntimeError, "first-parent chain; reset or reseed this repo id"):
                 indexer.apply_commit(repo_path, commit_sha=first_sha, repo_id="demo", execute=False)
 
     def test_commit_statements_cover_added_changed_and_removed_nodes_and_files(self) -> None:

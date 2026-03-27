@@ -44,6 +44,11 @@ class CommitIndexResult:
     applied_commit_shas: tuple[str, ...]
     observation_operations: MutationPlan = field(default_factory=MutationPlan)
     evidence_operations: MutationPlan = field(default_factory=MutationPlan)
+    claim_candidates_extracted: int = 0
+    claim_candidates_validated: int = 0
+    claim_candidates_rejected: int = 0
+    claim_rejection_reasons: dict[str, int] = field(default_factory=dict)
+    evidence_invalidated: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,3 +80,8 @@ class DeterministicHostedIndexResult:
     operations_applied: int
     observation_operations: MutationPlan = field(default_factory=MutationPlan)
     evidence_operations: MutationPlan = field(default_factory=MutationPlan)
+    claim_candidates_extracted: int = 0
+    claim_candidates_validated: int = 0
+    claim_candidates_rejected: int = 0
+    claim_rejection_reasons: dict[str, int] = field(default_factory=dict)
+    evidence_invalidated: int = 0

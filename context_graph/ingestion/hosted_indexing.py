@@ -101,6 +101,7 @@ class HostedIndexingService:
                     snapshot_producer=self.snapshot_producer,
                     git_metadata=repo_git,
                     planner=self.planner,
+                    llm_client=self.llm_client,
                 )
                 branch_hint = branch_hint_for_request(
                     request=request,
@@ -158,6 +159,26 @@ class HostedIndexingService:
                     ),
                     observation_operations=observation_operations,
                     evidence_operations=evidence_operations,
+                    claim_candidates_extracted=(
+                        getattr(commit_result, "claim_candidates_extracted", 0)
+                        + (github_result.claim_candidates_extracted if github_result is not None else 0)
+                    ),
+                    claim_candidates_validated=(
+                        getattr(commit_result, "claim_candidates_validated", 0)
+                        + (github_result.claim_candidates_validated if github_result is not None else 0)
+                    ),
+                    claim_candidates_rejected=(
+                        getattr(commit_result, "claim_candidates_rejected", 0)
+                        + (github_result.claim_candidates_rejected if github_result is not None else 0)
+                    ),
+                    claim_rejection_reasons=_merge_reason_counts(
+                        getattr(commit_result, "claim_rejection_reasons", {}),
+                        github_result.claim_rejection_reasons if github_result is not None else {},
+                    ),
+                    evidence_invalidated=(
+                        getattr(commit_result, "evidence_invalidated", 0)
+                        + (github_result.evidence_invalidated if github_result is not None else 0)
+                    ),
                 )
             finally:
                 self.repo_cache.cleanup_request_workspace(resolved_repo_id, request_id)
@@ -300,3 +321,11 @@ def looks_like_commit(value: str) -> bool:
     """Best-effort check for a SHA-like git revision string."""
 
     return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", value))
+
+
+def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for reason_map in reason_maps:
+        for key, value in reason_map.items():
+            counts[key] = counts.get(key, 0) + value
+    return counts

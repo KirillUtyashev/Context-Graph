@@ -7,8 +7,12 @@ from typing import Any, Mapping, Sequence
 
 from context_graph.models import GraphSnapshot
 from context_graph.provenance import (
+    ClaimBundleValidator,
+    ClaimEvidenceExtractionService,
+    EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
+    FactConflictResolutionService,
     ObservationKind,
     ObservationMutationPlanner,
 )
@@ -105,6 +109,11 @@ class GitHubSyncResult:
     issue_numbers: tuple[int, ...]
     observation_operations: MutationPlan = field(default_factory=MutationPlan)
     evidence_operations: MutationPlan = field(default_factory=MutationPlan)
+    claim_candidates_extracted: int = 0
+    claim_candidates_validated: int = 0
+    claim_candidates_rejected: int = 0
+    claim_rejection_reasons: dict[str, int] = field(default_factory=dict)
+    evidence_invalidated: int = 0
 
 
 class GitHubIndexer:
@@ -116,17 +125,30 @@ class GitHubIndexer:
         planner: GitHubStructuralPlanner | None = None,
         observation_planner: ObservationMutationPlanner | None = None,
         llm_client: Any | None = None,
+        claim_extraction_service: ClaimEvidenceExtractionService | None = None,
         evidence_service: EvidenceExtractionService | None = None,
+        claim_validator: ClaimBundleValidator | None = None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        fact_conflict_resolution_service: FactConflictResolutionService | None = None,
+        evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
     ) -> None:
         self.github_api = github_api
         self.backend_driver = backend_driver
         self.planner = planner or GitHubStructuralPlanner()
         self.observation_planner = observation_planner or ObservationMutationPlanner()
-        self.evidence_service = evidence_service or (
-            EvidenceExtractionService(llm_client=llm_client) if llm_client is not None else None
+        self.claim_extraction_service = claim_extraction_service or evidence_service or (
+            ClaimEvidenceExtractionService(llm_client=llm_client) if llm_client is not None else None
         )
+        self.claim_validator = claim_validator or ClaimBundleValidator()
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
+        self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
+            FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
+            backend_driver=backend_driver,
+            evidence_planner=self.evidence_planner,
+            fact_conflict_resolution_service=self.fact_conflict_resolution_service,
+        )
 
     def sync_for_commits(
         self,
@@ -158,7 +180,7 @@ class GitHubIndexer:
         structural_operations = self.planner.plan_bundle(bundle)
         planned_observations = self.observation_planner.build_github_observations(bundle=bundle)
         observation_operations = self.observation_planner.plan_observations(*planned_observations)
-        evidence_operations = self._plan_evidence_operations(
+        evidence_operations, claim_counts = self._plan_evidence_operations(
             planned_observations=planned_observations,
             snapshot=snapshot,
         )
@@ -194,6 +216,11 @@ class GitHubIndexer:
             issue_numbers=tuple(sorted(issues)),
             observation_operations=observation_operations,
             evidence_operations=evidence_operations,
+            claim_candidates_extracted=claim_counts["extracted"],
+            claim_candidates_validated=claim_counts["validated"],
+            claim_candidates_rejected=claim_counts["rejected"],
+            claim_rejection_reasons=dict(claim_counts["reasons"]),
+            evidence_invalidated=claim_counts["invalidated"],
         )
 
     def _plan_evidence_operations(
@@ -201,14 +228,26 @@ class GitHubIndexer:
         *,
         planned_observations: Sequence[Any],
         snapshot: GraphSnapshot | None,
-    ) -> MutationPlan:
-        if self.evidence_service is None:
-            return MutationPlan()
+    ) -> tuple[MutationPlan, dict[str, object]]:
+        zero_counts: dict[str, object] = {
+            "extracted": 0,
+            "validated": 0,
+            "rejected": 0,
+            "reasons": {},
+            "invalidated": 0,
+        }
+        if self.claim_extraction_service is None:
+            return MutationPlan(), zero_counts
 
         plans: list[MutationPlan] = []
+        extracted_count = 0
+        validated_count = 0
+        rejected_count = 0
+        invalidated_count = 0
+        rejection_reasons: dict[str, int] = {}
         for planned in planned_observations:
             try:
-                extraction = self.evidence_service.extract(
+                extraction = self.claim_extraction_service.extract(
                     planned.observation,
                     source_context={
                         "source_kind": planned.source.source_kind,
@@ -220,14 +259,35 @@ class GitHubIndexer:
                 )
             except Exception:
                 continue
-            plans.append(
-                self.evidence_planner.plan_evidence_records(
-                    observation=planned.observation,
-                    extraction=extraction,
-                    snapshot=snapshot,
-                )
+            validation = self.claim_validator.validate(
+                observation=planned.observation,
+                extraction=extraction,
+                snapshot=snapshot,
             )
-        return merge_mutation_plans(*plans)
+            extracted_count += validation.extracted_count
+            validated_count += validation.validated_count
+            rejected_count += validation.rejected_count
+            rejection_reasons = _merge_reason_counts(
+                rejection_reasons,
+                validation.rejection_reason_counts,
+            )
+            invalidation_result = self.evidence_invalidation_planner.plan_validated_claims(
+                observation=planned.observation,
+                validation=validation,
+                snapshot=snapshot,
+            )
+            plans.append(invalidation_result.plan)
+            invalidated_count += invalidation_result.invalidated_count
+        return (
+            merge_mutation_plans(*plans),
+            {
+                "extracted": extracted_count,
+                "validated": validated_count,
+                "rejected": rejected_count,
+                "reasons": rejection_reasons,
+                "invalidated": invalidated_count,
+            },
+        )
 
     def _build_bundle(
         self,
@@ -750,3 +810,11 @@ def _maybe_add_observation_source(
 
 def _has_text(value: object) -> bool:
     return bool(" ".join(str(value).split()).strip()) if value is not None else False
+
+
+def _merge_reason_counts(*reason_maps: Mapping[str, int]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for reason_map in reason_maps:
+        for key, value in reason_map.items():
+            counts[key] = counts.get(key, 0) + value
+    return counts

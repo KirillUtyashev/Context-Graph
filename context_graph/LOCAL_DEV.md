@@ -195,6 +195,26 @@ python3 -m context_graph hosted-index \
   --execute
 ```
 
+### Task 3 in A5: populate the graph
+
+With your virtualenv activated and `OPENAI_API_KEY` set, run this command to populate the graph for Task 3 in A5:
+
+```bash
+python3 -m context_graph hosted-index \
+  --github-url https://github.com/patelhrid/context-graph-test-harness \
+  --repo-id test \
+  --repo-cache-dir /Users/utya.kirill/Desktop/UOFT/Context-Graph/.cache/context-graph \
+  --metadata-backend postgres \
+  --metadata-dsn postgresql://context_graph:context_graph@localhost:5433/context_graph \
+  --graph-backend neo4j \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j \
+  --neo4j-password contextgraph \
+  --llm-provider openai \
+  --llm-model gpt-4o \
+  --execute
+```
+
 ## 5. End-to-End Hosted Repo + MCP Smoke Test
 
 This is the shortest local path for the full "ingest repo, start MCP, query `search_memory`" loop.

@@ -618,37 +618,6 @@ def _make_embedding_provider(args):
     return make_embedding_provider(settings)
 
 
-def _make_sink(args, *, embedding_provider=_EMBEDDING_UNSET):
-    from .legacy_graph_backend import GraphitiNeo4jExecutor, NeptuneGraphSink, Neo4jGraphSink
-
-    if embedding_provider is _EMBEDDING_UNSET:
-        embedding_provider = _make_embedding_provider(args)
-    if args.graph_backend == "neptune":
-        return NeptuneGraphSink(
-            host=args.neptune_host or os.getenv("CONTEXT_GRAPH_NEPTUNE_HOST"),
-            port=args.neptune_port,
-            host_scheme=getattr(args, "neptune_host_scheme", "neptune-db"),
-            aoss_host=getattr(args, "aoss_host", None) or os.getenv("CONTEXT_GRAPH_AOSS_HOST"),
-            embedding_provider=embedding_provider,
-        )
-
-    executor = GraphitiNeo4jExecutor(
-        uri=args.neo4j_uri or os.getenv("NEO4J_URI"),
-        username=args.neo4j_user or os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER"),
-        password=args.neo4j_password or os.getenv("NEO4J_PASSWORD"),
-        database=args.neo4j_database or os.getenv("NEO4J_DATABASE"),
-    )
-
-    return Neo4jGraphSink(
-        uri=args.neo4j_uri or os.getenv("NEO4J_URI"),
-        username=args.neo4j_user or os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER"),
-        password=args.neo4j_password or os.getenv("NEO4J_PASSWORD"),
-        database=args.neo4j_database or os.getenv("NEO4J_DATABASE"),
-        executor=executor,
-        embedding_provider=embedding_provider,
-    )
-
-
 def _make_backend_driver(args):
     """Create the additive backend driver used by deterministic ingestion."""
 
@@ -959,6 +928,11 @@ def _github_sync_summary(result) -> dict[str, object] | None:
         "operations_emitted": result.operations.operation_count(),
         "observation_operations_emitted": _observation_operation_count(result),
         "evidence_operations_emitted": _evidence_operation_count(result),
+        "claim_candidates_extracted": _claim_candidates_extracted(result),
+        "claim_candidates_validated": _claim_candidates_validated(result),
+        "claim_candidates_rejected": _claim_candidates_rejected(result),
+        "claim_rejection_reasons": _claim_rejection_reasons(result),
+        "evidence_invalidated": _evidence_invalidated_count(result),
         "operations_applied": result.operations_applied,
     }
 
@@ -977,6 +951,26 @@ def _evidence_operation_count(result) -> int:
     return evidence_operations.operation_count()
 
 
+def _claim_candidates_extracted(result) -> int:
+    return int(getattr(result, "claim_candidates_extracted", 0) or 0)
+
+
+def _claim_candidates_validated(result) -> int:
+    return int(getattr(result, "claim_candidates_validated", 0) or 0)
+
+
+def _claim_candidates_rejected(result) -> int:
+    return int(getattr(result, "claim_candidates_rejected", 0) or 0)
+
+
+def _claim_rejection_reasons(result) -> dict[str, int]:
+    return dict(getattr(result, "claim_rejection_reasons", {}) or {})
+
+
+def _evidence_invalidated_count(result) -> int:
+    return int(getattr(result, "evidence_invalidated", 0) or 0)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -986,11 +980,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         backend_driver = _make_backend_driver(args) if args.execute else None
         if args.execute and backend_driver is None:
             raise RuntimeError("deterministic execution requires a configured backend connection")
+        llm_settings = load_episode_llm_settings(args)
+        llm_client = make_episode_llm_client(llm_settings)
         try:
             driver = IngestionDriver(
                 metadata_store=metadata,
                 backend_driver=backend_driver,
                 snapshot_producer=_producer(),
+                llm_client=llm_client,
             )
             if args.command == "apply-latest-commit":
                 result = driver.apply_latest_commit(
@@ -1021,6 +1018,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "operations_emitted": result.operations.operation_count(),
                 "observation_operations_emitted": _observation_operation_count(result),
                 "evidence_operations_emitted": _evidence_operation_count(result),
+                "claim_candidates_extracted": _claim_candidates_extracted(result),
+                "claim_candidates_validated": _claim_candidates_validated(result),
+                "claim_candidates_rejected": _claim_candidates_rejected(result),
+                "claim_rejection_reasons": _claim_rejection_reasons(result),
+                "evidence_invalidated": _evidence_invalidated_count(result),
                 "operations_applied": result.apply_result.operations_applied if result.apply_result else 0,
                 "operations_preview": _operations_preview(
                     result.operations,
@@ -1078,12 +1080,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "operations_emitted": result.commit_result.operations.operation_count(),
                     "observation_operations_emitted": _observation_operation_count(result.commit_result),
                     "evidence_operations_emitted": _evidence_operation_count(result.commit_result),
+                    "claim_candidates_extracted": _claim_candidates_extracted(result.commit_result),
+                    "claim_candidates_validated": _claim_candidates_validated(result.commit_result),
+                    "claim_candidates_rejected": _claim_candidates_rejected(result.commit_result),
+                    "claim_rejection_reasons": _claim_rejection_reasons(result.commit_result),
+                    "evidence_invalidated": _evidence_invalidated_count(result.commit_result),
                     "operations_applied": result.commit_result.apply_result.operations_applied if result.commit_result.apply_result else 0,
                 },
                 "github_sync": _github_sync_summary(result.github_sync_result),
                 "operations_emitted": result.operations.operation_count(),
                 "observation_operations_emitted": _observation_operation_count(result),
                 "evidence_operations_emitted": _evidence_operation_count(result),
+                "claim_candidates_extracted": _claim_candidates_extracted(result),
+                "claim_candidates_validated": _claim_candidates_validated(result),
+                "claim_candidates_rejected": _claim_candidates_rejected(result),
+                "claim_rejection_reasons": _claim_rejection_reasons(result),
+                "evidence_invalidated": _evidence_invalidated_count(result),
                 "operations_applied": result.operations_applied,
                 "operations_preview": _operations_preview(
                     result.operations,

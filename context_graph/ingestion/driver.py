@@ -58,7 +58,7 @@ class IngestionDriver:
         limit: int = 1000000,
         execute: bool = False,
     ) -> CommitIndexResult:
-        """Index HEAD for a checkout, replaying any missing descendant commits."""
+        """Index HEAD for a checkout, replaying any missing first-parent commits."""
 
         return self._make_commit_indexing_service().apply_latest_commit(
             repo_path,
@@ -114,4 +114,5 @@ class IngestionDriver:
             repo_cache=self.repo_cache,
             repo_resolver=self.repo_resolver,
             planner=self.planner,
+            llm_client=self.llm_client,
         )

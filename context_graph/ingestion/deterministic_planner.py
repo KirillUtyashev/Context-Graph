@@ -11,6 +11,10 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping
 
+from context_graph.code_identity import (
+    DEFAULT_CODE_IDENTITY_CANONICALIZER,
+    SnapshotCodeResolver,
+)
 from context_graph.ingestion.git.git_metadata import CommitInfo
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
 from context_graph.storage.backend import (
@@ -265,7 +269,7 @@ class DeterministicMutationPlanner:
                 )
             )
 
-        for row in self._touched_node_rows(diff=diff, commit=commit):
+        for row in self._touched_node_rows(snapshot=snapshot, diff=diff, commit=commit):
             edges.append(
                 EdgeRecord(
                     record_id=f"touched:{commit_record_id}:{row['node_id']}",
@@ -280,6 +284,7 @@ class DeterministicMutationPlanner:
             )
 
         for row in self._introduced_version_rows(
+            snapshot=snapshot,
             diff=diff,
             commit=commit,
             active_node_versions=planning_state.active_node_versions,
@@ -326,15 +331,13 @@ class DeterministicMutationPlanner:
 
         return merge_mutation_plans(*plans)
 
-    def _touched_node_rows(self, *, diff: SnapshotDiff, commit: CommitInfo) -> list[dict[str, Any]]:
-        if diff.previous_revision_id is None:
-            rows = [
-                _touch_row(commit=commit, node=node, change_kind="changed")
-                for node in diff.added_nodes.values()
-                if node.kind != "Project" and node.file_path in commit.changed_files
-            ]
-            return sorted(rows, key=lambda row: row["node_id"])
-
+    def _touched_node_rows(
+        self,
+        *,
+        snapshot: GraphSnapshot,
+        diff: SnapshotDiff,
+        commit: CommitInfo,
+    ) -> list[dict[str, Any]]:
         rows: dict[str, dict[str, Any]] = {}
         for node in diff.added_nodes.values():
             if node.kind == "Project":
@@ -349,11 +352,14 @@ class DeterministicMutationPlanner:
             if node.kind == "Project":
                 continue
             rows[node.node_id] = _touch_row(commit=commit, node=node, change_kind="removed")
+        for node in _changed_path_nodes(snapshot=snapshot, diff=diff, changed_files=commit.changed_files):
+            rows.setdefault(node.node_id, _touch_row(commit=commit, node=node, change_kind="changed"))
         return sorted(rows.values(), key=lambda row: (row["change_kind"], row["node_id"]))
 
     def _introduced_version_rows(
         self,
         *,
+        snapshot: GraphSnapshot,
         diff: SnapshotDiff,
         commit: CommitInfo,
         active_node_versions: Mapping[str, str],
@@ -361,7 +367,7 @@ class DeterministicMutationPlanner:
         if diff.previous_revision_id is None:
             touched_by_id = {
                 row["node_id"]: row
-                for row in self._touched_node_rows(diff=diff, commit=commit)
+                for row in self._touched_node_rows(snapshot=snapshot, diff=diff, commit=commit)
             }
             rows = [
                 _version_provenance_row(
@@ -705,6 +711,19 @@ def _touch_row(*, commit: CommitInfo, node: CanonicalNode, change_kind: str) -> 
     }
 
 
+def _changed_path_nodes(
+    *,
+    snapshot: GraphSnapshot,
+    diff: SnapshotDiff,
+    changed_files: tuple[str, ...],
+) -> list[CanonicalNode]:
+    resolver = SnapshotCodeResolver(
+        snapshot,
+        extra_nodes=tuple(diff.removed_nodes.values()),
+    )
+    return list(resolver.resolve_changed_files(changed_files))
+
+
 def _version_provenance_row(
     *,
     commit: CommitInfo,
@@ -737,6 +756,10 @@ def _normalized_text(value: Any) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split()).strip()
+
+
+def _normalized_rel_path(value: str) -> str:
+    return DEFAULT_CODE_IDENTITY_CANONICALIZER.normalize_rel_path(value)
 
 
 def _slug(value: str) -> str:
