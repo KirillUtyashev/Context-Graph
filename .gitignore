@@ -34,3 +34,8 @@ evaluation/**/__pycache__/
 
 # Vendored codebase pipeline build outputs
 vendor/codebase_memory_pipeline/build/
+
+# Test / coverage artifacts
+coverage.xml
+.coverage
+.pytest_cache/
