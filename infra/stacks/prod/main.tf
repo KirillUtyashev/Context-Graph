@@ -4,6 +4,7 @@ locals {
     Project = var.project_name
     Env     = var.env
   }
+  repo_sync_index_enabled             = var.repo_sync_index_image_uri != ""
 
   bedrock_public_proxy_username         = var.bedrock_public_proxy_basic_auth_username
   bedrock_public_proxy_password         = var.bedrock_public_proxy_basic_auth_password != "" ? var.bedrock_public_proxy_basic_auth_password : random_password.bedrock_public_proxy_password[0].result
@@ -81,6 +82,37 @@ module "neptune" {
   tags           = local.tags
 }
 
+module "repo_cache_efs" {
+  source         = "../../modules/efs_cache"
+  name           = local.name
+  vpc_id         = module.network.vpc_id
+  subnet_ids     = module.network.private_subnet_ids
+  allowed_sg_ids = [aws_security_group.lambda.id]
+  tags           = local.tags
+}
+
+resource "aws_secretsmanager_secret" "github_token" {
+  name                    = "${local.name}/github/token"
+  recovery_window_in_days = 0
+
+  tags = merge(local.tags, {
+    Name = "${local.name}-github-token"
+  })
+}
+
+resource "aws_ecr_repository" "repo_sync_index" {
+  name                 = "${local.name}-repo-sync-index"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = merge(local.tags, {
+    Name = "${local.name}-repo-sync-index"
+  })
+}
+
 module "augment_lambda" {
   source                 = "../../modules/lambda_url"
   name                   = "${local.name}-augment"
@@ -107,6 +139,52 @@ module "retrieve_lambda" {
     ENV              = var.env
   }
   tags = local.tags
+}
+
+module "repo_sync_index_lambda" {
+  count                  = local.repo_sync_index_enabled ? 1 : 0
+  source                 = "../../modules/lambda_container_url"
+  name                   = "${local.name}-repo-sync-index"
+  image_uri              = var.repo_sync_index_image_uri
+  vpc_subnet_ids         = module.network.private_subnet_ids
+  vpc_security_group_ids = [aws_security_group.lambda.id]
+  efs_access_point_arn   = module.repo_cache_efs.access_point_arn
+  efs_local_mount_path   = "/mnt/context-graph"
+  environment = {
+    AURORA_ENDPOINT            = module.aurora.cluster_endpoint
+    AURORA_DB_NAME             = module.aurora.db_name
+    AURORA_USERNAME            = module.aurora.master_username
+    AURORA_PASSWORD_SECRET_ARN = module.aurora.master_password_secret_arn
+    GITHUB_TOKEN_SECRET_ARN    = aws_secretsmanager_secret.github_token.arn
+    NEPTUNE_ENDPOINT           = module.neptune.endpoint
+    REPO_CACHE_DIR             = "/mnt/context-graph"
+    ENV                        = var.env
+  }
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy" "repo_sync_index_access" {
+  count = local.repo_sync_index_enabled ? 1 : 0
+
+  name = "${local.name}-repo-sync-index-access"
+  role = module.repo_sync_index_lambda[0].role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "ReadGithubAndAuroraSecrets"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.github_token.arn,
+          module.aurora.master_password_secret_arn
+        ]
+      }
+    ]
+  })
 }
 
 module "bedrock_public_proxy_lambda" {
@@ -178,4 +256,3 @@ resource "aws_iam_role_policy" "bedrock_public_proxy_invoke_restrict_models" {
     ]
   })
 }
-

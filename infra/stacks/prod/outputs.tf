@@ -38,6 +38,18 @@ output "retrieve_function_url" {
   value = module.retrieve_lambda.function_url
 }
 
+output "repo_sync_index_function_url" {
+  value = local.repo_sync_index_enabled ? module.repo_sync_index_lambda[0].function_url : null
+}
+
+output "repo_sync_index_ecr_repository_url" {
+  value = aws_ecr_repository.repo_sync_index.repository_url
+}
+
+output "github_token_secret_arn" {
+  value = aws_secretsmanager_secret.github_token.arn
+}
+
 output "bedrock_public_proxy_function_url" {
   value = module.bedrock_public_proxy_lambda.function_url
 }

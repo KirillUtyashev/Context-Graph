@@ -1,0 +1,12 @@
+[
+  {
+    "question": "What documents mention the authentication flow?",
+    "gold_docs": ["doc1", "doc2"],
+    "gold_answer": "doc1 doc2"
+  },
+  {
+    "question": "What graph context is relevant for the repo structure?",
+    "gold_docs": ["doc1", "doc2", "doc3"],
+    "gold_answer": "doc1 doc2 doc3"
+  }
+]

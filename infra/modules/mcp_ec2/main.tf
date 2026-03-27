@@ -145,6 +145,22 @@ resource "aws_iam_role_policy" "invoke_retrieve_lambda" {
   })
 }
 
+locals {
+  # Build Bedrock resource ARNs for the allowed model IDs.
+  # Bedrock uses two different ARN patterns:
+  #   - Foundation models:   arn:aws:bedrock:*::foundation-model/<id>
+  #   - Inference profiles:  arn:aws:bedrock:*:*:inference-profile/<id>
+  # Inference profiles (e.g. us.anthropic.*) are required for cross-region throughput
+  # and use account-scoped ARNs; foundation-model ARNs are global (no account).
+  # We emit both patterns for every entry so that InvokeModel and Converse work.
+  _bedrock_model_arns = length(var.bedrock_allowed_model_ids) > 0 ? flatten([
+    for m in var.bedrock_allowed_model_ids : [
+      "arn:aws:bedrock:*::foundation-model/${m}",
+      "arn:aws:bedrock:*:*:inference-profile/${m}"
+    ]
+  ]) : ["*"]
+}
+
 resource "aws_iam_role_policy" "bedrock_invoke" {
   count = var.enable_bedrock ? 1 : 0
 
@@ -164,37 +180,62 @@ resource "aws_iam_role_policy" "bedrock_invoke" {
           "bedrock:ConverseStream",
           "bedrock:CountTokens"
         ]
-        Resource = "*"
+        # Scope to specific model ARNs when a list is provided; otherwise all models.
+        Resource = local._bedrock_model_arns
       }
     ]
   })
 }
 
+# The old Deny-based restriction policy was removed. The Deny approach using
+# StringNotEqualsIfExists broke the Converse API because bedrock:ModelId is
+# not set by Converse (only bedrock:InferredModelId is). Scoping the Allow
+# Resource directly is the correct mechanism.
 resource "aws_iam_role_policy" "bedrock_invoke_restrict_models" {
-  count = (var.enable_bedrock && length(var.bedrock_allowed_model_ids) > 0) ? 1 : 0
+  count = 0 # disabled — model scoping is now handled via Allow Resource ARNs above
 
   name = "${var.name}-mcp-bedrock-invoke-restrict-models"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({ Version = "2012-10-17", Statement = [] })
+}
+
+resource "aws_iam_role_policy" "aurora_secret_read" {
+  count = var.aurora_password_secret_arn != "" ? 1 : 0
+
+  name = "${var.name}-mcp-aurora-secret-read"
   role = aws_iam_role.ssm.id
 
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "RestrictBedrockModelIds"
-        Effect = "Deny"
-        Action = [
-          "bedrock:InvokeModel",
-          "bedrock:InvokeModelWithResponseStream",
-          "bedrock:Converse",
-          "bedrock:ConverseStream",
-          "bedrock:CountTokens"
-        ]
-        Resource = "*"
-        Condition = {
-          "StringNotEquals" = {
-            "bedrock:ModelId" = var.bedrock_allowed_model_ids
-          }
-        }
+        Sid    = "ReadAuroraSecret"
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [var.aurora_password_secret_arn]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "aoss_api_access" {
+  count = var.aoss_host != "" ? 1 : 0
+
+  name = "${var.name}-mcp-aoss-api-access"
+  role = aws_iam_role.ssm.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "AOSSAPIAccess"
+        Effect = "Allow"
+        Action = ["aoss:APIAccessAll"]
+        # Scope to the specific collection ARN when provided; fall back to "*"
+        # (the AOSS data access policy in the opensearch_aoss module provides
+        # the fine-grained per-index authorization in that case).
+        Resource = var.aoss_collection_arn != "" ? [var.aoss_collection_arn] : ["*"]
       }
     ]
   })
@@ -207,7 +248,7 @@ resource "aws_iam_instance_profile" "this" {
 
 resource "aws_instance" "this" {
   ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.micro"
+  instance_type          = "t3.medium"
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.mcp.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
@@ -216,9 +257,10 @@ resource "aws_instance" "this" {
     #!/bin/bash
     set -euo pipefail
 
-    # Base runtime only. App code is deployed out-of-band via GitHub Actions + SSM.
+    # Base runtime. graphiti-core requires Python >=3.10; AL2023 default is 3.9.
+    # Do NOT install 'curl' — it conflicts with curl-minimal on AL2023.
     dnf update -y
-    dnf install -y python3 python3-pip curl awscli tar
+    dnf install -y python3.11 python3.11-pip awscli tar
 
     # Directories for the deployed app
     mkdir -p /opt/mcp_server/current
@@ -228,11 +270,13 @@ resource "aws_instance" "this" {
     id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
     chown -R mcp:mcp /opt/mcp_server
 
-    # Systemd unit to run the FastAPI server.
-    # Note: we do NOT enable/start it here because code isn't present yet.
-    cat > /etc/systemd/system/mcp-server.service <<'UNIT'
+    # Systemd unit — written with python and printf to avoid heredoc indentation
+    # issues caused by the outer <<-EOF stripping leading tabs but not spaces.
+    python3 -c "
+import textwrap, pathlib
+unit = textwrap.dedent('''
     [Unit]
-    Description=Context Graph MCP Server (FastAPI)
+    Description=Context Graph MCP Server
     After=network-online.target
     Wants=network-online.target
 
@@ -243,54 +287,66 @@ resource "aws_instance" "this" {
     WorkingDirectory=/opt/mcp_server/current
     Environment=PORT=${var.ingress_port}
     Environment=AWS_REGION=${data.aws_region.current.name}
+    Environment=AWS_DEFAULT_REGION=${data.aws_region.current.name}
     Environment=RETRIEVE_LAMBDA_NAME=${var.name}-retrieve
-    ExecStart=/opt/mcp_server/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${var.ingress_port}
+    Environment=NEPTUNE_HOST=neptune-db://${var.neptune_endpoint}
+    Environment=CONFIG_PATH=/opt/mcp_server/current/config/config-neptune-bedrock.yaml
+    Environment=AURORA_ENDPOINT=${var.aurora_endpoint}
+    Environment=AURORA_DB_NAME=${var.aurora_db_name}
+    Environment=AURORA_USERNAME=${var.aurora_username}
+    Environment=AURORA_PASSWORD_SECRET_ARN=${var.aurora_password_secret_arn}
+    Environment=AOSS_HOST=${var.aoss_host}
+    Environment=CONTEXT_GRAPH_LLM_PROVIDER=bedrock
+    ExecStart=/opt/mcp_server/venv/bin/python /opt/mcp_server/current/main.py
     Restart=on-failure
     RestartSec=2
 
     [Install]
     WantedBy=multi-user.target
-    UNIT
-
-    # Deployment script invoked by the GitHub Actions workflow (via SSM).
-    # The instance has an IAM role that can read s3://.../mcp-server/* from the artifacts bucket.
-    cat > /usr/local/bin/deploy-mcp-server.sh <<'SCRIPT'
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    usage() {
-      echo "Usage: deploy-mcp-server.sh <artifacts-bucket> <sha>" >&2
-      exit 2
-    }
-
-    bucket="$${1:-}"
-    sha="$${2:-}"
-    [[ -n "$${bucket}" && -n "$${sha}" ]] || usage
-
-    key="mcp-server/$${sha}.tar.gz"
-    release_dir="/opt/mcp_server/releases/$${sha}"
-
-    mkdir -p /opt/mcp_server/releases
-    rm -rf "$${release_dir}"
-    mkdir -p "$${release_dir}"
-
-    aws s3 cp "s3://$${bucket}/$${key}" /tmp/mcp_server.tar.gz
-    tar -xzf /tmp/mcp_server.tar.gz -C "$${release_dir}"
-
-    rm -rf /opt/mcp_server/current
-    ln -sfn "$${release_dir}" /opt/mcp_server/current
-
-    id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
-    chown -R mcp:mcp /opt/mcp_server
-
-    python3 -m venv /opt/mcp_server/venv
-    /opt/mcp_server/venv/bin/pip install --upgrade pip
-    /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt
+''').lstrip()
+pathlib.Path('/etc/systemd/system/mcp-server.service').write_text(unit)
+"
 
     systemctl daemon-reload
-    systemctl enable --now mcp-server.service
-    systemctl restart mcp-server.service
-    SCRIPT
+
+    # deploy-mcp-server.sh is downloaded from S3 by the GitHub Actions workflow before invocation.
+    # Write a placeholder that prints a clear error if called before the real script is deployed.
+    cat > /usr/local/bin/deploy-mcp-server.sh <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+usage() { echo "Usage: deploy-mcp-server.sh <artifacts-bucket> <sha>" >&2; exit 2; }
+bucket="$${1:-}"; sha="$${2:-}"
+[[ -n "$${bucket}" && -n "$${sha}" ]] || usage
+key="mcp-server/$${sha}.tar.gz"
+release_dir="/opt/mcp_server/releases/$${sha}"
+mkdir -p /opt/mcp_server/releases
+rm -rf "$${release_dir}"; mkdir -p "$${release_dir}"
+aws s3 cp "s3://$${bucket}/$${key}" /tmp/mcp_server.tar.gz
+tar -xzf /tmp/mcp_server.tar.gz -C "$${release_dir}"
+rm -rf /opt/mcp_server/current
+ln -sfn "$${release_dir}" /opt/mcp_server/current
+id -u mcp >/dev/null 2>&1 || useradd -r -s /sbin/nologin mcp
+chown -R mcp:mcp /opt/mcp_server
+PYTHON_BIN="python3"; for py in python3.12 python3.11; do command -v $py &>/dev/null && PYTHON_BIN=$py && break; done
+echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
+$PYTHON_BIN -m venv /opt/mcp_server/venv
+/opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
+GRAPHITI_SRC="/opt/mcp_server/current/graphiti_core_src"
+if [ -d "$${GRAPHITI_SRC}" ]; then
+  echo "==> Installing vendored graphiti-core[neptune]..."
+  /opt/mcp_server/venv/bin/pip install -e "$${GRAPHITI_SRC}[neptune]" --quiet
+  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
+    echo "$${GRAPHITI_SRC}" > "$${SP}/_graphiti_core_src.pth" 2>/dev/null || true
+  done
+fi
+/opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
+/opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
+systemctl daemon-reload
+systemctl enable --now mcp-server.service
+systemctl restart mcp-server.service
+echo "==> Deployment complete"
+systemctl status mcp-server.service --no-pager -l | tail -n 20
+SCRIPT
     chmod 0755 /usr/local/bin/deploy-mcp-server.sh
 
     systemctl daemon-reload
@@ -299,3 +355,13 @@ resource "aws_instance" "this" {
   tags = merge(var.tags, { Name = "${var.name}-mcp" })
 }
 
+resource "aws_eip" "mcp" {
+  domain = "vpc"
+
+  tags = merge(var.tags, { Name = "${var.name}-mcp-eip" })
+}
+
+resource "aws_eip_association" "mcp" {
+  instance_id   = aws_instance.this.id
+  allocation_id = aws_eip.mcp.id
+}

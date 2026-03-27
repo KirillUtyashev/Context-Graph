@@ -1,0 +1,3856 @@
+[
+{
+  "message": "Nodes retrieved successfully",
+  "nodes": [
+    {
+      "uuid": "c7c00715-16dc-4e09-8f02-efb19e724642",
+      "name": "JWT authentication middleware",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.649906+00:00",
+      "summary": "Agent implemented JWT authentication middleware.\nJWT authentication middleware is implemented in src/auth/jwt_middleware.py.\nJWT authentication middleware validates Bearer tokens.\nJWT authentication middleware extracts user_id from the token payload.\nJWT authentication middleware injects user_id into the request context.\nJWT authentication middleware includes token expiration handling with a 24-hour TTL.\nThe JWT authentication middleware changes are contained in PR #42.\nJWT authentication middleware includes token expiration handling.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "ba457ea8-33bb-49ba-bf1c-a3cd40be793c",
+      "name": "user_id",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.649967+00:00",
+      "summary": "JWT authentication middleware extracts user_id from the token payload.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "91c39f92-5665-4be0-946a-07ac91f31729",
+      "name": "Bearer tokens",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.649954+00:00",
+      "summary": "JWT authentication middleware validates Bearer tokens.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "project:order-management",
+      "name": "order-management",
+      "labels": [
+        "Entity",
+        "CodeNode",
+        "Project"
+      ],
+      "created_at": "2026-03-26T07:29:20.252616+00:00",
+      "summary": "Project order-management qualified order-management file {}",
+      "group_id": "order-management",
+      "attributes": {
+        "updated_at": "2026-03-26T17:24:54.946316+00:00",
+        "active": true,
+        "repo_id": "order-management",
+        "latest_revision_id": "6490a76ff9fdf108f1cd241ef4459ad6a51b3f14",
+        "root_path": "/tmp/order-management-service-extended",
+        "file_path": "{}",
+        "properties_json": "{\"root_path\":\"/tmp/context-graph-worktree-11qywcf_/checkout\"}",
+        "end_line": 0,
+        "qualified_name": "order-management",
+        "kind": "Project",
+        "node_id": "project:order-management",
+        "last_seen_revision": "6490a76ff9fdf108f1cd241ef4459ad6a51b3f14",
+        "start_line": 0
+      }
+    },
+    {
+      "uuid": "3519dd0a-461a-4fe2-8c3d-3201963a908b",
+      "name": "src/auth/jwt_middleware.py",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.649938+00:00",
+      "summary": "JWT authentication middleware is implemented in src/auth/jwt_middleware.py.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "ff2236a3-ee10-48de-b976-91f6e58fb365",
+      "name": "request context",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.649981+00:00",
+      "summary": "JWT authentication middleware injects user_id into the request context.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "4b11056b-c980-4b5b-8621-7001b1dc9694",
+      "name": "token expiration handling",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.650028+00:00",
+      "summary": "JWT authentication middleware includes token expiration handling with a 24-hour TTL.\nJWT authentication middleware includes token expiration handling.\nToken expiration handling uses a 24-hour TTL.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "a2266236-674c-48b8-ac4a-d33c4bcb68d9",
+      "name": "PR #42",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-23T03:21:20.650041+00:00",
+      "summary": "Agent submitted the changes in PR #42.\nThe JWT authentication middleware changes are contained in PR #42.",
+      "group_id": "main",
+      "attributes": {}
+    },
+    {
+      "uuid": "entity:order-management:689fcebfd7adf64af62d814f10594c70ba4f4384",
+      "name": "Business Service Layer",
+      "labels": [
+        "Entity"
+      ],
+      "created_at": "2026-03-26T07:35:06.429373+00:00",
+      "summary": "Entity Business Service Layer aliases Business Service Layer",
+      "group_id": "order-management",
+      "attributes": {
+        "updated_at": "2026-03-26T07:35:06.429373+00:00",
+        "aliases_json": "[\"Business\",\"Service\",\"Layer\"]",
+        "repo_id": "order-management",
+        "kind": "Entity",
+        "node_id": "entity:order-management:689fcebfd7adf64af62d814f10594c70ba4f4384",
+        "metadata_json": "{\"aliases\":[\"Business\",\"Service\",\"Layer\"],\"origin\":\"episode_llm\"}"
+      }
+    },
+    {
+      "uuid": "file:order-management:order-management..github.PULL_REQUEST_TEMPLATE.__file__",
+      "name": "PULL_REQUEST_TEMPLATE.md",
+      "labels": [
+        "Entity",
+        "CodeNode",
+        "File"
+      ],
+      "created_at": "2026-03-26T07:29:20.252616+00:00",
+      "summary": "File PULL_REQUEST_TEMPLATE.md qualified order-management..github.PULL_REQUEST_TEMPLATE.__file__ file .github/PULL_REQUEST_TEMPLATE.md",
+      "group_id": "order-management",
+      "attributes": {
+        "updated_at": "2026-03-26T07:29:20.252616+00:00",
+        "active": true,
+        "repo_id": "order-management",
+        "file_path": ".github/PULL_REQUEST_TEMPLATE.md",
+        "properties_json": "{\"extension\":\".md\"}",
+        "end_line": 0,
+        "qualified_name": "order-management..github.PULL_REQUEST_TEMPLATE.__file__",
+        "kind": "File",
+        "node_id": "file:order-management:order-management..github.PULL_REQUEST_TEMPLATE.__file__",
+        "last_seen_revision": "b84ac35c2b714d0d07899c25c2fff718f4b4a664",
+        "start_line": 0
+      }
+    }
+  ]
+},
+{
+  "message": "Facts retrieved successfully",
+  "facts": [
+    {
+      "uuid": "386431ce-2733-4f18-b767-c83b6febf67e",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:3f589eb1a7444938d0e9cda72b7233f15423eb63",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:40:22.101341Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "JWT Bearer Token Parsing is documented in auth.md, which describes the required Authorization header format using the Bearer scheme.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "386431ce-2733-4f18-b767-c83b6febf67e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f802b636-5617-40c0-a52f-b6c59d1de09f",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253",
+      "target_node_uuid": "entity:order-management:176939638191d5a13935ccb90c0c8a70a5e30773",
+      "created_at": "2026-03-26T07:36:26.967783Z",
+      "name": "RELATES_TO",
+      "fact": "The commit 'feat(auth): add JWT verification middleware' relates to authentication.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:19:24Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:36:27.159735+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]}",
+        "fact_id": "f802b636-5617-40c0-a52f-b6c59d1de09f"
+      },
+      "relationship_keywords": null
+    }
+  ]
+},
+{
+  "message": "Found 6 facts for: 'JWT claims user_id token payload order service' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "38fc5d45-67e0-43e8-9e39-b93030118eee",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:46618d0e8d63fc71e5666b747fbd2a9219f141b4",
+      "target_node_uuid": "entity:order-management:2b8df247f9d9ce6d22403a72f4b51af9e16841b4",
+      "created_at": "2026-03-26T17:40:22.101399Z",
+      "name": "MAPS_TO",
+      "fact": "The 'sub' claim from the JWT token payload maps to req.user.id, representing the authenticated user's ID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "38fc5d45-67e0-43e8-9e39-b93030118eee"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:46dc01e91f46ac635c887e41a84d9db2c84f376c",
+      "target_node_uuid": "entity:order-management:47c7230f35378db3b56d01be482cff321727678a",
+      "created_at": "2026-03-26T17:40:22.101420Z",
+      "name": "MAPS_TO",
+      "fact": "The 'role' claim from the JWT token payload maps to req.user.role, representing the user's role (e.g., admin, customer).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "3bf40ac3-a01e-4456-938c-b4d37e331a4a",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:3f589eb1a7444938d0e9cda72b7233f15423eb63",
+      "target_node_uuid": "module:order-management:order-management.src.models.Order",
+      "created_at": "2026-03-26T07:36:26.967904Z",
+      "name": "PROTECTS",
+      "fact": "JWT bearer token parsing is used to protect order endpoints defined in the Order module.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:19:24Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:36:27.159735+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]}",
+        "fact_id": "3bf40ac3-a01e-4456-938c-b4d37e331a4a"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "8e05fdb7-f30f-4d8e-9b9a-da08435e8a6b",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253",
+      "target_node_uuid": "entity:order-management:3f589eb1a7444938d0e9cda72b7233f15423eb63",
+      "created_at": "2026-03-26T07:36:26.967873Z",
+      "name": "ADDS",
+      "fact": "The commit adds standard JWT bearer token parsing to protect order endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:19:24Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:36:27.159735+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]}",
+        "fact_id": "8e05fdb7-f30f-4d8e-9b9a-da08435e8a6b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "939a5300-7795-4c0e-bb18-ed35ef42bdc9",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "entity:order-management:2b8df247f9d9ce6d22403a72f4b51af9e16841b4",
+      "created_at": "2026-03-26T17:40:22.101436Z",
+      "name": "POPULATES",
+      "fact": "The JWT verification middleware populates req.user.id from the decoded token payload's 'sub' claim.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "939a5300-7795-4c0e-bb18-ed35ef42bdc9"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "88fa715f-100e-4d8a-bd1d-8d0425764a02",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "created_at": "2026-03-26T17:29:01.863611Z",
+      "name": "TRIGGERS",
+      "fact": "When an order is created, the Order service needs to reserve inventory in the Inventory service.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-24T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:29:02.037437+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]}",
+        "fact_id": "88fa715f-100e-4d8a-bd1d-8d0425764a02"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Facts retrieved successfully",
+  "facts": [
+    {
+      "uuid": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:48:35.676407Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a customerId field representing the ID of the customer placing the order.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a73fcb29-70de-4fe3-81e4-090cf3d22cbd",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:7316c8b2e74870d9d7e9d30bbc28ecf4cdf945ee",
+      "created_at": "2026-03-26T17:48:35.676421Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has an items field that must contain at least one item.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "a73fcb29-70de-4fe3-81e4-090cf3d22cbd"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "21f64647-7960-491c-9b9c-7a6432e70efb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:76fca07aaae38c259cde7bbda7cf0d0997ee6dd8",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676509Z",
+      "name": "RETURNS",
+      "fact": "A successful POST /api/orders returns a 201 Created response containing the created Order document.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "21f64647-7960-491c-9b9c-7a6432e70efb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "04c49b85-7264-40ce-9ebd-26c9a1525d4c",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.IdempotencyKey.IdempotencyKey",
+      "target_node_uuid": "entity:order-management:b39f008e318efd2bb988d724a161b61c6909677f",
+      "created_at": "2026-03-26T17:32:11.881028Z",
+      "name": "PROTECTS",
+      "fact": "The IdempotencyKey mechanism protects the Customer from being charged twice due to duplicate order creation from retries.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "04c49b85-7264-40ce-9ebd-26c9a1525d4c"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "92523c91-7fb4-4dd5-8cca-ff20a802c634",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:96b50fe3786e6d85240bf6066c54ad62fa00aac8",
+      "target_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "created_at": "2026-03-26T17:32:11.880886Z",
+      "name": "APPLIES_TO",
+      "fact": "The ADR applies to order creation via the public API, which requires an Idempotency-Key header on POST /orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "92523c91-7fb4-4dd5-8cca-ff20a802c634"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ecf55736-618c-4f4f-a504-8d1c3008adb2",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:b39f008e318efd2bb988d724a161b61c6909677f",
+      "created_at": "2026-03-26T17:37:11.999298Z",
+      "name": "SUPPORTS_DISPUTE_RESOLUTION_FOR",
+      "fact": "Audit logs are critical for customer dispute resolution.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:35:43.368653Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "ecf55736-618c-4f4f-a504-8d1c3008adb2"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "53142635-c467-4508-949a-afb6744ae068",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "created_at": "2026-03-26T17:51:55.254320Z",
+      "name": "REFERENCES",
+      "fact": "The webhook handler references the order ID from PaymentIntent metadata, which originates from the POST /api/orders response defined in src/routes/orders.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "53142635-c467-4508-949a-afb6744ae068"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "24631a35-0fcb-4c90-b04c-3f3dc75d242d",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:7316c8b2e74870d9d7e9d30bbc28ecf4cdf945ee",
+      "target_node_uuid": "entity:order-management:7410f74d7685e9326e9950b2cefaa33cb6dc43b7",
+      "created_at": "2026-03-26T17:48:35.676471Z",
+      "name": "CONTAINS_FIELD",
+      "fact": "Each item in the items array contains a productId field.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "24631a35-0fcb-4c90-b04c-3f3dc75d242d"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba3744ba-8b3b-4e64-bb37-b90d31370eda",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:1d2bcc3fd4a657cf2ad6c59fd77def5e8c6a2603",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676522Z",
+      "name": "RETURNED_WHEN_MISSING",
+      "fact": "GET /api/orders/:id returns a 404 Not Found with a null body when the order is not found.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "ba3744ba-8b3b-4e64-bb37-b90d31370eda"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9564b7f4-a111-45d0-bc3b-3881916e3881",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254347Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the Raw Body Requirement for the Stripe webhook endpoint.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "9564b7f4-a111-45d0-bc3b-3881916e3881"
+      },
+      "relationship_keywords": null
+    }
+  ]
+},
+{
+  "message": "Found 9 facts for: '403 forbidden insufficient permissions response body' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "ba57b080-7906-469b-92ce-39cbdc95b9a1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:42:08.344753Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The 403 Forbidden response, related to JWT token validation, references auth.md for further details.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:40:31.922404Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:42:08.564868+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-error-handling\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-error-handling\"]}",
+        "fact_id": "ba57b080-7906-469b-92ce-39cbdc95b9a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "28d2c6a4-e105-4d46-914c-191584602b9e",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.error-handling.__file__",
+      "created_at": "2026-03-26T17:40:22.101506Z",
+      "name": "REFERENCES",
+      "fact": "auth.md references error-handling.md for the full error response shape returned by 401 and 403 status codes.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "28d2c6a4-e105-4d46-914c-191584602b9e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9564b7f4-a111-45d0-bc3b-3881916e3881",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254347Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the Raw Body Requirement for the Stripe webhook endpoint.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "9564b7f4-a111-45d0-bc3b-3881916e3881"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2e32ce76-3f61-46be-bd9e-0f83d6c79d4b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.router",
+      "created_at": "2026-03-26T07:46:23.290444Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the router variable to define the raw body parser endpoint.",
+      "episodes": [],
+      "expired_at": "2026-02-26T20:25:55-05:00",
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": "2026-02-26T20:25:55Z",
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "2e32ce76-3f61-46be-bd9e-0f83d6c79d4b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "21f64647-7960-491c-9b9c-7a6432e70efb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:76fca07aaae38c259cde7bbda7cf0d0997ee6dd8",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676509Z",
+      "name": "RETURNS",
+      "fact": "A successful POST /api/orders returns a 201 Created response containing the created Order document.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "21f64647-7960-491c-9b9c-7a6432e70efb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "923700b8-38c3-4535-bb04-2e643e6248fb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:aceac06b64c8df08194ce6b6ea8a09d43ae75410",
+      "created_at": "2026-03-26T17:37:11.999326Z",
+      "name": "CONSIDERED_ALTERNATIVE_TO",
+      "fact": "Kafka topic replay was considered as an alternative for audit logging but was deemed insufficient for audit guarantees.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:35:43.368653Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "923700b8-38c3-4535-bb04-2e643e6248fb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f21c445a-eeea-45e8-8365-32768f0dade3",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254165Z",
+      "name": "REQUIRES",
+      "fact": "The Stripe webhook endpoint in src/routes/webhooks.ts must receive the raw, unparsed request body for signature verification to succeed.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "f21c445a-eeea-45e8-8365-32768f0dade3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "88eae89b-18f8-4f0b-8e54-b2424d8952f5",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:888114f828e80d493b1295c23eb676505290bad4",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:38:51.584398Z",
+      "name": "INSUFFICIENT_FOR",
+      "fact": "Correlation IDs in Winston provide no visibility once a message enters RabbitMQ, making them insufficient for tracing across the message queue.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "88eae89b-18f8-4f0b-8e54-b2424d8952f5"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "952d16ce-de08-47ab-93b1-a0528824554f",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290387Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces the webhook route module at src/routes/webhooks.ts, which adds the raw body parser endpoint for Stripe webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "952d16ce-de08-47ab-93b1-a0528824554f"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'Stripe webhook 400 signature verify' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "666de956-e84e-480a-8e16-8d63af334ebc",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:30f68c92f1c6d8ee79a55918f21c416cee39eb06",
+      "created_at": "2026-03-26T17:51:55.254246Z",
+      "name": "USES",
+      "fact": "The Stripe webhook endpoint uses an HMAC signature (provided via the stripe-signature header) for payload verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "666de956-e84e-480a-8e16-8d63af334ebc"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254225Z",
+      "name": "VERIFIES_AGAINST",
+      "fact": "The Stripe webhook endpoint verifies the stripe-signature header against the STRIPE_WEBHOOK_SECRET environment variable.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "50715ffc-c4ad-40ea-995d-9b3ad9d405da",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "created_at": "2026-03-26T07:46:23.290430Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the stripe variable to verify webhook signatures.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "50715ffc-c4ad-40ea-995d-9b3ad9d405da"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "952d16ce-de08-47ab-93b1-a0528824554f",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290387Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces the webhook route module at src/routes/webhooks.ts, which adds the raw body parser endpoint for Stripe webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "952d16ce-de08-47ab-93b1-a0528824554f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f21c445a-eeea-45e8-8365-32768f0dade3",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254165Z",
+      "name": "REQUIRES",
+      "fact": "The Stripe webhook endpoint in src/routes/webhooks.ts must receive the raw, unparsed request body for signature verification to succeed.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "f21c445a-eeea-45e8-8365-32768f0dade3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "6f310f55-1c86-4604-8f79-10e79c2d9796",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:38:51.584468Z",
+      "name": "FLOWS_INTO",
+      "fact": "The Stripe Webhook feeds into RabbitMQ as part of the traced pipeline (Stripe Webhook -> RabbitMQ -> Inventory Service).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "6f310f55-1c86-4604-8f79-10e79c2d9796"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "4db8cca8-70c3-4d87-8ca0-63a4c5f5c742",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:30f68c92f1c6d8ee79a55918f21c416cee39eb06",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254409Z",
+      "name": "VERIFIED_USING",
+      "fact": "The HMAC signature in the stripe-signature header is verified against the STRIPE_WEBHOOK_SECRET environment variable.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "4db8cca8-70c3-4d87-8ca0-63a4c5f5c742"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "e97d48da-c0d7-406a-9f38-1dc816d3ab6f",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254359Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the use of STRIPE_WEBHOOK_SECRET for webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "e97d48da-c0d7-406a-9f38-1dc816d3ab6f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2667abc2-a018-40b2-a481-47c2658da5f3",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "target_node_uuid": "entity:order-management:4bbefbe05267f9e891db891e12e64a5fb519c8f9",
+      "created_at": "2026-03-26T08:02:50.244618Z",
+      "name": "CAUSES",
+      "fact": "Stripe webhook storms cause immediate subsequent collisions that result in VersionError.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T22:01:02Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:02:50.306436+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:087b5396b21ea1ebbc298c40782f1350d7524686\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:087b5396b21ea1ebbc298c40782f1350d7524686\"]}",
+        "fact_id": "2667abc2-a018-40b2-a481-47c2658da5f3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "5d91813e-db10-4764-b8a1-a088964fc3a1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "created_at": "2026-03-26T08:04:09.348098Z",
+      "name": "HANDLES_RACES_FOR",
+      "fact": "Jittered retry logic was added to handle Stripe webhook race conditions.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T22:01:02Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:04:09.349563+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a5f4f92bab9a4749dd9dbbbd6f12460141d0ad28\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a5f4f92bab9a4749dd9dbbbd6f12460141d0ad28\"]}",
+        "fact_id": "5d91813e-db10-4764-b8a1-a088964fc3a1"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'Stripe webhook endpoint path URL' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254225Z",
+      "name": "VERIFIES_AGAINST",
+      "fact": "The Stripe webhook endpoint verifies the stripe-signature header against the STRIPE_WEBHOOK_SECRET environment variable.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9564b7f4-a111-45d0-bc3b-3881916e3881",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254347Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the Raw Body Requirement for the Stripe webhook endpoint.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "9564b7f4-a111-45d0-bc3b-3881916e3881"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "090a25d6-12dc-426b-8402-fad9f46df2fb",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:a3994ca8aec6d5fa348a0f3c6e8b1d98cd0ffc74",
+      "created_at": "2026-03-26T17:51:55.254262Z",
+      "name": "HANDLES",
+      "fact": "The Stripe webhook endpoint handles the payment_intent.succeeded event by updating the order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "090a25d6-12dc-426b-8402-fad9f46df2fb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "666de956-e84e-480a-8e16-8d63af334ebc",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:30f68c92f1c6d8ee79a55918f21c416cee39eb06",
+      "created_at": "2026-03-26T17:51:55.254246Z",
+      "name": "USES",
+      "fact": "The Stripe webhook endpoint uses an HMAC signature (provided via the stripe-signature header) for payload verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "666de956-e84e-480a-8e16-8d63af334ebc"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "952d16ce-de08-47ab-93b1-a0528824554f",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290387Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces the webhook route module at src/routes/webhooks.ts, which adds the raw body parser endpoint for Stripe webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "952d16ce-de08-47ab-93b1-a0528824554f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "3a5e4923-857c-4edb-a20c-33c0760d8481",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:a5d6cad0d1330d46eb8f4ca078951d616ef98f0f",
+      "created_at": "2026-03-26T17:51:55.254277Z",
+      "name": "HANDLES",
+      "fact": "The Stripe webhook endpoint handles the payment_intent.payment_failed event by logging a warning with no order state change.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "3a5e4923-857c-4edb-a20c-33c0760d8481"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "6f310f55-1c86-4604-8f79-10e79c2d9796",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:38:51.584468Z",
+      "name": "FLOWS_INTO",
+      "fact": "The Stripe Webhook feeds into RabbitMQ as part of the traced pipeline (Stripe Webhook -> RabbitMQ -> Inventory Service).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "6f310f55-1c86-4604-8f79-10e79c2d9796"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "e43cecf8-a598-400c-8171-4cde5e162aff",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.app",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290484Z",
+      "name": "REGISTERS",
+      "fact": "The main app module registers the webhooks route module as an endpoint for receiving Stripe webhook events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "e43cecf8-a598-400c-8171-4cde5e162aff"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f21c445a-eeea-45e8-8365-32768f0dade3",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254165Z",
+      "name": "REQUIRES",
+      "fact": "The Stripe webhook endpoint in src/routes/webhooks.ts must receive the raw, unparsed request body for signature verification to succeed.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "f21c445a-eeea-45e8-8365-32768f0dade3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2667abc2-a018-40b2-a481-47c2658da5f3",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "target_node_uuid": "entity:order-management:4bbefbe05267f9e891db891e12e64a5fb519c8f9",
+      "created_at": "2026-03-26T08:02:50.244618Z",
+      "name": "CAUSES",
+      "fact": "Stripe webhook storms cause immediate subsequent collisions that result in VersionError.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T22:01:02Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:02:50.306436+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:087b5396b21ea1ebbc298c40782f1350d7524686\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:087b5396b21ea1ebbc298c40782f1350d7524686\"]}",
+        "fact_id": "2667abc2-a018-40b2-a481-47c2658da5f3"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'order item quantity field POST create order' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "a73fcb29-70de-4fe3-81e4-090cf3d22cbd",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:7316c8b2e74870d9d7e9d30bbc28ecf4cdf945ee",
+      "created_at": "2026-03-26T17:48:35.676421Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has an items field that must contain at least one item.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "a73fcb29-70de-4fe3-81e4-090cf3d22cbd"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "c9e55d8c-dc14-4c1c-b2e8-77bc9a986c9e",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:7316c8b2e74870d9d7e9d30bbc28ecf4cdf945ee",
+      "target_node_uuid": "entity:order-management:6a4060f4d918aedaae3c50700276eefc61720dad",
+      "created_at": "2026-03-26T17:48:35.676484Z",
+      "name": "CONTAINS_FIELD",
+      "fact": "Each item in the items array contains a quantity field with a minimum value of 1.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "c9e55d8c-dc14-4c1c-b2e8-77bc9a986c9e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "24631a35-0fcb-4c90-b04c-3f3dc75d242d",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:7316c8b2e74870d9d7e9d30bbc28ecf4cdf945ee",
+      "target_node_uuid": "entity:order-management:7410f74d7685e9326e9950b2cefaa33cb6dc43b7",
+      "created_at": "2026-03-26T17:48:35.676471Z",
+      "name": "CONTAINS_FIELD",
+      "fact": "Each item in the items array contains a productId field.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "24631a35-0fcb-4c90-b04c-3f3dc75d242d"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:48:35.676407Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a customerId field representing the ID of the customer placing the order.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "1e209d4d-aa31-4bf5-b074-41ce48fbe2eb",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:4ecca778e1e0817cdc60d2b4e04b4689b14831ba",
+      "created_at": "2026-03-26T17:48:35.676447Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a createdAt field automatically added by Mongoose timestamps.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "1e209d4d-aa31-4bf5-b074-41ce48fbe2eb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ccf2869b-1a0c-4c63-8107-d449b233061a",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:dc8c1ffe8639dd23c1b92ef9e412a4627b058b96",
+      "created_at": "2026-03-26T17:48:35.676459Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has an updatedAt field automatically added by Mongoose timestamps.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "ccf2869b-1a0c-4c63-8107-d449b233061a"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "21f64647-7960-491c-9b9c-7a6432e70efb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:76fca07aaae38c259cde7bbda7cf0d0997ee6dd8",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676509Z",
+      "name": "RETURNS",
+      "fact": "A successful POST /api/orders returns a 201 Created response containing the created Order document.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "21f64647-7960-491c-9b9c-7a6432e70efb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "7111eba3-a70d-42ef-b127-a8ebd76af6b5",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:733c0e9729bda6d16a8c4c421c550e0c2ba5699e",
+      "target_node_uuid": "entity:order-management:6a4060f4d918aedaae3c50700276eefc61720dad",
+      "created_at": "2026-03-26T17:48:35.676321Z",
+      "name": "CALCULATED_FROM",
+      "fact": "totalAmount is calculated server-side by summing price * quantity for each item, rounded to 2 decimal places.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "7111eba3-a70d-42ef-b127-a8ebd76af6b5"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "0e2751f1-5ef5-4e1c-86fe-855f479d0efb",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:733c0e9729bda6d16a8c4c421c550e0c2ba5699e",
+      "created_at": "2026-03-26T17:48:35.676434Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a totalAmount field that is calculated server-side.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "0e2751f1-5ef5-4e1c-86fe-855f479d0efb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "92523c91-7fb4-4dd5-8cca-ff20a802c634",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:96b50fe3786e6d85240bf6066c54ad62fa00aac8",
+      "target_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "created_at": "2026-03-26T17:32:11.880886Z",
+      "name": "APPLIES_TO",
+      "fact": "The ADR applies to order creation via the public API, which requires an Idempotency-Key header on POST /orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "92523c91-7fb4-4dd5-8cca-ff20a802c634"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Facts retrieved successfully",
+  "facts": [
+    {
+      "uuid": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:46dc01e91f46ac635c887e41a84d9db2c84f376c",
+      "target_node_uuid": "entity:order-management:47c7230f35378db3b56d01be482cff321727678a",
+      "created_at": "2026-03-26T17:40:22.101420Z",
+      "name": "MAPS_TO",
+      "fact": "The 'role' claim from the JWT token payload maps to req.user.role, representing the user's role (e.g., admin, customer).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "26474925-cd3c-4b00-8944-c882cf4c11f3",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "target_node_uuid": "entity:order-management:46dc01e91f46ac635c887e41a84d9db2c84f376c",
+      "created_at": "2026-03-26T17:50:16.863944Z",
+      "name": "REQUIRES_FOR_ACCESS",
+      "fact": "Filtering by customerId requires the authenticated user to have admin role, meaning it is tied to the role claim in the token.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "26474925-cd3c-4b00-8944-c882cf4c11f3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "36dd5879-7a3e-4945-82d6-599bc5be5b91",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "target_node_uuid": "entity:order-management:46618d0e8d63fc71e5666b747fbd2a9219f141b4",
+      "created_at": "2026-03-26T17:50:16.863962Z",
+      "name": "MUST_MATCH",
+      "fact": "Filtering by customerId is permitted if the customerId matches the token's sub claim, in addition to the admin role requirement.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "36dd5879-7a3e-4945-82d6-599bc5be5b91"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "97d6d8a7-db61-41dd-8f02-ff1823e8c4f3",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.src.routes.webhookAdmin.__file__",
+      "target_node_uuid": "entity:order-management:c169365ee027c5d747eb2835d7a8c238d5e057af",
+      "created_at": "2026-03-26T17:16:20.720826Z",
+      "name": "PROVIDES",
+      "fact": "webhookAdmin.ts provides REST endpoints for ops/admin.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "97d6d8a7-db61-41dd-8f02-ff1823e8c4f3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ecf55736-618c-4f4f-a504-8d1c3008adb2",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:b39f008e318efd2bb988d724a161b61c6909677f",
+      "created_at": "2026-03-26T17:37:11.999298Z",
+      "name": "SUPPORTS_DISPUTE_RESOLUTION_FOR",
+      "fact": "Audit logs are critical for customer dispute resolution.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:35:43.368653Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "ecf55736-618c-4f4f-a504-8d1c3008adb2"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "fb01aa99-360e-4a96-b03c-05de41b03cc7",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:c1508c443dc4f4fcdd4e5388ab1e510e5080874f",
+      "created_at": "2026-03-26T17:37:11.999400Z",
+      "name": "PLANNED_INSPECTION_VIA",
+      "fact": "A future idea includes an Admin UI for audit log inspection.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": null,
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "fb01aa99-360e-4a96-b03c-05de41b03cc7"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "c1cbca1a-abbf-42b8-9a5a-2f00be2e86ca",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a",
+      "target_node_uuid": "file:order-management:order-management.src.routes.webhookAdmin.__file__",
+      "created_at": "2026-03-26T17:16:20.720713Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces webhookAdmin.ts, which provides REST endpoints for ops/admin.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "c1cbca1a-abbf-42b8-9a5a-2f00be2e86ca"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba57b080-7906-469b-92ce-39cbdc95b9a1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:42:08.344753Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The 403 Forbidden response, related to JWT token validation, references auth.md for further details.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:40:31.922404Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:42:08.564868+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-error-handling\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-error-handling\"]}",
+        "fact_id": "ba57b080-7906-469b-92ce-39cbdc95b9a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:48:35.676407Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a customerId field representing the ID of the customer placing the order.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20"
+      },
+      "relationship_keywords": null
+    }
+  ]
+},
+{
+  "message": "Found 9 facts for: 'error response body code message 403' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "28d2c6a4-e105-4d46-914c-191584602b9e",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.error-handling.__file__",
+      "created_at": "2026-03-26T17:40:22.101506Z",
+      "name": "REFERENCES",
+      "fact": "auth.md references error-handling.md for the full error response shape returned by 401 and 403 status codes.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "28d2c6a4-e105-4d46-914c-191584602b9e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba57b080-7906-469b-92ce-39cbdc95b9a1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:42:08.344753Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The 403 Forbidden response, related to JWT token validation, references auth.md for further details.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:40:31.922404Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:42:08.564868+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-error-handling\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-error-handling\"]}",
+        "fact_id": "ba57b080-7906-469b-92ce-39cbdc95b9a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "25684942-ec74-43c3-84ed-3612d24d6709",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a",
+      "target_node_uuid": "entity:order-management:ee686315114441f7a550079b6a10ec9f6d89255a",
+      "created_at": "2026-03-26T17:16:20.721399Z",
+      "name": "CLOSES",
+      "fact": "The commit closes Issue #8 (referenced as #104 in the commit message).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "25684942-ec74-43c3-84ed-3612d24d6709"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "63d5d773-c5b6-4949-9ce1-e7e79e20dbeb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.backoff.__file__",
+      "created_at": "2026-03-26T17:54:42.972698Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The webhook retry strategy is explained in code comments in backoff.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:53:33.126830Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:54:42.974097+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-webhooks-retry-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-webhooks-retry-strategy\"]}",
+        "fact_id": "63d5d773-c5b6-4949-9ce1-e7e79e20dbeb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9564b7f4-a111-45d0-bc3b-3881916e3881",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254347Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the Raw Body Requirement for the Stripe webhook endpoint.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "9564b7f4-a111-45d0-bc3b-3881916e3881"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "649cb558-2172-4e54-8bb7-82e7c7633b1e",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:bd1c8261e04eb4114cb9c928d814855265f139a1",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:38:51.584421Z",
+      "name": "ENABLES_TRACING_ACROSS",
+      "fact": "OTel's context propagation (extraction) allows mapping the exact timing across the RabbitMQ message pipeline.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "649cb558-2172-4e54-8bb7-82e7c7633b1e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2e883cf7-d8be-4ddc-bea7-5f16944f6405",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "target_node_uuid": "module:order-management:order-management.src.webhooks.backoff",
+      "created_at": "2026-03-26T17:54:42.972720Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The webhook retry strategy is explained in code comments in backoff.ts (src/webhooks/backoff.ts).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:53:33.126830Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:54:42.974097+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-webhooks-retry-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-webhooks-retry-strategy\"]}",
+        "fact_id": "2e883cf7-d8be-4ddc-bea7-5f16944f6405"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "415eaa8a-7b42-409e-acce-812a18ee4161",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:93b79a9ea60e7e742d74c34d2c51d80c1db1ef74",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:38:51.584445Z",
+      "name": "ENABLES_TRACING_ACROSS",
+      "fact": "OTel's context propagation (injection) allows mapping the exact timing across the RabbitMQ message pipeline.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "415eaa8a-7b42-409e-acce-812a18ee4161"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2e32ce76-3f61-46be-bd9e-0f83d6c79d4b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.router",
+      "created_at": "2026-03-26T07:46:23.290444Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the router variable to define the raw body parser endpoint.",
+      "episodes": [],
+      "expired_at": "2026-02-26T20:25:55-05:00",
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": "2026-02-26T20:25:55Z",
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "2e32ce76-3f61-46be-bd9e-0f83d6c79d4b"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: '/api/webhooks stripe path route' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "e43cecf8-a598-400c-8171-4cde5e162aff",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.app",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290484Z",
+      "name": "REGISTERS",
+      "fact": "The main app module registers the webhooks route module as an endpoint for receiving Stripe webhook events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "e43cecf8-a598-400c-8171-4cde5e162aff"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "50715ffc-c4ad-40ea-995d-9b3ad9d405da",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "created_at": "2026-03-26T07:46:23.290430Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the stripe variable to verify webhook signatures.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "50715ffc-c4ad-40ea-995d-9b3ad9d405da"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f0a6cbc2-51f1-46e3-9fef-95ee9ae1c3a1",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:0e20a1dfd923c372a9614ce4bd112ca5dc739275",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:47:54.460863Z",
+      "name": "MODIFIES",
+      "fact": "The merge commit from the feature/stripe-webhooks branch adds or modifies the webhooks route module.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:47:54.462216+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:0e20a1dfd923c372a9614ce4bd112ca5dc739275\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:0e20a1dfd923c372a9614ce4bd112ca5dc739275\"]}",
+        "fact_id": "f0a6cbc2-51f1-46e3-9fef-95ee9ae1c3a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "6d5c1d65-419a-4e02-9988-9eff4096ac2b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:48:35.676209Z",
+      "name": "REQUIRES_AUTHENTICATION_DESCRIBED_IN",
+      "fact": "The Orders API base path /api/orders requires authentication, as described in auth.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "6d5c1d65-419a-4e02-9988-9eff4096ac2b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a12f7c3e-8bfa-455e-97b2-d27820fd989b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.dispatcher",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.dispatcher.__file__",
+      "created_at": "2026-03-26T17:16:20.721175Z",
+      "name": "IS_PATH_OF",
+      "fact": "dispatcher.ts is located at the module path src/webhooks/dispatcher.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "a12f7c3e-8bfa-455e-97b2-d27820fd989b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9730f86a-4dff-4a74-a58f-778ffa67ed6e",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.index",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.__file__",
+      "created_at": "2026-03-26T17:16:20.721411Z",
+      "name": "IS_PATH_OF",
+      "fact": "index.ts is located at the module path src/webhooks/index.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "9730f86a-4dff-4a74-a58f-778ffa67ed6e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bc0ba538-ffa8-4088-8469-ff2cf4764d55",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.backoff",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.backoff.__file__",
+      "created_at": "2026-03-26T17:16:20.721162Z",
+      "name": "IS_PATH_OF",
+      "fact": "backoff.ts is located at the module path src/webhooks/backoff.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "bc0ba538-ffa8-4088-8469-ff2cf4764d55"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "1c95d967-a8b2-4a85-9c4f-ec6592a11ce6",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:8cecb11058dc1e35613ce9f921ff135f2af5d15b",
+      "target_node_uuid": "file:order-management:order-management.src.routes.webhooks.__file__",
+      "created_at": "2026-03-26T08:24:37.479030Z",
+      "name": "MODIFIES_FILE",
+      "fact": "The commit annotates the webhooks route in webhooks.ts with OpenAPI/swagger JSDoc.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:09:58Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:24:37.481922+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]}",
+        "fact_id": "1c95d967-a8b2-4a85-9c4f-ec6592a11ce6"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9a81f157-fdc4-47b5-8e89-b0bc8a23263a",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.webhookService",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.webhookService.__file__",
+      "created_at": "2026-03-26T17:16:20.721188Z",
+      "name": "IS_PATH_OF",
+      "fact": "webhookService.ts is located at the module path src/webhooks/webhookService.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "9a81f157-fdc4-47b5-8e89-b0bc8a23263a"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "284edb17-e612-4a84-afdf-04d1ef1cd468",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676534Z",
+      "name": "MANAGES",
+      "fact": "The orders route manages creation and retrieval of Order documents via the /api/orders endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "284edb17-e612-4a84-afdf-04d1ef1cd468"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'order status PENDING PAID frontend display' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "bc49f67c-3820-45df-b91a-44df03b0ceba",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:9ecc8459ea5f39f9da55cb4d71a70b5d1e0f0b80",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:46:53.481792Z",
+      "name": "DISPLAYS_STATUS_FOR",
+      "fact": "The frontend should handle all four order status values: PENDING, PAID, SHIPPED, and CANCELLED.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "bc49f67c-3820-45df-b91a-44df03b0ceba"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bdf8dbb4-bb7b-4cc0-9588-09a9175ac048",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:3b7715259eaada8630aec1e8b9e0639a7ef7caee",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:46:53.481851Z",
+      "name": "TRIGGERS_STATUS_TRANSITION",
+      "fact": "The PENDING to PAID status transition is triggered automatically when Stripe fires a payment_intent.succeeded webhook.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "bdf8dbb4-bb7b-4cc0-9588-09a9175ac048"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a124452f-b4f1-40d7-bdf9-06020096297b",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "module:order-management:order-management.src.models.Order",
+      "created_at": "2026-03-26T07:46:23.290509Z",
+      "name": "MODIFIES",
+      "fact": "The commit modifies the Order model to support transitioning order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "a124452f-b4f1-40d7-bdf9-06020096297b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "090a25d6-12dc-426b-8402-fad9f46df2fb",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:a3994ca8aec6d5fa348a0f3c6e8b1d98cd0ffc74",
+      "created_at": "2026-03-26T17:51:55.254262Z",
+      "name": "HANDLES",
+      "fact": "The Stripe webhook endpoint handles the payment_intent.succeeded event by updating the order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "090a25d6-12dc-426b-8402-fad9f46df2fb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "22de0e9a-b02b-4981-b893-272297dd84e8",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "entity:order-management:3b7715259eaada8630aec1e8b9e0639a7ef7caee",
+      "created_at": "2026-03-26T07:46:23.290371Z",
+      "name": "HANDLES",
+      "fact": "The commit adds handling for the 'payment_intent.succeeded' event to transition order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "22de0e9a-b02b-4981-b893-272297dd84e8"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "e0c39be0-dba8-4a20-b68a-2900e8d59707",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:a3994ca8aec6d5fa348a0f3c6e8b1d98cd0ffc74",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:51:55.254291Z",
+      "name": "UPDATES",
+      "fact": "The payment_intent.succeeded event causes the Order status to be updated to PAID using the orderId from paymentIntent.metadata.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "e0c39be0-dba8-4a20-b68a-2900e8d59707"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "72b174e6-7e24-4714-ac84-f9f900c6d8dc",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "module:order-management:order-management.src.models.Order",
+      "created_at": "2026-03-26T07:46:23.290458Z",
+      "name": "DEPENDS_ON",
+      "fact": "The webhooks route module depends on the Order model to transition order status to PAID upon receiving a payment_intent.succeeded event.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "72b174e6-7e24-4714-ac84-f9f900c6d8dc"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "977ef74e-352d-47ed-939f-a534620c91e3",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:9ecc8459ea5f39f9da55cb4d71a70b5d1e0f0b80",
+      "target_node_uuid": "folder:order-management:order-management.tests.unit.webhooks",
+      "created_at": "2026-03-26T17:46:53.481971Z",
+      "name": "RECOMMENDED_TO_USE",
+      "fact": "The frontend is recommended to poll or use webhooks to keep the order status up to date, rather than assuming the response status is final.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "977ef74e-352d-47ed-939f-a534620c91e3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "7c9d0286-3663-41a8-8386-af98eb8f5d54",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:3b7715259eaada8630aec1e8b9e0639a7ef7caee",
+      "created_at": "2026-03-26T07:46:23.290471Z",
+      "name": "HANDLES",
+      "fact": "The webhooks route module handles the 'payment_intent.succeeded' event and transitions the order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "7c9d0286-3663-41a8-8386-af98eb8f5d54"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a8c103b0-60b7-4d88-b218-216ab3bbd797",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:3b7715259eaada8630aec1e8b9e0639a7ef7caee",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.webhooks.__file__",
+      "created_at": "2026-03-26T17:46:53.481943Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The payment_intent.succeeded webhook that triggers the PENDING to PAID transition is documented in webhooks.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "a8c103b0-60b7-4d88-b218-216ab3bbd797"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'inventory reserved after order create guarantee' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "88fa715f-100e-4d8a-bd1d-8d0425764a02",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "created_at": "2026-03-26T17:29:01.863611Z",
+      "name": "TRIGGERS",
+      "fact": "When an order is created, the Order service needs to reserve inventory in the Inventory service.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-24T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:29:02.037437+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]}",
+        "fact_id": "88fa715f-100e-4d8a-bd1d-8d0425764a02"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "b434798b-0f38-4993-93bb-3e22139ddee7",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:b5b18b791e05ee369d0aaff9c176a83a2e959b7c",
+      "target_node_uuid": "entity:order-management:1d3bbc05407527f1cd3087ece4a6dcd947884646",
+      "created_at": "2026-03-26T17:29:01.863638Z",
+      "name": "REQUIRES",
+      "fact": "The asynchronous messaging approach may require compensation transactions if inventory reservation fails after order creation.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-24T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:29:02.037437+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-002-async-messaging\"]}",
+        "fact_id": "b434798b-0f38-4993-93bb-3e22139ddee7"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "1d90ebdf-f0f7-4488-bdd7-22b81e3bfbd7",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "created_at": "2026-03-26T17:46:53.481929Z",
+      "name": "TRIGGERS_RESERVATION_IN",
+      "fact": "Inventory reservation happens in downstream services after the order creation API returns, driven by the asynchronous order.created event.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "1d90ebdf-f0f7-4488-bdd7-22b81e3bfbd7"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "746f062a-d785-43fa-918a-d04cab6a7044",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:b5b18b791e05ee369d0aaff9c176a83a2e959b7c",
+      "target_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "created_at": "2026-03-26T07:43:25.520621Z",
+      "name": "DECOUPLES_FROM",
+      "fact": "Asynchronous messaging is used to decouple order creation from inventory.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:43:25.839862+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:0f60168b1163410e10764e840b98938d9fbf5a7d\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:0f60168b1163410e10764e840b98938d9fbf5a7d\"]}",
+        "fact_id": "746f062a-d785-43fa-918a-d04cab6a7044"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "8f9510e9-b3f8-40d4-aeed-f567a3da1e21",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "target_node_uuid": "entity:order-management:af323a2616eae73813153eb1c0f2325c4fadccf9",
+      "created_at": "2026-03-26T17:45:13.333446Z",
+      "name": "OPERATES_ON",
+      "fact": "Inventory reservation is not guaranteed at the time the order creation API returns 201; inventory operates on eventual consistency.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:43:49.065749Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:45:13.478226+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-events\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-events\"]}",
+        "fact_id": "8f9510e9-b3f8-40d4-aeed-f567a3da1e21"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ddd5013e-32f0-469f-9dd9-1f47102634f5",
+      "group_id": "order-management",
+      "source_node_uuid": "method:order-management:order-management.src.events.publisher.EventPublisher.publish",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T17:45:13.333336Z",
+      "name": "PUBLISHES_TO",
+      "fact": "The order service publishes domain events to RabbitMQ after key operations.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:43:49.065749Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:45:13.478226+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-events\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-events\"]}",
+        "fact_id": "ddd5013e-32f0-469f-9dd9-1f47102634f5"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f22e3b8f-6313-40e7-9dbb-61208efb9950",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:af323a2616eae73813153eb1c0f2325c4fadccf9",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:46:53.481915Z",
+      "name": "APPLIES_TO",
+      "fact": "Eventual consistency applies after order creation: the order may briefly appear as PENDING even if the user has already completed payment.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:45:29.443873Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:46:53.572276+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-order-statuses\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-order-statuses\"]}",
+        "fact_id": "f22e3b8f-6313-40e7-9dbb-61208efb9950"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "474c682c-b5e5-4478-abe7-ee6ca004a2f5",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:0f60168b1163410e10764e840b98938d9fbf5a7d",
+      "target_node_uuid": "entity:order-management:b5b18b791e05ee369d0aaff9c176a83a2e959b7c",
+      "created_at": "2026-03-26T07:43:25.520555Z",
+      "name": "IMPLEMENTS",
+      "fact": "The commit implements asynchronous messaging to decouple order creation from inventory and billing.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:43:25.839862+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:0f60168b1163410e10764e840b98938d9fbf5a7d\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:0f60168b1163410e10764e840b98938d9fbf5a7d\"]}",
+        "fact_id": "474c682c-b5e5-4478-abe7-ee6ca004a2f5"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "219f696e-e013-499b-ba42-0cc9d966c903",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "target_node_uuid": "entity:order-management:ec99b813fa064f7f7cfa1d35bc7cc3d743c61fd1",
+      "created_at": "2026-03-26T17:38:51.584492Z",
+      "name": "FLOWS_INTO",
+      "fact": "RabbitMQ feeds into the Inventory Service as part of the traced pipeline (Stripe Webhook -> RabbitMQ -> Inventory Service).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:37:27.082542Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:38:51.869827+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-guides-tracing-implementation-notes\"]}",
+        "fact_id": "219f696e-e013-499b-ba42-0cc9d966c903"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "b23687d4-ca6c-43f0-82dc-cd4f31196c8e",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:6d613a1ee01eec4c0f8ca66df0db71dca0c6e1cf",
+      "created_at": "2026-03-26T17:42:08.344971Z",
+      "name": "STORED_IN",
+      "fact": "Orders are saved in the MongoDB database; a PENDING order may remain if the RabbitMQ publish step fails after saving.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:40:31.922404Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:42:08.564868+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-error-handling\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-error-handling\"]}",
+        "fact_id": "b23687d4-ca6c-43f0-82dc-cd4f31196c8e"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'GET orders customer pagination page limit query' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "2e1404c0-f07d-40da-aa90-0ed8d5815d2f",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.pagination.__file__",
+      "created_at": "2026-03-26T17:48:35.676394Z",
+      "name": "REFERENCES",
+      "fact": "The Orders API references pagination.md for query parameters supported on list endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "2e1404c0-f07d-40da-aa90-0ed8d5815d2f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bcbc7ac5-17e1-407a-92de-6460ce077bbb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:5de4ab001e02794ffbb534fca437e141e5b47d30",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:50:16.863923Z",
+      "name": "INCLUDES_PARAMETER",
+      "fact": "The list endpoint query parameters include 'customerId' as a filter to a specific customer's orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "bcbc7ac5-17e1-407a-92de-6460ce077bbb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba3744ba-8b3b-4e64-bb37-b90d31370eda",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:1d2bcc3fd4a657cf2ad6c59fd77def5e8c6a2603",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676522Z",
+      "name": "RETURNED_WHEN_MISSING",
+      "fact": "GET /api/orders/:id returns a 404 Not Found with a null body when the order is not found.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "ba3744ba-8b3b-4e64-bb37-b90d31370eda"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ecf55736-618c-4f4f-a504-8d1c3008adb2",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:b39f008e318efd2bb988d724a161b61c6909677f",
+      "created_at": "2026-03-26T17:37:11.999298Z",
+      "name": "SUPPORTS_DISPUTE_RESOLUTION_FOR",
+      "fact": "Audit logs are critical for customer dispute resolution.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:35:43.368653Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "ecf55736-618c-4f4f-a504-8d1c3008adb2"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "284edb17-e612-4a84-afdf-04d1ef1cd468",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676534Z",
+      "name": "MANAGES",
+      "fact": "The orders route manages creation and retrieval of Order documents via the /api/orders endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "284edb17-e612-4a84-afdf-04d1ef1cd468"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:48:35.676407Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a customerId field representing the ID of the customer placing the order.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "7ea3052c-7e2c-4495-90b7-ffdd955a4fe3",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:861589c04238e9d31055050794fa8def4453b9cf",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:50:16.863995Z",
+      "name": "USED_IN_CONTEXT_OF",
+      "fact": "Cursors are base64-encoded MongoDB ObjectIDs and are used in the pagination system alongside customerId filtering.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "7ea3052c-7e2c-4495-90b7-ffdd955a4fe3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "04c49b85-7264-40ce-9ebd-26c9a1525d4c",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.IdempotencyKey.IdempotencyKey",
+      "target_node_uuid": "entity:order-management:b39f008e318efd2bb988d724a161b61c6909677f",
+      "created_at": "2026-03-26T17:32:11.881028Z",
+      "name": "PROTECTS",
+      "fact": "The IdempotencyKey mechanism protects the Customer from being charged twice due to duplicate order creation from retries.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "04c49b85-7264-40ce-9ebd-26c9a1525d4c"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "6d5c1d65-419a-4e02-9988-9eff4096ac2b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:48:35.676209Z",
+      "name": "REQUIRES_AUTHENTICATION_DESCRIBED_IN",
+      "fact": "The Orders API base path /api/orders requires authentication, as described in auth.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "6d5c1d65-419a-4e02-9988-9eff4096ac2b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "07c7e914-59ed-408e-b119-9dbe4b8856ff",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:365956c6b1fb5145a94503d1150d3122bb6e6cbb",
+      "target_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "created_at": "2026-03-26T08:17:36.980683Z",
+      "name": "INTRODUCES",
+      "fact": "The commit merges a feature for audit logging for orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T22:40:19Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:17:36.981942+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:365956c6b1fb5145a94503d1150d3122bb6e6cbb\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:365956c6b1fb5145a94503d1150d3122bb6e6cbb\"]}",
+        "fact_id": "07c7e914-59ed-408e-b119-9dbe4b8856ff"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'POST /api/webhooks stripe endpoint path' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "6d5c1d65-419a-4e02-9988-9eff4096ac2b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:48:35.676209Z",
+      "name": "REQUIRES_AUTHENTICATION_DESCRIBED_IN",
+      "fact": "The Orders API base path /api/orders requires authentication, as described in auth.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "6d5c1d65-419a-4e02-9988-9eff4096ac2b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "e43cecf8-a598-400c-8171-4cde5e162aff",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.app",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290484Z",
+      "name": "REGISTERS",
+      "fact": "The main app module registers the webhooks route module as an endpoint for receiving Stripe webhook events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "e43cecf8-a598-400c-8171-4cde5e162aff"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "7d6ac7d5-32fe-4ffa-b712-d45cff2b5ce4",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.controllers.webhookController",
+      "target_node_uuid": "function:order-management:order-management.src.controllers.webhookController.handleStripeWebhook",
+      "created_at": "2026-03-26T08:24:37.478956Z",
+      "name": "CONTAINS_FUNCTION",
+      "fact": "webhookController.ts contains the handleStripeWebhook function, annotated for OpenAPI docs.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:09:58Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:24:37.481922+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]}",
+        "fact_id": "7d6ac7d5-32fe-4ffa-b712-d45cff2b5ce4"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a12f7c3e-8bfa-455e-97b2-d27820fd989b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.dispatcher",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.dispatcher.__file__",
+      "created_at": "2026-03-26T17:16:20.721175Z",
+      "name": "IS_PATH_OF",
+      "fact": "dispatcher.ts is located at the module path src/webhooks/dispatcher.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "a12f7c3e-8bfa-455e-97b2-d27820fd989b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254225Z",
+      "name": "VERIFIES_AGAINST",
+      "fact": "The Stripe webhook endpoint verifies the stripe-signature header against the STRIPE_WEBHOOK_SECRET environment variable.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9730f86a-4dff-4a74-a58f-778ffa67ed6e",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.index",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.__file__",
+      "created_at": "2026-03-26T17:16:20.721411Z",
+      "name": "IS_PATH_OF",
+      "fact": "index.ts is located at the module path src/webhooks/index.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "9730f86a-4dff-4a74-a58f-778ffa67ed6e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "8abd124c-7ec4-414c-8168-56d560e2f126",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "target_node_uuid": "variable:order-management:order-management.src.models.IdempotencyKey.IdempotencyKey",
+      "created_at": "2026-03-26T17:32:11.881001Z",
+      "name": "REQUIRES",
+      "fact": "The Public API requires an Idempotency-Key header on POST /orders, enforced via the IdempotencyKey collection.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "8abd124c-7ec4-414c-8168-56d560e2f126"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "92523c91-7fb4-4dd5-8cca-ff20a802c634",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:96b50fe3786e6d85240bf6066c54ad62fa00aac8",
+      "target_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "created_at": "2026-03-26T17:32:11.880886Z",
+      "name": "APPLIES_TO",
+      "fact": "The ADR applies to order creation via the public API, which requires an Idempotency-Key header on POST /orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "92523c91-7fb4-4dd5-8cca-ff20a802c634"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bc0ba538-ffa8-4088-8469-ff2cf4764d55",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.backoff",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.backoff.__file__",
+      "created_at": "2026-03-26T17:16:20.721162Z",
+      "name": "IS_PATH_OF",
+      "fact": "backoff.ts is located at the module path src/webhooks/backoff.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "bc0ba538-ffa8-4088-8469-ff2cf4764d55"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "50715ffc-c4ad-40ea-995d-9b3ad9d405da",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "created_at": "2026-03-26T07:46:23.290430Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the stripe variable to verify webhook signatures.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "50715ffc-c4ad-40ea-995d-9b3ad9d405da"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: '400 Bad Request webhook signature verification failed' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "f21c445a-eeea-45e8-8365-32768f0dade3",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:1fd11f779ec437c716e1cc18cb3c730b773b2826",
+      "created_at": "2026-03-26T17:51:55.254165Z",
+      "name": "REQUIRES",
+      "fact": "The Stripe webhook endpoint in src/routes/webhooks.ts must receive the raw, unparsed request body for signature verification to succeed.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "f21c445a-eeea-45e8-8365-32768f0dade3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "e97d48da-c0d7-406a-9f38-1dc816d3ab6f",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.Eval Files.webhooks.__file__",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254359Z",
+      "name": "DOCUMENTS",
+      "fact": "The webhooks.md file documents the use of STRIPE_WEBHOOK_SECRET for webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "e97d48da-c0d7-406a-9f38-1dc816d3ab6f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "666de956-e84e-480a-8e16-8d63af334ebc",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:30f68c92f1c6d8ee79a55918f21c416cee39eb06",
+      "created_at": "2026-03-26T17:51:55.254246Z",
+      "name": "USES",
+      "fact": "The Stripe webhook endpoint uses an HMAC signature (provided via the stripe-signature header) for payload verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "666de956-e84e-480a-8e16-8d63af334ebc"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "952d16ce-de08-47ab-93b1-a0528824554f",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:787f1e287a3f17935857822b00915cd83427fa87",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290387Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces the webhook route module at src/routes/webhooks.ts, which adds the raw body parser endpoint for Stripe webhook signature verification.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "952d16ce-de08-47ab-93b1-a0528824554f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "37967ca6-e13d-4b19-9892-d03dd358c4f2",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce",
+      "target_node_uuid": "entity:order-management:c2e1fdca0cf0def3dbdd1d41367ecaab95402be8",
+      "created_at": "2026-03-26T08:00:07.139949Z",
+      "name": "IMPLEMENTS",
+      "fact": "Pull request #105 implements a Dead Letter Queue (involving a Dead Letter Exchange) for failed order events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T21:55:46Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:00:07.205346+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce\"]}",
+        "fact_id": "37967ca6-e13d-4b19-9892-d03dd358c4f2"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "c752bcc2-9656-4387-8ca7-c8873ed20d30",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:a5f4f92bab9a4749dd9dbbbd6f12460141d0ad28",
+      "target_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "created_at": "2026-03-26T08:04:09.348083Z",
+      "name": "ADDS",
+      "fact": "The pull request added jittered retry logic to handle Stripe webhook races.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T22:01:02Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:04:09.349563+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a5f4f92bab9a4749dd9dbbbd6f12460141d0ad28\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a5f4f92bab9a4749dd9dbbbd6f12460141d0ad28\"]}",
+        "fact_id": "c752bcc2-9656-4387-8ca7-c8873ed20d30"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:0a53fd67365ac7b8c0729d0219e0bb06b8e53bb8",
+      "created_at": "2026-03-26T17:51:55.254225Z",
+      "name": "VERIFIES_AGAINST",
+      "fact": "The Stripe webhook endpoint verifies the stripe-signature header against the STRIPE_WEBHOOK_SECRET environment variable.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "3b9f8210-fcac-41f5-84d6-e2e7a0edb125"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "398e67d1-ae1a-4976-b476-e2da334e050a",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253",
+      "target_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "created_at": "2026-03-26T07:36:26.967851Z",
+      "name": "IMPLEMENTS",
+      "fact": "The commit 'feat(auth): add JWT verification middleware' implements JWT verification middleware.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:19:24Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:36:27.159735+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ef296d0ecb8a9ba4a78ae497f0b7ce5e66035253\"]}",
+        "fact_id": "398e67d1-ae1a-4976-b476-e2da334e050a"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "2d2fd3aa-4246-4e85-a33d-ad40fbe5ee40",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce",
+      "target_node_uuid": "entity:order-management:d37a9628bc10a8816f3b679566d2505ab43b55a0",
+      "created_at": "2026-03-26T08:00:07.139927Z",
+      "name": "IMPLEMENTS_FEATURE_FOR",
+      "fact": "Pull request #105 implements a Dead Letter Queue feature for RabbitMQ to handle failed order events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T21:55:46Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:00:07.205346+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:1fb5a89f9ff05bbc50dfec0b4ec7f415f0532dce\"]}",
+        "fact_id": "2d2fd3aa-4246-4e85-a33d-ad40fbe5ee40"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "fa342ff1-d585-4fd9-9855-fdace2d801bb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:8266168f9bcb4dae1411eaf8ade24b714bd1dab9",
+      "target_node_uuid": "entity:order-management:6119744b916770ed742afb0aa52d439034956d56",
+      "created_at": "2026-03-26T17:19:24.191506Z",
+      "name": "REVEALED_BROKEN",
+      "fact": "A staging smoke test revealed that webhook retries were never happening in any environment because startWebhookWorker() was never called, causing all failed webhooks to remain in failed status forever.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:04Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:19:24.266950+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]}",
+        "fact_id": "fa342ff1-d585-4fd9-9855-fdace2d801bb"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: '403 insufficient permission customerId sub claim' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "36dd5879-7a3e-4945-82d6-599bc5be5b91",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "target_node_uuid": "entity:order-management:46618d0e8d63fc71e5666b747fbd2a9219f141b4",
+      "created_at": "2026-03-26T17:50:16.863962Z",
+      "name": "MUST_MATCH",
+      "fact": "Filtering by customerId is permitted if the customerId matches the token's sub claim, in addition to the admin role requirement.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "36dd5879-7a3e-4945-82d6-599bc5be5b91"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "939a5300-7795-4c0e-bb18-ed35ef42bdc9",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "entity:order-management:2b8df247f9d9ce6d22403a72f4b51af9e16841b4",
+      "created_at": "2026-03-26T17:40:22.101436Z",
+      "name": "POPULATES",
+      "fact": "The JWT verification middleware populates req.user.id from the decoded token payload's 'sub' claim.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "939a5300-7795-4c0e-bb18-ed35ef42bdc9"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "0525765f-6321-4554-99ea-6a8666d329fe",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.docs.integration.pagination.__file__",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:50:16.863978Z",
+      "name": "REFERENCES",
+      "fact": "pagination.md references auth.md for token claim details regarding the customerId filtering authorization rules.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "0525765f-6321-4554-99ea-6a8666d329fe"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "38fc5d45-67e0-43e8-9e39-b93030118eee",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:46618d0e8d63fc71e5666b747fbd2a9219f141b4",
+      "target_node_uuid": "entity:order-management:2b8df247f9d9ce6d22403a72f4b51af9e16841b4",
+      "created_at": "2026-03-26T17:40:22.101399Z",
+      "name": "MAPS_TO",
+      "fact": "The 'sub' claim from the JWT token payload maps to req.user.id, representing the authenticated user's ID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "38fc5d45-67e0-43e8-9e39-b93030118eee"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "26474925-cd3c-4b00-8944-c882cf4c11f3",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "target_node_uuid": "entity:order-management:46dc01e91f46ac635c887e41a84d9db2c84f376c",
+      "created_at": "2026-03-26T17:50:16.863944Z",
+      "name": "REQUIRES_FOR_ACCESS",
+      "fact": "Filtering by customerId requires the authenticated user to have admin role, meaning it is tied to the role claim in the token.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "26474925-cd3c-4b00-8944-c882cf4c11f3"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba57b080-7906-469b-92ce-39cbdc95b9a1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:549ca2c2ad5202f8b09298bca20be8afcba4b339",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:42:08.344753Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The 403 Forbidden response, related to JWT token validation, references auth.md for further details.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:40:31.922404Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:42:08.564868+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-error-handling\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-error-handling\"]}",
+        "fact_id": "ba57b080-7906-469b-92ce-39cbdc95b9a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:48:35.676407Z",
+      "name": "HAS_FIELD",
+      "fact": "An Order has a customerId field representing the ID of the customer placing the order.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "96d98ed8-5bc7-47a1-b11f-1f0cf36e1b20"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "28d2c6a4-e105-4d46-914c-191584602b9e",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.error-handling.__file__",
+      "created_at": "2026-03-26T17:40:22.101506Z",
+      "name": "REFERENCES",
+      "fact": "auth.md references error-handling.md for the full error response shape returned by 401 and 403 status codes.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "28d2c6a4-e105-4d46-914c-191584602b9e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:46dc01e91f46ac635c887e41a84d9db2c84f376c",
+      "target_node_uuid": "entity:order-management:47c7230f35378db3b56d01be482cff321727678a",
+      "created_at": "2026-03-26T17:40:22.101420Z",
+      "name": "MAPS_TO",
+      "fact": "The 'role' claim from the JWT token payload maps to req.user.role, representing the user's role (e.g., admin, customer).",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "fdf0cc3f-3b7a-45f8-9fd0-d0a982a967e4"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "923700b8-38c3-4535-bb04-2e643e6248fb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:d0048686468c78a5fc47c48935d46473b51a044b",
+      "target_node_uuid": "entity:order-management:aceac06b64c8df08194ce6b6ea8a09d43ae75410",
+      "created_at": "2026-03-26T17:37:11.999326Z",
+      "name": "CONSIDERED_ALTERNATIVE_TO",
+      "fact": "Kafka topic replay was considered as an alternative for audit logging but was deemed insufficient for audit guarantees.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:35:43.368653Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:37:12.344644+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-features-audit-logging\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-features-audit-logging\"]}",
+        "fact_id": "923700b8-38c3-4535-bb04-2e643e6248fb"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'GET /api/orders list cursor limit query parameter' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "2e1404c0-f07d-40da-aa90-0ed8d5815d2f",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.pagination.__file__",
+      "created_at": "2026-03-26T17:48:35.676394Z",
+      "name": "REFERENCES",
+      "fact": "The Orders API references pagination.md for query parameters supported on list endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "2e1404c0-f07d-40da-aa90-0ed8d5815d2f"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "92c7dfc3-0909-4a6f-8f4e-e1f11735010e",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.order-statuses.__file__",
+      "created_at": "2026-03-26T17:48:35.676380Z",
+      "name": "REFERENCES",
+      "fact": "The Orders API references order-statuses.md for the full list of order statuses and valid transitions.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "92c7dfc3-0909-4a6f-8f4e-e1f11735010e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "6d5c1d65-419a-4e02-9988-9eff4096ac2b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "created_at": "2026-03-26T17:48:35.676209Z",
+      "name": "REQUIRES_AUTHENTICATION_DESCRIBED_IN",
+      "fact": "The Orders API base path /api/orders requires authentication, as described in auth.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "6d5c1d65-419a-4e02-9988-9eff4096ac2b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bcbc7ac5-17e1-407a-92de-6460ce077bbb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:5de4ab001e02794ffbb534fca437e141e5b47d30",
+      "target_node_uuid": "entity:order-management:64ff5e6eabe126880ab6f67cb8416a09f7a6f135",
+      "created_at": "2026-03-26T17:50:16.863923Z",
+      "name": "INCLUDES_PARAMETER",
+      "fact": "The list endpoint query parameters include 'customerId' as a filter to a specific customer's orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:48:54.322609Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:50:17.004923+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-pagination\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-pagination\"]}",
+        "fact_id": "bcbc7ac5-17e1-407a-92de-6460ce077bbb"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "284edb17-e612-4a84-afdf-04d1ef1cd468",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676534Z",
+      "name": "MANAGES",
+      "fact": "The orders route manages creation and retrieval of Order documents via the /api/orders endpoints.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "284edb17-e612-4a84-afdf-04d1ef1cd468"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "ba3744ba-8b3b-4e64-bb37-b90d31370eda",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:1d2bcc3fd4a657cf2ad6c59fd77def5e8c6a2603",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676522Z",
+      "name": "RETURNED_WHEN_MISSING",
+      "fact": "GET /api/orders/:id returns a 404 Not Found with a null body when the order is not found.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "ba3744ba-8b3b-4e64-bb37-b90d31370eda"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "8abd124c-7ec4-414c-8168-56d560e2f126",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "target_node_uuid": "variable:order-management:order-management.src.models.IdempotencyKey.IdempotencyKey",
+      "created_at": "2026-03-26T17:32:11.881001Z",
+      "name": "REQUIRES",
+      "fact": "The Public API requires an Idempotency-Key header on POST /orders, enforced via the IdempotencyKey collection.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "8abd124c-7ec4-414c-8168-56d560e2f126"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "92523c91-7fb4-4dd5-8cca-ff20a802c634",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:96b50fe3786e6d85240bf6066c54ad62fa00aac8",
+      "target_node_uuid": "entity:order-management:8f409f3a0632265ebb17da87f50fbe33a8e5b6b0",
+      "created_at": "2026-03-26T17:32:11.880886Z",
+      "name": "APPLIES_TO",
+      "fact": "The ADR applies to order creation via the public API, which requires an Idempotency-Key header on POST /orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "92523c91-7fb4-4dd5-8cca-ff20a802c634"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "53142635-c467-4508-949a-afb6744ae068",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "module:order-management:order-management.src.routes.orders",
+      "created_at": "2026-03-26T17:51:55.254320Z",
+      "name": "REFERENCES",
+      "fact": "The webhook handler references the order ID from PaymentIntent metadata, which originates from the POST /api/orders response defined in src/routes/orders.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:50:24.649674Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:51:55.559346+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-webhooks\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-webhooks\"]}",
+        "fact_id": "53142635-c467-4508-949a-afb6744ae068"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "21f64647-7960-491c-9b9c-7a6432e70efb",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:76fca07aaae38c259cde7bbda7cf0d0997ee6dd8",
+      "target_node_uuid": "variable:order-management:order-management.src.models.Order.Order",
+      "created_at": "2026-03-26T17:48:35.676509Z",
+      "name": "RETURNS",
+      "fact": "A successful POST /api/orders returns a 201 Created response containing the created Order document.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "21f64647-7960-491c-9b9c-7a6432e70efb"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 10 facts for: 'webhooks/stripe route mount path express' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "e43cecf8-a598-400c-8171-4cde5e162aff",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.app",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:46:23.290484Z",
+      "name": "REGISTERS",
+      "fact": "The main app module registers the webhooks route module as an endpoint for receiving Stripe webhook events.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "e43cecf8-a598-400c-8171-4cde5e162aff"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "50715ffc-c4ad-40ea-995d-9b3ad9d405da",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "variable:order-management:order-management.src.routes.webhooks.stripe",
+      "created_at": "2026-03-26T07:46:23.290430Z",
+      "name": "USES",
+      "fact": "The webhooks route module uses the stripe variable to verify webhook signatures.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "50715ffc-c4ad-40ea-995d-9b3ad9d405da"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "f0a6cbc2-51f1-46e3-9fef-95ee9ae1c3a1",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:0e20a1dfd923c372a9614ce4bd112ca5dc739275",
+      "target_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "created_at": "2026-03-26T07:47:54.460863Z",
+      "name": "MODIFIES",
+      "fact": "The merge commit from the feature/stripe-webhooks branch adds or modifies the webhooks route module.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:47:54.462216+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:0e20a1dfd923c372a9614ce4bd112ca5dc739275\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:0e20a1dfd923c372a9614ce4bd112ca5dc739275\"]}",
+        "fact_id": "f0a6cbc2-51f1-46e3-9fef-95ee9ae1c3a1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a12f7c3e-8bfa-455e-97b2-d27820fd989b",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.dispatcher",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.dispatcher.__file__",
+      "created_at": "2026-03-26T17:16:20.721175Z",
+      "name": "IS_PATH_OF",
+      "fact": "dispatcher.ts is located at the module path src/webhooks/dispatcher.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "a12f7c3e-8bfa-455e-97b2-d27820fd989b"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9730f86a-4dff-4a74-a58f-778ffa67ed6e",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.index",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.__file__",
+      "created_at": "2026-03-26T17:16:20.721411Z",
+      "name": "IS_PATH_OF",
+      "fact": "index.ts is located at the module path src/webhooks/index.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "9730f86a-4dff-4a74-a58f-778ffa67ed6e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "bc0ba538-ffa8-4088-8469-ff2cf4764d55",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.backoff",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.backoff.__file__",
+      "created_at": "2026-03-26T17:16:20.721162Z",
+      "name": "IS_PATH_OF",
+      "fact": "backoff.ts is located at the module path src/webhooks/backoff.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "bc0ba538-ffa8-4088-8469-ff2cf4764d55"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "1c95d967-a8b2-4a85-9c4f-ec6592a11ce6",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:8cecb11058dc1e35613ce9f921ff135f2af5d15b",
+      "target_node_uuid": "file:order-management:order-management.src.routes.webhooks.__file__",
+      "created_at": "2026-03-26T08:24:37.479030Z",
+      "name": "MODIFIES_FILE",
+      "fact": "The commit annotates the webhooks route in webhooks.ts with OpenAPI/swagger JSDoc.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:09:58Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T08:24:37.481922+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:8cecb11058dc1e35613ce9f921ff135f2af5d15b\"]}",
+        "fact_id": "1c95d967-a8b2-4a85-9c4f-ec6592a11ce6"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "9a81f157-fdc4-47b5-8e89-b0bc8a23263a",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.webhooks.webhookService",
+      "target_node_uuid": "file:order-management:order-management.src.webhooks.webhookService.__file__",
+      "created_at": "2026-03-26T17:16:20.721188Z",
+      "name": "IS_PATH_OF",
+      "fact": "webhookService.ts is located at the module path src/webhooks/webhookService.ts.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:03Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:16:21.251771+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:a84ef2dd3a2b2447d95e17be3244dbdf747d1c1a\"]}",
+        "fact_id": "9a81f157-fdc4-47b5-8e89-b0bc8a23263a"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "7c9d0286-3663-41a8-8386-af98eb8f5d54",
+      "group_id": "order-management",
+      "source_node_uuid": "module:order-management:order-management.src.routes.webhooks",
+      "target_node_uuid": "entity:order-management:3b7715259eaada8630aec1e8b9e0639a7ef7caee",
+      "created_at": "2026-03-26T07:46:23.290471Z",
+      "name": "HANDLES",
+      "fact": "The webhooks route module handles the 'payment_intent.succeeded' event and transitions the order status to PAID.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-26T20:25:55Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:46:23.354438+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:787f1e287a3f17935857822b00915cd83427fa87\"]}",
+        "fact_id": "7c9d0286-3663-41a8-8386-af98eb8f5d54"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "c8e97c22-2951-4a41-acc5-d399d1eacbc1",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:96b50fe3786e6d85240bf6066c54ad62fa00aac8",
+      "target_node_uuid": "folder:order-management:order-management.tests.unit.webhooks",
+      "created_at": "2026-03-26T17:32:11.880928Z",
+      "name": "APPLIES_TO",
+      "fact": "The ADR applies to order creation via Stripe webhooks, which are prone to network retries causing duplicate orders.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2023-10-27T00:00:00Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:32:12.025881+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-architecture-003-idempotency-strategy\"]}",
+        "fact_id": "c8e97c22-2951-4a41-acc5-d399d1eacbc1"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+},
+{
+  "message": "Found 6 facts for: 'error JSON code message details error-handling' (Neptune only — provide repo_id to include Aurora profiles)",
+  "facts": [
+    {
+      "uuid": "28d2c6a4-e105-4d46-914c-191584602b9e",
+      "group_id": "order-management",
+      "source_node_uuid": "file:order-management:order-management.docs.integration.auth.__file__",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.error-handling.__file__",
+      "created_at": "2026-03-26T17:40:22.101506Z",
+      "name": "REFERENCES",
+      "fact": "auth.md references error-handling.md for the full error response shape returned by 401 and 403 status codes.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:39:00.876173Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:40:22.428164+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-auth\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-auth\"]}",
+        "fact_id": "28d2c6a4-e105-4d46-914c-191584602b9e"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "61d827ad-2092-41e4-af85-c857a599f258",
+      "group_id": "order-management",
+      "source_node_uuid": "entity:order-management:2097c33723b61c7e24d3d7d27840469989b61b49",
+      "target_node_uuid": "file:order-management:order-management.docs.integration.error-handling.__file__",
+      "created_at": "2026-03-26T17:48:35.676290Z",
+      "name": "DOCUMENTED_IN",
+      "fact": "The price field has floating point notes documented in error-handling.md.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-26T17:47:05.046431Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:48:36.264192+00:00",
+        "episode_ids_json": "[\"episode:order-management:text:doc-docs-integration-orders-api\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:text:doc-docs-integration-orders-api\"]}",
+        "fact_id": "61d827ad-2092-41e4-af85-c857a599f258"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "a05ddac9-926f-4f7a-aff4-41304e33eab0",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:ab27a4498eb6ac5af17d98b22c96f43118ab6a45",
+      "target_node_uuid": "module:order-management:order-management.src.jobs.webhookWorker",
+      "created_at": "2026-03-26T17:19:24.191627Z",
+      "name": "MODIFIES",
+      "fact": "The commit modifies the webhook worker module to correct the off-by-one error in attemptCount during rescheduling.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:04Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:19:24.266950+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]}",
+        "fact_id": "a05ddac9-926f-4f7a-aff4-41304e33eab0"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "c08c2e20-3164-494f-9cc2-b3eac1a4f90d",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:ab27a4498eb6ac5af17d98b22c96f43118ab6a45",
+      "target_node_uuid": "entity:order-management:df557d481065dc52cae847894b918a5335c98f6a",
+      "created_at": "2026-03-26T17:19:24.191369Z",
+      "name": "FIXES_BUG_IN",
+      "fact": "The commit fixes an off-by-one error in attemptCount during rescheduling, where the pre-increment value was being passed to nextAttemptDate().",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-03-18T23:25:04Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T17:19:24.266950+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:ab27a4498eb6ac5af17d98b22c96f43118ab6a45\"]}",
+        "fact_id": "c08c2e20-3164-494f-9cc2-b3eac1a4f90d"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "1cfaef72-c3b5-4063-8b91-776c25642ad1",
+      "group_id": "order-management",
+      "source_node_uuid": "variable:order-management:order-management.src.utils.logger.logger",
+      "target_node_uuid": "entity:order-management:e2f3e36ea43ba45ab3503ced0a944cd1a950065c",
+      "created_at": "2026-03-26T07:40:35.172897Z",
+      "name": "POWERED_BY",
+      "fact": "The logger instance is powered by Winston for structured JSON logging.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:25:53Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:40:35.567115+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:d1641d891eeeb0c3cf6bbae7f707f97cfa16f845\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:d1641d891eeeb0c3cf6bbae7f707f97cfa16f845\"]}",
+        "fact_id": "1cfaef72-c3b5-4063-8b91-776c25642ad1"
+      },
+      "relationship_keywords": null
+    },
+    {
+      "uuid": "75343488-7879-495a-bfad-f36998fdfca1",
+      "group_id": "order-management",
+      "source_node_uuid": "commit:order-management:d1641d891eeeb0c3cf6bbae7f707f97cfa16f845",
+      "target_node_uuid": "entity:order-management:e2f3e36ea43ba45ab3503ced0a944cd1a950065c",
+      "created_at": "2026-03-26T07:40:35.172777Z",
+      "name": "INTRODUCES",
+      "fact": "The commit introduces Winston structured JSON logging as a replacement for console.log.",
+      "episodes": [],
+      "expired_at": null,
+      "valid_at": "2026-02-27T01:25:53Z",
+      "invalid_at": null,
+      "attributes": {
+        "updated_at": "2026-03-26T07:40:35.567115+00:00",
+        "episode_ids_json": "[\"episode:order-management:git-commit-message:d1641d891eeeb0c3cf6bbae7f707f97cfa16f845\"]",
+        "repo_id": "order-management",
+        "metadata_json": "{\"episode_ids\":[\"episode:order-management:git-commit-message:d1641d891eeeb0c3cf6bbae7f707f97cfa16f845\"]}",
+        "fact_id": "75343488-7879-495a-bfad-f36998fdfca1"
+      },
+      "relationship_keywords": null
+    }
+  ],
+  "profiles": []
+}
+]
