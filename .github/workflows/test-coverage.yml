@@ -38,12 +38,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install dependencies
-        run: uv sync --group dev
-
       - name: Run tests with coverage
         run: |
-          uv run python -m pytest \
+          PYTHONPATH=. uv run --no-project \
+            --with pytest \
+            --with pytest-cov \
+            --with pydantic-settings \
+            --with pyyaml \
+            python -m pytest \
             --cov=context_graph \
             --cov-report=xml \
             --cov-report=term-missing \
@@ -58,8 +60,16 @@ jobs:
       - name: Build PR coverage comment
         if: github.event_name == 'pull_request'
         run: |
+          COVERAGE_PERCENT=$(python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("coverage.xml").getroot()
+          print(round(float(root.attrib.get("line-rate", "0")) * 100))
+          PY
+          )
           {
             echo "## Test Coverage"
+            echo
+            echo "Coverage: ${COVERAGE_PERCENT}%"
             echo
             echo '```text'
             cat coverage-report.txt
