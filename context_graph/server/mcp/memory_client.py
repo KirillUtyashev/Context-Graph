@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from context_graph.episode_processor import EpisodeProcessor, EpisodeWorkItem
 from context_graph.graph_read import GraphReadRepository
-from context_graph.graph_sinks import GraphitiNeo4jExecutor, GraphitiNeptuneExecutor, Neo4jGraphSink, NeptuneGraphSink
+from context_graph.legacy_graph_backend import GraphitiNeo4jExecutor, GraphitiNeptuneExecutor, Neo4jGraphSink, NeptuneGraphSink
 from context_graph.memory.models.edges import EntityEdge
 from context_graph.memory.models.nodes import EpisodeType, EpisodicNode
 from context_graph.memory.search.search import search as run_search
@@ -26,7 +26,7 @@ from context_graph.runtime.llm import LLMClient
 from context_graph.runtime.llm.config import LLMConfig
 from context_graph.runtime.rerank import NoOpCrossEncoder
 from context_graph.runtime.tracing import create_tracer
-from context_graph.storage.graph.driver import GraphDriver
+from context_graph.storage.graph import GraphDriver
 
 
 class DisabledLLMClient(LLMClient):

@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from context_graph.storage.graph.driver import GraphProvider
+from context_graph.storage.graph import GraphProvider
 from context_graph.memory.helpers import validate_node_labels
 
 

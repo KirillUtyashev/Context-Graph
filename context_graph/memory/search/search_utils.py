@@ -23,12 +23,12 @@ import numpy as np
 from numpy._typing import NDArray
 from typing_extensions import LiteralString
 
-from context_graph.storage.graph.driver import (
+from context_graph.storage.graph import (
     GraphDriver,
     GraphProvider,
 )
 from context_graph.memory.models.edges import EntityEdge, get_entity_edge_from_record
-from context_graph.storage.graph.queries import (
+from context_graph.storage.graph import (
     get_nodes_query,
     get_relationships_query,
     get_vector_cosine_func_query,
@@ -39,8 +39,8 @@ from context_graph.memory.helpers import (
     semaphore_gather,
     validate_group_ids,
 )
-from context_graph.storage.graph.models.edges.edge_db_queries import get_entity_edge_return_query
-from context_graph.storage.graph.models.nodes.node_db_queries import (
+from context_graph.storage.graph import get_entity_edge_return_query
+from context_graph.storage.graph import (
     COMMUNITY_NODE_RETURN,
     EPISODIC_NODE_RETURN,
     get_entity_node_return_query,

@@ -19,8 +19,8 @@ from datetime import datetime
 
 from typing_extensions import LiteralString
 
-from context_graph.storage.graph.driver import GraphDriver, GraphProvider
-from context_graph.storage.graph.models.nodes.node_db_queries import (
+from context_graph.storage.graph import GraphDriver, GraphProvider
+from context_graph.storage.graph import (
     EPISODIC_NODE_RETURN,
     EPISODIC_NODE_RETURN_NEPTUNE,
 )

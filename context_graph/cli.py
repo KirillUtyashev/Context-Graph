@@ -7,23 +7,26 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from .commit_indexer import CommitIndexer
 from .embeddings import load_embedding_settings, make_embedding_provider
-from .episode_processor import EpisodeProcessor, EpisodeWorkItem
-from .episodes import (
-    EpisodeType,
-    make_episode,
-)
-from .graph_read import GraphReadRepository
-from .github_client import GitHubApiClient
-from .graph_sinks import GraphitiNeo4jExecutor, GraphitiNeptuneExecutor, NeptuneGraphSink, Neo4jGraphSink
-from .hosted_indexer import HostedIndexRequest, HostedIndexer
+from .ingestion import CodebaseMemorySnapshotProducer, HostedIndexRequest, IngestionDriver, RepoCacheManager
+from context_graph.ingestion.git.github_client import GitHubApiClient
 from .llm import load_episode_llm_settings, make_episode_llm_client
 from .metadata import MetadataStore, PostgresMetadataStore, SQLiteMetadataStore
-from .profile_vectors import AuroraProfileVectorStore, ProfileSearchService, ProfileVectorIndexer
+from .profile_vectors import AuroraProfileVectorStore, ProfileVectorIndexer
 from .query_parser import QueryParser
-from .repo_cache import RepoCacheManager
-from .snapshot_builder import CodebaseMemorySnapshotProducer
+from .storage.backend import (
+    BackendSyncBridge,
+    EdgeRecord,
+    MutationPlan,
+    Neo4jConfig,
+    NeptuneConfig,
+    NodeRecord,
+    SearchDocumentRecord,
+    create_driver,
+)
+
+
+_EMBEDDING_UNSET = object()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -72,13 +75,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-limit",
         type=int,
         default=10,
-        help="Maximum number of Cypher statements to print",
+        help="Maximum number of typed operations to preview per category",
     )
     latest_commit_parser.add_argument(
         "--row-preview-limit",
         type=int,
         default=3,
-        help="Maximum number of batched parameter rows to print per statement preview",
+        help="Maximum number of properties to preview inside each operation payload",
     )
     latest_commit_parser.add_argument(
         "--neo4j-uri",
@@ -166,13 +169,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-limit",
         type=int,
         default=10,
-        help="Maximum number of Cypher statements to print",
+        help="Maximum number of typed operations to preview per category",
     )
     commit_parser.add_argument(
         "--row-preview-limit",
         type=int,
         default=3,
-        help="Maximum number of batched parameter rows to print per statement preview",
+        help="Maximum number of properties to preview inside each operation payload",
     )
     commit_parser.add_argument(
         "--neo4j-uri",
@@ -215,7 +218,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     hosted_parser = subparsers.add_parser(
         "hosted-index",
-        help="Clone/fetch a GitHub repository if needed, index commits, and attach GitHub provenance",
+        help="Clone/fetch a GitHub repository if needed and index it deterministically",
     )
     hosted_parser.add_argument(
         "repo_path",
@@ -273,13 +276,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-limit",
         type=int,
         default=10,
-        help="Maximum number of Cypher statements to print",
+        help="Maximum number of typed operations to preview per category",
     )
     hosted_parser.add_argument(
         "--row-preview-limit",
         type=int,
         default=3,
-        help="Maximum number of batched parameter rows to print per statement preview",
+        help="Maximum number of properties to preview inside each operation payload",
     )
     hosted_parser.add_argument(
         "--neo4j-uri",
@@ -588,7 +591,10 @@ def _make_episode_processor(
     metadata: MetadataStore | None = None,
     graph_sink=None,
     embedding_provider=None,
-) -> EpisodeProcessor:
+) :
+    from .episode_processor import EpisodeProcessor
+    from .graph_read import GraphReadRepository
+
     metadata = metadata or _make_metadata_store(args)
     embedding_provider = embedding_provider or _make_embedding_provider(args)
     graph_sink = graph_sink or _make_sink(args, embedding_provider=embedding_provider)
@@ -612,8 +618,11 @@ def _make_embedding_provider(args):
     return make_embedding_provider(settings)
 
 
-def _make_sink(args, *, embedding_provider=None):
-    embedding_provider = embedding_provider or _make_embedding_provider(args)
+def _make_sink(args, *, embedding_provider=_EMBEDDING_UNSET):
+    from .legacy_graph_backend import GraphitiNeo4jExecutor, NeptuneGraphSink, Neo4jGraphSink
+
+    if embedding_provider is _EMBEDDING_UNSET:
+        embedding_provider = _make_embedding_provider(args)
     if args.graph_backend == "neptune":
         return NeptuneGraphSink(
             host=args.neptune_host or os.getenv("CONTEXT_GRAPH_NEPTUNE_HOST"),
@@ -638,6 +647,44 @@ def _make_sink(args, *, embedding_provider=None):
         executor=executor,
         embedding_provider=embedding_provider,
     )
+
+
+def _make_backend_driver(args):
+    """Create the additive backend driver used by deterministic ingestion."""
+
+    if args.graph_backend == "neptune":
+        host = args.neptune_host or os.getenv("CONTEXT_GRAPH_NEPTUNE_HOST")
+        if not host:
+            return None
+        if not host.startswith(("neptune-db://", "neptune-graph://")):
+            host = f"{getattr(args, 'neptune_host_scheme', 'neptune-db')}://{host}"
+        return create_driver(
+            NeptuneConfig(
+                host=host,
+                port=args.neptune_port,
+                aoss_host=getattr(args, "aoss_host", None) or os.getenv("CONTEXT_GRAPH_AOSS_HOST"),
+            )
+        )
+
+    uri = args.neo4j_uri or os.getenv("NEO4J_URI")
+    user = args.neo4j_user or os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER")
+    password = args.neo4j_password or os.getenv("NEO4J_PASSWORD")
+    if not uri or user is None or password is None:
+        return None
+    return create_driver(
+        Neo4jConfig(
+            uri=uri,
+            user=user,
+            password=password,
+            database=args.neo4j_database or os.getenv("NEO4J_DATABASE") or "neo4j",
+        )
+    )
+
+
+def _close_backend_driver(driver) -> None:
+    if driver is None:
+        return
+    BackendSyncBridge(driver).close()
 
 
 def _make_metadata_store(args) -> MetadataStore:
@@ -768,17 +815,71 @@ def _diff_summary(diff) -> dict[str, object]:
     }
 
 
-def _statements_preview(statements, *, print_limit: int, row_preview_limit: int) -> list[dict[str, object]]:
-    return [
-        {
-            "query": statement.query,
-            "parameters": _preview_parameters(
-                dict(statement.parameters),
-                row_limit=row_preview_limit,
-            ),
-        }
-        for statement in statements[:print_limit]
-    ]
+def _preview_node_record(record: NodeRecord, *, property_limit: int) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "record_type": record.record_type,
+        "labels": list(record.labels),
+        "properties": _preview_parameters(dict(record.normalized_properties()), row_limit=property_limit),
+    }
+
+
+def _preview_edge_record(record: EdgeRecord, *, property_limit: int) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "record_type": record.record_type,
+        "relationship_type": record.relationship_type,
+        "source_record_id": record.source_record_id,
+        "target_record_id": record.target_record_id,
+        "properties": _preview_parameters(dict(record.normalized_properties()), row_limit=property_limit),
+    }
+
+
+def _preview_search_document(record: SearchDocumentRecord, *, property_limit: int) -> dict[str, object]:
+    return {
+        "record_kind": record.record_kind.value,
+        "record_id": record.record_id,
+        "record_type": record.record_type,
+        "search_text": record.search_text,
+        "properties": _preview_parameters(dict(record.normalized_properties()), row_limit=property_limit),
+    }
+
+
+def _preview_operation_batch(records, *, print_limit: int, property_limit: int, preview_fn):
+    materialized = list(records)
+    return {
+        "count": len(materialized),
+        "preview": [preview_fn(record, property_limit=property_limit) for record in materialized[:print_limit]],
+        "truncated": max(0, len(materialized) - print_limit),
+    }
+
+
+def _operations_preview(
+    plan: MutationPlan,
+    *,
+    print_limit: int,
+    row_preview_limit: int,
+) -> dict[str, object]:
+    return {
+        "node_upserts": _preview_operation_batch(
+            plan.upsert_nodes,
+            print_limit=print_limit,
+            property_limit=row_preview_limit,
+            preview_fn=_preview_node_record,
+        ),
+        "edge_upserts": _preview_operation_batch(
+            plan.upsert_edges,
+            print_limit=print_limit,
+            property_limit=row_preview_limit,
+            preview_fn=_preview_edge_record,
+        ),
+        "search_document_upserts": _preview_operation_batch(
+            plan.upsert_search_documents,
+            print_limit=print_limit,
+            property_limit=row_preview_limit,
+            preview_fn=_preview_search_document,
+        ),
+    }
 
 
 def _commit_summary(commit) -> dict[str, object]:
@@ -853,11 +954,10 @@ def _github_sync_summary(result) -> dict[str, object] | None:
         "skip_reason": result.skip_reason,
         "error": result.error,
         "entity_counts": dict(result.entity_counts),
-        "episode_count": result.episode_count,
         "pull_request_numbers": list(result.pull_request_numbers),
         "issue_numbers": list(result.issue_numbers),
-        "statements_emitted": len(result.statements),
-        "statements_executed": result.statements_executed,
+        "operations_emitted": result.operations.operation_count(),
+        "operations_applied": result.operations_applied,
     }
 
 
@@ -867,316 +967,169 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command in {"apply-latest-commit", "apply-commit"}:
         metadata = _make_metadata_store(args)
-        embedding_provider = _make_embedding_provider(args)
-        graph_sink = _make_sink(args, embedding_provider=embedding_provider)
-        if args.execute:
-            graph_sink.validate_execute_config()
-        episode_processor = _make_episode_processor(
-            args,
-            metadata=metadata,
-            graph_sink=graph_sink,
-            embedding_provider=embedding_provider,
-        )
-        indexer = CommitIndexer(
-            metadata_store=metadata,
-            graph_sink=graph_sink,
-            snapshot_producer=_producer(),
-            episode_processor=episode_processor,
-        )
-        if args.command == "apply-latest-commit":
-            result = indexer.apply_latest_commit(
-                args.repo_path,
-                repo_id=args.repo_id,
-                limit=args.limit,
-                execute=args.execute,
+        backend_driver = _make_backend_driver(args) if args.execute else None
+        if args.execute and backend_driver is None:
+            raise RuntimeError("deterministic execution requires a configured backend connection")
+        try:
+            driver = IngestionDriver(
+                metadata_store=metadata,
+                backend_driver=backend_driver,
+                snapshot_producer=_producer(),
             )
-        else:
-            result = indexer.apply_commit(
-                args.repo_path,
-                commit_sha=args.commit,
-                repo_id=args.repo_id,
-                limit=args.limit,
-                execute=args.execute,
-            )
+            if args.command == "apply-latest-commit":
+                result = driver.apply_latest_commit(
+                    args.repo_path,
+                    repo_id=args.repo_id,
+                    limit=args.limit,
+                    execute=args.execute,
+                )
+            else:
+                result = driver.apply_commit(
+                    args.repo_path,
+                    commit_sha=args.commit,
+                    repo_id=args.repo_id,
+                    limit=args.limit,
+                    execute=args.execute,
+                )
 
-        payload = {
-            "repo_id": result.repo_id,
-            "repo_path": result.repo_path,
-            "skipped": result.skipped,
-            "skip_reason": result.skip_reason,
-            "previous_commit_sha": result.previous_commit_sha,
-            "applied_commit_shas": list(result.applied_commit_shas),
-            "commit": _commit_summary(result.commit),
-            "snapshot": _snapshot_summary(result.snapshot) if result.snapshot else None,
-            "diff": _diff_summary(result.apply_result.diff) if result.apply_result else None,
-            "statements_emitted": len(result.statements),
-            "statements_executed": result.apply_result.statements_executed if result.apply_result else 0,
-            "statements_preview": _statements_preview(
-                result.statements,
-                print_limit=args.print_limit,
-                row_preview_limit=args.row_preview_limit,
-            ),
-            "repo_index_state": _repo_index_state_summary(metadata.load_repo_index_state(result.repo_id)),
-        }
-        return _emit_json(payload)
+            payload = {
+                "repo_id": result.repo_id,
+                "repo_path": result.repo_path,
+                "skipped": result.skipped,
+                "skip_reason": result.skip_reason,
+                "previous_commit_sha": result.previous_commit_sha,
+                "applied_commit_shas": list(result.applied_commit_shas),
+                "commit": _commit_summary(result.commit),
+                "snapshot": _snapshot_summary(result.snapshot) if result.snapshot else None,
+                "diff": _diff_summary(result.apply_result.diff) if result.apply_result else None,
+                "operations_emitted": result.operations.operation_count(),
+                "operations_applied": result.apply_result.operations_applied if result.apply_result else 0,
+                "operations_preview": _operations_preview(
+                    result.operations,
+                    print_limit=args.print_limit,
+                    row_preview_limit=args.row_preview_limit,
+                ),
+                "repo_index_state": _repo_index_state_summary(metadata.load_repo_index_state(result.repo_id)),
+            }
+            return _emit_json(payload)
+        finally:
+            _close_backend_driver(backend_driver)
 
     if args.command == "hosted-index":
         metadata = _make_metadata_store(args)
-        embedding_provider = _make_embedding_provider(args)
-        graph_sink = _make_sink(args, embedding_provider=embedding_provider)
-        if args.execute:
-            graph_sink.validate_execute_config()
-        episode_processor = _make_episode_processor(
-            args,
-            metadata=metadata,
-            graph_sink=graph_sink,
-            embedding_provider=embedding_provider,
-        )
-        hosted_indexer = HostedIndexer(
-            metadata_store=metadata,
-            graph_sink=graph_sink,
-            snapshot_producer=_producer(),
-            github_api=_make_github_api(args),
-            repo_cache=RepoCacheManager(base_dir=args.repo_cache_dir),
-            episode_processor=episode_processor,
-        )
-        result = hosted_indexer.index(
-            HostedIndexRequest(
-                repo_path=args.repo_path,
-                github_url=args.github_url,
-                github_repo=args.github_repo,
-                repo_id=args.repo_id,
-                ref=args.ref,
-                commit_sha=args.commit,
-                limit=args.limit,
-                execute=args.execute,
+        backend_driver = _make_backend_driver(args) if args.execute else None
+        if args.execute and backend_driver is None:
+            raise RuntimeError("deterministic execution requires a configured backend connection")
+        try:
+            driver = IngestionDriver(
+                metadata_store=metadata,
+                backend_driver=backend_driver,
+                snapshot_producer=_producer(),
+                github_api=_make_github_api(args),
+                repo_cache=RepoCacheManager(base_dir=args.repo_cache_dir),
             )
-        )
-        payload = {
-            "request_id": result.request_id,
-            "repo_id": result.repo_id,
-            "repo_path": result.repo_path,
-            "repo_ref": _repo_ref_summary(result.repo_ref),
-            "repo_source_state": _repo_source_state_summary(result.repo_source_state),
-            "commit": _commit_summary(result.commit_result.commit),
-            "commit_index": {
-                "skipped": result.commit_result.skipped,
-                "skip_reason": result.commit_result.skip_reason,
-                "previous_commit_sha": result.commit_result.previous_commit_sha,
-                "applied_commit_shas": list(result.commit_result.applied_commit_shas),
-                "snapshot": _snapshot_summary(result.commit_result.snapshot) if result.commit_result.snapshot else None,
-                "diff": _diff_summary(result.commit_result.apply_result.diff) if result.commit_result.apply_result else None,
-                "statements_emitted": len(result.commit_result.statements),
-                "statements_executed": result.commit_result.apply_result.statements_executed if result.commit_result.apply_result else 0,
-            },
-            "github": _github_sync_summary(result.github_result),
-            "github_error": result.github_error,
-            "statements_emitted": len(result.statements),
-            "statements_executed": result.statements_executed,
-            "statements_preview": _statements_preview(
-                result.statements,
-                print_limit=args.print_limit,
-                row_preview_limit=args.row_preview_limit,
-            ),
-            "repo_index_state": _repo_index_state_summary(metadata.load_repo_index_state(result.repo_id)),
-        }
-        return _emit_json(payload)
-
-    if args.command == "ingest-episode":
-        processor = _make_episode_processor(args)
-        graph_sink = processor.graph_sink
-        if args.execute:
-            graph_sink.validate_execute_config()
-        text = _load_episode_text(args)
-        batch = processor.apply_batch(
-            [
-                EpisodeWorkItem(
-                    episode=make_episode(
-                        episode_id=f"{args.source_type}:{args.source_id}",
-                        repo_id=args.repo_id,
-                        source_type=args.source_type,
-                        source_id=args.source_id,
-                        author=args.author,
-                        created_at=_now_iso(),
-                        updated_at=_now_iso(),
-                        text=text,
-                        metadata={"thread_id": args.thread_id} if args.thread_id else {},
-                        parent_node_id=args.parent_node_id,
-                    )
+            result = driver.index_hosted(
+                HostedIndexRequest(
+                    repo_path=args.repo_path,
+                    github_url=args.github_url,
+                    github_repo=args.github_repo,
+                    repo_id=args.repo_id,
+                    ref=args.ref,
+                    commit_sha=args.commit,
+                    limit=args.limit,
+                    execute=args.execute,
                 )
-            ],
-            execute=args.execute,
-        )
-        payload = {
-            "repo_id": args.repo_id,
-            "episodes": [
-                {
-                    "episode_id": result.episode.name,
-                    "source_type": result.episode.source.value,
-                    "mentions": [mention.target_node_id for mention in result.mentions],
-                    "facts": [
-                        {
-                            "fact_id": fact.uuid,
-                            "source_node_id": fact.source_node_uuid,
-                            "target_node_id": fact.target_node_uuid,
-                            "relation_type": fact.name,
-                            "fact": fact.fact,
-                        }
-                        for fact in result.facts
-                    ],
-                }
-                for result in batch.results
-            ],
-            "statements_emitted": len(batch.statements),
-            "statements_executed": batch.statements_executed,
-            "statements_preview": _statements_preview(
-                batch.statements,
-                print_limit=args.print_limit,
-                row_preview_limit=args.row_preview_limit,
-            ),
-        }
-        return _emit_json(payload)
-
-    if args.command == "parse-query":
-        parser_service = _make_query_parser(args)
-        result = parser_service.parse(args.query, llm_enabled=True)
-        payload = {
-            "raw_query": result.raw_query,
-            "anchors": [
-                {"kind": anchor.kind, "value": anchor.value}
-                for anchor in result.anchors
-            ],
-            "high_level_keywords": list(result.high_level_keywords),
-            "intent_tags": list(result.intent_tags),
-        }
-        return _emit_json(payload)
-
-    if args.command == "sync-profile-vectors":
-        metadata = _make_metadata_store(args)
-        embedding_settings = load_embedding_settings(args)
-        embedding_provider = make_embedding_provider(embedding_settings)
-        if embedding_provider is None:
-            raise RuntimeError(
-                "sync-profile-vectors requires embedding config via --embed-provider or CONTEXT_GRAPH_EMBED_PROVIDER"
             )
-        vector_store = _make_profile_vector_store(args, metadata=metadata)
-        if vector_store is None:
-            raise RuntimeError("sync-profile-vectors requires --metadata-backend=postgres")
-        indexer = ProfileVectorIndexer(
-            vector_store=vector_store,
-            embedding_provider=embedding_provider,
-        )
-        indexed = indexer.sync_repo(repo_id=args.repo_id, metadata_store=metadata)
-        payload = {
-            "repo_id": args.repo_id,
-            "indexed_profile_keys": indexed,
-            "active_profiles": len(metadata.load_profiles(args.repo_id, active_only=True)),
-        }
-        return _emit_json(payload)
-
-    if args.command == "search-profiles":
-        metadata = _make_metadata_store(args)
-        embedding_settings = load_embedding_settings(args)
-        embedding_provider = make_embedding_provider(embedding_settings)
-        if embedding_provider is None:
-            raise RuntimeError(
-                "search-profiles requires embedding config via --embed-provider or CONTEXT_GRAPH_EMBED_PROVIDER"
-            )
-        vector_store = _make_profile_vector_store(args, metadata=metadata)
-        if vector_store is None:
-            raise RuntimeError("search-profiles requires --metadata-backend=postgres")
-        search_service = ProfileSearchService(
-            metadata_store=metadata,
-            vector_store=vector_store,
-            embedding_provider=embedding_provider,
-            query_parser=_make_query_parser(args),
-        )
-        result = search_service.search(
-            repo_id=args.repo_id,
-            query=args.query,
-            limit=args.limit,
-            active_only=not args.include_inactive,
-            llm_enabled=True,
-        )
-        payload = {
-            "repo_id": args.repo_id,
-            "query": args.query,
-            "parse_result": {
-                "anchors": [
-                    {"kind": anchor.kind, "value": anchor.value}
-                    for anchor in result.parse_result.anchors
-                ],
-                "high_level_keywords": list(result.parse_result.high_level_keywords),
-                "intent_tags": list(result.parse_result.intent_tags),
-            },
-            "hits": [
-                {
-                    "profile_id": hit.profile_id,
-                    "profile_key_id": hit.profile_key_id,
-                    "profile_kind": hit.profile_kind,
-                    "key_text": hit.key_text,
-                    "score": hit.score,
-                }
-                for hit in result.hits
-            ],
-            "profiles": [
-                {
-                    "profile_id": profile.profile_id,
-                    "profile_kind": profile.profile_kind,
-                    "profile_target_kind": profile.profile_target_kind,
-                    "profile_target_id": profile.profile_target_id,
-                    "relation_type": profile.relation_type,
-                    "source_node_id": profile.source_node_id,
-                    "target_node_id": profile.target_node_id,
-                    "value_text": profile.value_text,
-                    "keys": list(profile.keys),
-                    "metadata": dict(profile.metadata),
-                    "is_active": profile.is_active,
-                }
-                for profile in result.profiles
-            ],
-        }
-        return _emit_json(payload)
+            payload = {
+                "request_id": result.request_id,
+                "repo_id": result.repo_id,
+                "repo_path": result.repo_path,
+                "repo_ref": _repo_ref_summary(result.repo_ref),
+                "repo_source_state": _repo_source_state_summary(result.repo_source_state),
+                "commit": _commit_summary(result.commit_result.commit),
+                "commit_index": {
+                    "skipped": result.commit_result.skipped,
+                    "skip_reason": result.commit_result.skip_reason,
+                    "previous_commit_sha": result.commit_result.previous_commit_sha,
+                    "applied_commit_shas": list(result.commit_result.applied_commit_shas),
+                    "snapshot": _snapshot_summary(result.commit_result.snapshot) if result.commit_result.snapshot else None,
+                    "diff": _diff_summary(result.commit_result.apply_result.diff) if result.commit_result.apply_result else None,
+                    "operations_emitted": result.commit_result.operations.operation_count(),
+                    "operations_applied": result.commit_result.apply_result.operations_applied if result.commit_result.apply_result else 0,
+                },
+                "github_sync": _github_sync_summary(result.github_sync_result),
+                "operations_emitted": result.operations.operation_count(),
+                "operations_applied": result.operations_applied,
+                "operations_preview": _operations_preview(
+                    result.operations,
+                    print_limit=args.print_limit,
+                    row_preview_limit=args.row_preview_limit,
+                ),
+                "repo_index_state": _repo_index_state_summary(metadata.load_repo_index_state(result.repo_id)),
+            }
+            return _emit_json(payload)
+        finally:
+            _close_backend_driver(backend_driver)
 
     if args.command == "reset-context":
         metadata = _make_metadata_store(args)
-        graph_sink = _make_sink(args)
-        statements = graph_sink.plan_reset_repo(args.repo_id)
+        backend_driver = _make_backend_driver(args) if args.execute else None
         zero_counts = {
             "repo_state": 0,
+            "repo_source": 0,
             "current_nodes": 0,
             "current_edges": 0,
-            "context_nodes": 0,
             "profiles": 0,
             "index_runs": 0,
         }
-        if args.execute:
-            graph_sink.validate_execute_config()
-            statements_executed = graph_sink.execute(statements)
-            metadata_deleted = metadata.reset_repo_context(args.repo_id)
-            vector_store = _make_profile_vector_store(args, metadata=metadata)
-            vector_deleted = vector_store.reset_repo_context(args.repo_id) if vector_store else 0
-        else:
-            statements_executed = 0
-            metadata_deleted = zero_counts
-            vector_deleted = 0
-
-        payload = {
-            "repo_id": args.repo_id,
-            "execute": bool(args.execute),
-            "metadata_deleted": metadata_deleted,
-            "vector_deleted": vector_deleted,
-            "graph_statements_emitted": len(statements),
-            "graph_statements_executed": statements_executed,
-            "graph_statements_preview": [
-                {
-                    "query": statement.query,
-                    "parameters": dict(statement.parameters),
+        try:
+            if args.execute:
+                if backend_driver is None:
+                    raise RuntimeError("reset-context --execute requires a configured backend connection")
+                graph_reset = BackendSyncBridge(backend_driver).reset_repo(args.repo_id)
+                metadata_deleted = metadata.reset_repo_context(args.repo_id)
+                vector_store = _make_profile_vector_store(args, metadata=metadata)
+                vector_deleted = vector_store.reset_repo_context(args.repo_id) if vector_store else 0
+                graph_reset_payload: dict[str, object] = {
+                    "repo_id": graph_reset.repo_id,
+                    "nodes_deleted": graph_reset.nodes_deleted,
+                    "edges_deleted": graph_reset.edges_deleted,
+                    "search_documents_deleted": graph_reset.search_documents_deleted,
+                    "total_deleted": graph_reset.total_deleted,
                 }
-                for statement in statements[: args.print_limit]
-            ],
-        }
-        return _emit_json(payload)
+                graph_reset_preview = None
+            else:
+                metadata_deleted = zero_counts
+                vector_deleted = 0
+                graph_reset_payload = {
+                    "repo_id": args.repo_id,
+                    "nodes_deleted": 0,
+                    "edges_deleted": 0,
+                    "search_documents_deleted": 0,
+                    "total_deleted": 0,
+                }
+                graph_reset_preview = {
+                    "repo_id": args.repo_id,
+                    "scope": "repo",
+                    "owned_record_families": [
+                        "deterministic code graph",
+                        "commit provenance",
+                        "github structural provenance",
+                        "search documents",
+                    ],
+                }
+
+            payload = {
+                "repo_id": args.repo_id,
+                "execute": bool(args.execute),
+                "graph_reset": graph_reset_payload,
+                "graph_reset_preview": graph_reset_preview,
+                "metadata_deleted": metadata_deleted,
+                "vector_deleted": vector_deleted,
+            }
+            return _emit_json(payload)
+        finally:
+            _close_backend_driver(backend_driver)
 
     parser.error(f"unsupported command: {args.command}")
     return 2

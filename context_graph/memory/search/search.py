@@ -19,7 +19,7 @@ from collections import defaultdict
 from time import time
 
 from context_graph.runtime.rerank.client import CrossEncoderClient
-from context_graph.storage.graph.driver import GraphDriver
+from context_graph.storage.graph import GraphDriver
 from context_graph.memory.models.edges import EntityEdge
 from context_graph.runtime.embedding.client import EMBEDDING_DIM
 from context_graph.memory.errors import SearchRerankerError

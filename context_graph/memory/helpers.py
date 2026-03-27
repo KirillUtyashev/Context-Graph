@@ -27,7 +27,7 @@ from neo4j import time as neo4j_time
 from numpy._typing import NDArray
 from pydantic import BaseModel
 
-from context_graph.storage.graph.driver import GraphProvider
+from context_graph.storage.graph import GraphProvider
 from context_graph.memory.errors import GroupIdValidationError, NodeLabelValidationError
 
 load_dotenv()

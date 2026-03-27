@@ -21,7 +21,7 @@ from time import time
 from pydantic import BaseModel
 from typing_extensions import LiteralString
 
-from context_graph.storage.graph.driver import GraphDriver, GraphProvider
+from context_graph.storage.graph import GraphDriver, GraphProvider
 from context_graph.memory.models.edges import (
     CommunityEdge,
     EntityEdge,

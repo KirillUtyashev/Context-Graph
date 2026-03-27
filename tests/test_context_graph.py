@@ -14,31 +14,28 @@ from unittest.mock import patch
 
 from context_graph import cli as cli_module
 from context_graph.cli import main as cli_main
-from context_graph.commit_indexer import CommitIndexer
-from context_graph.diffing import diff_snapshots
 from context_graph.episode_processor import EpisodeProcessor, EpisodeWorkItem
 from context_graph.episodes import (
-    EntityNode,
-    EntityEdge,
-    MentionRecord,
-    entity_node_file_path,
-    entity_node_kind,
-    entity_node_qualified_name,
     make_entity_edge,
     make_entity_node,
     make_episode,
 )
-from context_graph.git_metadata import GitMetadata
-from context_graph.github_client import (
+from context_graph.ingestion.diffing import diff_snapshots
+from context_graph.ingestion.driver import HostedIndexRequest, IngestionDriver
+from context_graph.ingestion.git.git_metadata import GitMetadata
+from context_graph.ingestion.git.github_client import (
     GitHubApiClient,
     GitHubRepoRef,
     GitHubRepoResolver,
     collect_unique_numbers,
     parse_github_repo_input,
 )
-from context_graph.github_indexer import GitHubEntity, GitHubProvenanceBundle
+from context_graph.ingestion.git.github_indexer import GitHubEntity, GitHubProvenanceBundle
+from context_graph.ingestion.repo_cache import RepoCacheManager
+from context_graph.ingestion.snapshot_builder import build_snapshot_from_graph_export
+from context_graph.ingestion.temporal import TemporalGraphWriter
 from context_graph.graph_read import GraphReadRepository
-from context_graph.graph_sinks import (
+from context_graph.legacy_graph_backend import (
     BaseCypherExecutor,
     CypherStatement,
     GraphitiNeo4jExecutor,
@@ -46,7 +43,6 @@ from context_graph.graph_sinks import (
     NeptuneGraphSink,
     Neo4jGraphSink,
 )
-from context_graph.hosted_indexer import HostedIndexRequest, HostedIndexer
 from context_graph.llm import EpisodeLLMSettings, load_episode_llm_settings
 from context_graph.metadata import InMemoryMetadataStore, RepoIndexState, RepoSourceState, SQLiteMetadataStore
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
@@ -58,9 +54,6 @@ from context_graph.profile_vectors import (
 )
 from context_graph.profiles import ProfileDeactivation, ProfileRecord, SEMANTIC_FACT_PROFILE_KIND
 from context_graph.query_parser import QueryParser
-from context_graph.repo_cache import RepoCacheManager
-from context_graph.snapshot_builder import build_snapshot_from_graph_export
-from context_graph.temporal import TemporalGraphWriter
 
 
 def make_snapshot(
@@ -1928,7 +1921,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, _first_sha, second_sha = create_git_repo_with_unchanged_file(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2010,7 +2003,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, _first_sha, second_sha = create_git_repo(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2031,21 +2024,14 @@ class CommitIndexerTests(unittest.TestCase):
             episode_rows = _episode_rows(result.statements)
             episode_on_rows = _episode_on_rows(result.statements)
 
-            self.assertTrue(any(row["source_type"] == "git_commit_message" for row in episode_rows))
-            self.assertTrue(
-                any(
-                    row["repo_id"] == "demo"
-                    and row["episode_node_id"] == f"episode:demo:git-commit-message:{second_sha}"
-                    and row["target_node_id"] == f"commit:demo:{second_sha}"
-                    for row in episode_on_rows
-                )
-            )
+            self.assertEqual(episode_rows, [])
+            self.assertEqual(episode_on_rows, [])
 
     def test_apply_latest_commit_skips_when_head_is_already_indexed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, _first_sha, _second_sha = create_git_repo(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2063,7 +2049,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, first_sha, second_sha, third_sha = create_git_repo_with_deletions(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2083,7 +2069,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, _first_sha, second_sha, _feature_sha = create_git_repo_with_branch_divergence(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2102,7 +2088,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, first_sha, second_sha = create_git_repo(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2117,7 +2103,7 @@ class CommitIndexerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_path, first_sha, second_sha, third_sha = create_git_repo_with_deletions(temp_dir)
             metadata = InMemoryMetadataStore()
-            indexer = CommitIndexer(
+            indexer = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2519,12 +2505,12 @@ class HostedIndexTests(unittest.TestCase):
             self.assertEqual(first.source_state.last_fetched_head_sha, second_sha)
             self.assertEqual(second.source_state.last_fetched_head_sha, third_sha)
 
-    def test_hosted_index_clones_repo_and_attaches_github_provenance(self) -> None:
+    def test_hosted_index_clones_repo_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _repo_path, bare_path, _first_sha, second_sha = create_git_remote_repo(temp_dir)
             metadata = InMemoryMetadataStore()
             github_api = self._make_github_api(second_sha)
-            hosted = HostedIndexer(
+            hosted = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2533,7 +2519,7 @@ class HostedIndexTests(unittest.TestCase):
             )
             hosted.repo_resolver = StaticRepoResolver(self._make_repo_ref(bare_path))
 
-            result = hosted.index(
+            result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_repo="octo/demo",
                     repo_id="demo",
@@ -2546,25 +2532,20 @@ class HostedIndexTests(unittest.TestCase):
             self.assertEqual(result.commit_result.commit.sha, second_sha)
             self.assertEqual(result.repo_source_state.canonical_repo, "octo/demo")
             self.assertTrue(Path(result.repo_source_state.clone_path).exists())
-            self.assertIsNotNone(result.github_result)
-            self.assertEqual(result.github_result.pull_request_numbers, (7,))
-            self.assertEqual(result.github_result.issue_numbers, (42,))
-            self.assertGreater(result.github_result.episode_count, 0)
-            self.assertIsNone(result.github_error)
-            self.assertIn("MERGE (n:GitHubEntity:PullRequest", queries)
-            self.assertIn("MERGE (project)-[r:HAS_PULL_REQUEST]->(entity)", queries)
-            self.assertIn("MERGE (commit)-[r:ASSOCIATED_WITH_PR]->(entity)", queries)
-            self.assertIn("MERGE (source)-[r:REFERENCES_ISSUE]->(target)", queries)
-            self.assertIn("MERGE (e:Episode:Episodic", queries)
-            self.assertIn("MERGE (episode)-[r:ON]->(target)", queries)
-            self.assertEqual(metadata.load_repo_source_state("demo").last_github_sync_status, "applied")
+            self.assertNotIn("MERGE (n:GitHubEntity:PullRequest", queries)
+            self.assertNotIn("MERGE (project)-[r:HAS_PULL_REQUEST]->(entity)", queries)
+            self.assertNotIn("MERGE (commit)-[r:ASSOCIATED_WITH_PR]->(entity)", queries)
+            self.assertNotIn("MERGE (source)-[r:REFERENCES_ISSUE]->(target)", queries)
+            self.assertNotIn("MERGE (e:Episode:Episodic", queries)
+            self.assertNotIn("MERGE (episode)-[r:ON]->(target)", queries)
+            self.assertIsNone(metadata.load_repo_source_state("demo").last_github_sync_status)
 
-    def test_hosted_index_soft_fails_when_github_sync_breaks(self) -> None:
+    def test_hosted_index_does_not_call_github_enrichment(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _repo_path, bare_path, _first_sha, second_sha = create_git_remote_repo(temp_dir)
             metadata = InMemoryMetadataStore()
             github_api = FakeGitHubApiClient(fail_on_commit_prs=True)
-            hosted = HostedIndexer(
+            hosted = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2573,7 +2554,7 @@ class HostedIndexTests(unittest.TestCase):
             )
             hosted.repo_resolver = StaticRepoResolver(self._make_repo_ref(bare_path))
 
-            result = hosted.index(
+            result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_repo="octo/demo",
                     repo_id="demo",
@@ -2582,11 +2563,10 @@ class HostedIndexTests(unittest.TestCase):
             )
 
             self.assertEqual(result.commit_result.commit.sha, second_sha)
-            self.assertIsNone(result.github_result)
-            self.assertIn("GitHub commit pull request lookup failed", result.github_error)
-            self.assertEqual(metadata.load_repo_source_state("demo").last_github_sync_status, "failed")
+            self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, second_sha)
+            self.assertIsNone(metadata.load_repo_source_state("demo").last_github_sync_status)
 
-    def test_hosted_index_pipeline_replays_commits_and_matches_github_relationships(self) -> None:
+    def test_hosted_index_pipeline_replays_commits_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             _repo_path, bare_path, first_sha, second_sha = create_git_remote_repo(temp_dir)
             third_sha = push_remote_commit(_repo_path)
@@ -2716,7 +2696,7 @@ class HostedIndexTests(unittest.TestCase):
                     },
                 },
             )
-            hosted = HostedIndexer(
+            hosted = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2725,7 +2705,7 @@ class HostedIndexTests(unittest.TestCase):
             )
             hosted.repo_resolver = StaticRepoResolver(self._make_repo_ref(bare_path))
 
-            first_result = hosted.index(
+            first_result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_repo="octo/demo",
                     repo_id="demo",
@@ -2733,7 +2713,7 @@ class HostedIndexTests(unittest.TestCase):
                     execute=False,
                 )
             )
-            replay_result = hosted.index(
+            replay_result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_repo="octo/demo",
                     repo_id="demo",
@@ -2745,134 +2725,11 @@ class HostedIndexTests(unittest.TestCase):
             self.assertEqual(replay_result.commit_result.applied_commit_shas, (third_sha,))
             self.assertEqual(replay_result.commit_result.commit.sha, third_sha)
             self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, third_sha)
-            self.assertEqual(first_result.github_result.pull_request_numbers, (7,))
-            self.assertEqual(first_result.github_result.issue_numbers, (42,))
-            self.assertEqual(replay_result.github_result.pull_request_numbers, (7,))
-            self.assertEqual(replay_result.github_result.issue_numbers, (42,))
-
-            combined_statements = tuple(first_result.statements) + tuple(replay_result.statements)
-            entity_rows = _github_entity_rows(combined_statements)
-            associated_rows = _github_commit_link_rows(combined_statements, "ASSOCIATED_WITH_PR")
-            references_rows = _github_commit_link_rows(combined_statements, "REFERENCES_ISSUE")
-            project_pr_rows = _github_project_link_rows(combined_statements, "HAS_PULL_REQUEST")
-            project_issue_rows = _github_project_link_rows(combined_statements, "HAS_ISSUE")
-            episode_rows = _episode_rows(combined_statements)
-            episode_on_rows = _episode_on_rows(combined_statements)
-            mention_rows = _mention_rows(combined_statements)
-
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:pr:demo:7",
-                    "commit_sha": second_sha,
-                    "source_node_id": None,
-                    "metadata_json": "{\"pull_request_number\":7}",
-                },
-                associated_rows,
-            )
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:pr:demo:7",
-                    "commit_sha": third_sha,
-                    "source_node_id": None,
-                    "metadata_json": "{\"pull_request_number\":7}",
-                },
-                associated_rows,
-            )
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:issue:demo:42",
-                    "commit_sha": second_sha,
-                    "source_node_id": None,
-                    "metadata_json": "{\"issue_number\":42}",
-                },
-                references_rows,
-            )
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:issue:demo:42",
-                    "commit_sha": third_sha,
-                    "source_node_id": None,
-                    "metadata_json": "{\"issue_number\":42}",
-                },
-                references_rows,
-            )
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:pr:demo:7",
-                    "commit_sha": None,
-                    "source_node_id": None,
-                    "metadata_json": "{\"number\":7}",
-                },
-                project_pr_rows,
-            )
-            self.assertIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:issue:demo:42",
-                    "commit_sha": None,
-                    "source_node_id": None,
-                    "metadata_json": "{\"number\":42}",
-                },
-                project_issue_rows,
-            )
-            self.assertNotIn(
-                {
-                    "repo_id": "demo",
-                    "target_node_id": "github:issue:demo:99",
-                    "commit_sha": None,
-                    "source_node_id": None,
-                    "metadata_json": "{\"number\":99}",
-                },
-                project_issue_rows,
-            )
-
-            kinds_by_node = {row["node_id"]: row["kind"] for row in entity_rows}
-            self.assertEqual(kinds_by_node["github:pr:demo:7"], "PullRequest")
-            self.assertEqual(kinds_by_node["github:issue:demo:42"], "Issue")
-            self.assertNotIn("github:issue:demo:99", kinds_by_node)
-            self.assertTrue(any(row["source_type"] == "github_pr_body" for row in episode_rows))
-            self.assertTrue(any(row["source_type"] == "github_issue_body" for row in episode_rows))
-            self.assertTrue(any(row["source_type"] == "github_pr_review" for row in episode_rows))
-            self.assertTrue(any(row["source_type"] == "github_pr_review_comment" for row in episode_rows))
-            self.assertTrue(any(row["source_type"] == "github_pr_issue_comment" for row in episode_rows))
-            self.assertTrue(any(row["source_type"] == "github_issue_comment" for row in episode_rows))
-
-            self.assertTrue(
-                any(
-                    row["target_node_id"] == "github:pr:demo:7"
-                    for row in episode_on_rows
-                )
-            )
-            self.assertTrue(
-                any(
-                    row["target_node_id"] == "github:issue:demo:42"
-                    for row in episode_on_rows
-                )
-            )
-            self.assertTrue(
-                any(
-                    row["target_node_id"] == "github:pr:demo:7"
-                    for row in mention_rows
-                )
-            )
-            self.assertTrue(
-                any(
-                    row["target_node_id"] == "github:issue:demo:42"
-                    for row in mention_rows
-                )
-            )
-
-            for commit_sha in (second_sha, third_sha):
-                self.assertEqual(
-                    collect_unique_numbers(github_api.list_commit_pull_requests("octo", "demo", commit_sha)),
-                    (7,),
-                )
-            self.assertEqual(github_api.list_pull_request_linked_issue_numbers("octo", "demo", 7), (42,))
+            combined_queries = "\n".join(statement.query for statement in (*first_result.statements, *replay_result.statements))
+            self.assertNotIn("GitHubEntity", combined_queries)
+            self.assertNotIn("HAS_PULL_REQUEST", combined_queries)
+            self.assertNotIn("REFERENCES_ISSUE", combined_queries)
+            self.assertNotIn("Episode:Episodic", combined_queries)
 
     def test_hosted_index_cli_accepts_local_repo_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2899,7 +2756,7 @@ class HostedIndexTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload["commit"]["sha"], second_sha)
             self.assertIsNone(payload["repo_ref"])
-            self.assertIsNone(payload["github"])
+            self.assertNotIn("github", payload)
 
 
 @unittest.skipUnless(
@@ -2917,11 +2774,11 @@ class LiveGitHubPipelineTests(unittest.TestCase):
             return token
         return Path("/tmp/context_graph_github_token").read_text(encoding="utf-8").strip()
 
-    def test_live_hosted_index_pipeline_matches_github_api(self) -> None:
+    def test_live_hosted_index_pipeline_replays_commits_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             metadata = InMemoryMetadataStore()
             github_api = GitHubApiClient(token=self._token())
-            hosted = HostedIndexer(
+            hosted = IngestionDriver(
                 metadata_store=metadata,
                 graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
                 snapshot_producer=FakeSnapshotProducer(),
@@ -2933,7 +2790,7 @@ class LiveGitHubPipelineTests(unittest.TestCase):
             second_commit = "5fc3fb28126b4e5e9cff07cafda4deb8095456f8"
             merge_commit = "6a07e6d9aaf86b32e00ab80cf53b3dc441159e93"
 
-            first_result = hosted.index(
+            first_result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_url="https://github.com/KirillUtyashev/ContextGraphTestRepo",
                     repo_id="live-demo",
@@ -2941,7 +2798,7 @@ class LiveGitHubPipelineTests(unittest.TestCase):
                     execute=False,
                 )
             )
-            replay_result = hosted.index(
+            replay_result = hosted.index_hosted(
                 HostedIndexRequest(
                     github_url="https://github.com/KirillUtyashev/ContextGraphTestRepo",
                     repo_id="live-demo",
@@ -2952,23 +2809,8 @@ class LiveGitHubPipelineTests(unittest.TestCase):
             self.assertEqual(first_result.commit_result.applied_commit_shas, (first_commit,))
             self.assertEqual(replay_result.commit_result.applied_commit_shas, (second_commit, merge_commit))
             self.assertEqual(replay_result.commit_result.commit.sha, merge_commit)
-            self.assertEqual(first_result.github_result.pull_request_numbers, (3,))
-            self.assertEqual(replay_result.github_result.pull_request_numbers, (3,))
-            self.assertIn(1, first_result.github_result.issue_numbers)
-            self.assertIn(1, replay_result.github_result.issue_numbers)
-            self.assertNotIn(2, first_result.github_result.issue_numbers)
-            self.assertNotIn(2, replay_result.github_result.issue_numbers)
-
-            combined_statements = tuple(first_result.statements) + tuple(replay_result.statements)
-            associated_rows = _github_commit_link_rows(combined_statements, "ASSOCIATED_WITH_PR")
-            references_rows = _github_commit_link_rows(combined_statements, "REFERENCES_ISSUE")
-
-            self.assertTrue(
-                any(
-                    row["commit_sha"] == first_commit and row["target_node_id"] == "github:pr:live-demo:3"
-                    for row in associated_rows
-                )
-            )
+            combined_queries = "\n".join(statement.query for statement in (*first_result.statements, *replay_result.statements))
+            self.assertNotIn("GitHubEntity", combined_queries)
             self.assertTrue(
                 any(
                     row["commit_sha"] == first_commit and row["target_node_id"] == "github:issue:live-demo:1"

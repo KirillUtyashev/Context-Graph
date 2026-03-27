@@ -2,7 +2,6 @@ import io
 import asyncio
 import json
 import os
-import string
 from typing import Any, Dict
 
 import boto3
@@ -35,7 +34,7 @@ def _parse_lambda_url_response(resp_json: Dict[str, Any]) -> Dict[str, Any]:
     return resp_json
 
 
-async def _call_retrieve_lambda(prompt: string) -> Dict[str, Any]:
+async def _call_retrieve_lambda(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Calls the `lambda_retrieve` Lambda using one of:
     - RETRIEVE_FUNCTION_URL: HTTPS POST (no auth in this project's Terraform)
@@ -47,7 +46,7 @@ async def _call_retrieve_lambda(prompt: string) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             r = await client.post(
                 retrieve_url,
-                json={"prompt": prompt},
+                json=payload,
                 headers={"content-type": "application/json"},
             )
             r.raise_for_status()
@@ -58,7 +57,7 @@ async def _call_retrieve_lambda(prompt: string) -> Dict[str, Any]:
         # Match Lambda Function URL event shape (what the current lambda expects long-term)
         payload_obj = {
             "headers": {"content-type": "application/json"},
-            "body": json.dumps({"prompt": prompt}),
+            "body": json.dumps(payload),
         }
         payload_bytes = json.dumps(payload_obj).encode("utf-8")
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
@@ -108,10 +107,75 @@ def create_app():
         This tool forwards the current user prompt to the `lambda_retrieve` 
         Lambda, and returns whatever context bundle it responds with.
         """
-        return await _call_retrieve_lambda(prompt=prompt)
+        return await _call_retrieve_lambda({"prompt": prompt})
+
+    @mcp.tool
+    async def search_code(
+        query: str,
+        project: str | None = None,
+        file_pattern: str | None = None,
+        limit: int | None = None,
+        regex: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Grep-like text search within indexed project files.
+
+        This interface is intended to replace `search_graph` for query-time code lookup.
+        """
+        return await _call_retrieve_lambda(
+            {
+                "tool": "search_code",
+                "query": query,
+                "project": project,
+                "file_pattern": file_pattern,
+                "limit": limit,
+                "regex": regex,
+            }
+        )
+
+    @mcp.tool
+    async def trace_call_path(
+        function_name: str,
+        project: str | None = None,
+        direction: str | None = None,
+        depth: int | None = None,
+        edge_types: list[str] | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Traverse call relationships to show who calls a function and what it calls.
+        """
+        return await _call_retrieve_lambda(
+            {
+                "tool": "trace_call_path",
+                "function_name": function_name,
+                "project": project,
+                "direction": direction,
+                "depth": depth,
+                "edge_types": edge_types,
+            }
+        )
+
+    @mcp.tool
+    async def get_code_snippet(
+        qualified_name: str,
+        project: str | None = None,
+        include_neighbors: bool | None = None,
+        auto_resolve: bool | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Read source code for a function, class, or symbol by qualified name.
+        """
+        return await _call_retrieve_lambda(
+            {
+                "tool": "get_code_snippet",
+                "qualified_name": qualified_name,
+                "project": project,
+                "include_neighbors": include_neighbors,
+                "auto_resolve": auto_resolve,
+            }
+        )
 
     return mcp.http_app()
 
 
 app = create_app()
-

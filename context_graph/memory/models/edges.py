@@ -25,11 +25,11 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 from typing_extensions import LiteralString
 
-from context_graph.storage.graph.driver import GraphDriver, GraphProvider
+from context_graph.storage.graph import GraphDriver, GraphProvider
 from context_graph.runtime.embedding import EmbedderClient
 from context_graph.memory.errors import EdgeNotFoundError, GroupsEdgesNotFoundError
 from context_graph.memory.helpers import parse_db_date
-from context_graph.storage.graph.models.edges.edge_db_queries import (
+from context_graph.storage.graph import (
     COMMUNITY_EDGE_RETURN,
     EPISODIC_EDGE_RETURN,
     EPISODIC_EDGE_SAVE,

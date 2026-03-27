@@ -173,5 +173,17 @@ class SnapshotDiff:
 class SnapshotApplyResult:
     snapshot: GraphSnapshot
     diff: SnapshotDiff
-    statements_emitted: int
-    statements_executed: int
+    operations_emitted: int
+    operations_applied: int
+
+    @property
+    def statements_emitted(self) -> int:
+        """Compatibility alias for older callers that still say "statements"."""
+
+        return self.operations_emitted
+
+    @property
+    def statements_executed(self) -> int:
+        """Compatibility alias for older callers that still say "statements"."""
+
+        return self.operations_applied

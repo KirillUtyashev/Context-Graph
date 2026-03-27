@@ -17,7 +17,7 @@ limitations under the License.
 from pydantic import BaseModel, ConfigDict
 
 from context_graph.runtime.rerank import CrossEncoderClient
-from context_graph.storage.graph.driver import GraphDriver
+from context_graph.storage.graph import GraphDriver
 from context_graph.runtime.embedding import EmbedderClient
 from context_graph.runtime.llm import LLMClient
 from context_graph.runtime.tracing import Tracer

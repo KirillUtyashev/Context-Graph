@@ -1,7 +1,11 @@
 # MCP Server (Context Graph)
 
 - Exposes an MCP HTTP endpoint at `GET /mcp` (served by `fastmcp`).
-- Provides a single tool, `retrieve_context(prompt: str)`, which forwards the prompt to the `lambda_retrieve` AWS Lambda and returns its response.
+- Provides MCP tools that forward requests to the `lambda_retrieve` AWS Lambda:
+  - `retrieve_context(prompt: str)`
+  - `search_code(query, project?, file_pattern?, limit?, regex?)`
+  - `trace_call_path(function_name, project?, direction?, depth?, edge_types?)`
+  - `get_code_snippet(qualified_name, project?, include_neighbors?, auto_resolve?)`
 - Health check `GET /health`
 
 ## Setup (local)
@@ -52,4 +56,3 @@ curl -sS http://localhost:8000/
 Infrastructure provisions an EC2 instance intended to run this server. Deployment is handled via GitHub Actions + AWS SSM:
 
 - `.github/workflows/deploy-mcp-server.yml` deploys when `mcp_server/**` changes (defaults to `dev`), with manual dispatch for `prod`.
-

@@ -20,20 +20,20 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
 from time import time
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import LiteralString
 
-from context_graph.storage.graph.driver import (
+from context_graph.storage.graph import (
     GraphDriver,
     GraphProvider,
 )
 from context_graph.runtime.embedding import EmbedderClient
 from context_graph.memory.errors import NodeNotFoundError
 from context_graph.memory.helpers import parse_db_date, validate_node_labels
-from context_graph.storage.graph.models.nodes.node_db_queries import (
+from context_graph.storage.graph import (
     COMMUNITY_NODE_RETURN,
     COMMUNITY_NODE_RETURN_NEPTUNE,
     EPISODIC_NODE_RETURN,
