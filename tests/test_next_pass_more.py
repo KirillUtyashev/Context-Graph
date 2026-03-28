@@ -418,14 +418,13 @@ class BackendDriverMoreTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         fake_session = SimpleNamespace(get_credentials=lambda: "creds", region_name="us-east-1")
-        with (
-            patch("context_graph.storage.backend.neptune.driver.boto3.Session", return_value=fake_session),
-            patch("context_graph.storage.backend.neptune.driver.Urllib3AWSV4SignerAuth", return_value="auth"),
-            patch("context_graph.storage.backend.neptune.driver.Urllib3HttpConnection", "http-conn"),
-            patch(
-                "context_graph.storage.backend.neptune.driver.OpenSearch",
-                side_effect=lambda **kwargs: kwargs,
-            ),
+        fake_boto3 = SimpleNamespace(Session=lambda: fake_session)
+        with patch.multiple(
+            "context_graph.storage.backend.neptune.driver",
+            boto3=fake_boto3,
+            Urllib3AWSV4SignerAuth=lambda creds, region, service: "auth",
+            Urllib3HttpConnection="http-conn",
+            OpenSearch=lambda **kwargs: kwargs,
         ):
             client = driver._create_aoss_client(
                 NeptuneConfig(host="neptune-db://db.example", aoss_host="aoss.example", aoss_port=9443)
