@@ -6,6 +6,7 @@ on:
     paths:
       - "context_graph/**"
       - "tests/**"
+      - "vendor/codebase_memory_pipeline/**"
       - "pyproject.toml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
@@ -14,6 +15,7 @@ on:
     paths:
       - "context_graph/**"
       - "tests/**"
+      - "vendor/codebase_memory_pipeline/**"
       - "pyproject.toml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
@@ -93,3 +95,14 @@ jobs:
           git add badges/coverage.svg
           git commit -m "chore: update coverage badge [skip ci]"
           git push
+
+  vendor-codebase-memory-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run vendored codebase memory starter tests
+        working-directory: vendor/codebase_memory_pipeline
+        run: make test-starter
