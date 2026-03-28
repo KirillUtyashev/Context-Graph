@@ -10,6 +10,7 @@ from context_graph.models import GraphSnapshot
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimResolutionService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
@@ -17,6 +18,7 @@ from context_graph.provenance import (
     ObservationKind,
     ObservationMutationPlanner,
 )
+from context_graph.provenance.prompt_context import build_deterministic_code_context
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
 from context_graph.storage.backend import (
     BackendDriver,
@@ -130,6 +132,7 @@ class GitHubIndexer:
         evidence_service: EvidenceExtractionService | None = None,
         claim_validator: ClaimBundleValidator | None = None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
     ) -> None:
@@ -142,12 +145,16 @@ class GitHubIndexer:
         )
         self.claim_validator = claim_validator or ClaimBundleValidator()
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
+        self.claim_resolution_service = claim_resolution_service or (
+            ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
 
@@ -253,12 +260,13 @@ class GitHubIndexer:
             try:
                 extraction = self.claim_extraction_service.extract(
                     planned.observation,
+                    code_context=build_deterministic_code_context(
+                        planned.observation,
+                        snapshot=snapshot,
+                    ),
                     source_context={
-                        "source_kind": planned.source.source_kind,
-                        "source_record_type": planned.source.source_record_type,
-                        "source_id": planned.source.source_id,
-                        "source_display_name": planned.source.display_name,
-                        "observation_metadata": dict(planned.observation.metadata),
+                        "pull_request_number": planned.observation.metadata.get("pull_request_number"),
+                        "issue_number": planned.observation.metadata.get("issue_number"),
                     },
                 )
             except Exception:
@@ -328,6 +336,11 @@ class GitHubIndexer:
         for number in sorted(linked_issues):
             issue_payloads[number] = self.github_api.get_issue(owner, repo_name, number)
 
+        latest_commit_by_pr: dict[int, str] = {}
+        for commit_sha in commit_shas:
+            for pr_number in commit_to_prs.get(commit_sha, ()):
+                latest_commit_by_pr[pr_number] = commit_sha
+
         entities: dict[str, GitHubEntity] = {}
         project_links: dict[tuple[str, str], GitHubProjectLink] = {}
         commit_links: dict[tuple[str, str, str], GitHubCommitLink] = {}
@@ -366,6 +379,7 @@ class GitHubIndexer:
                     payload=pr,
                     author_login=pr_author_login,
                     body_text=pr_body_text,
+                    anchor_revision_id=latest_commit_by_pr.get(number),
                 ),
             )
             for review in self.github_api.list_pull_request_reviews(owner, repo_name, number):
@@ -380,6 +394,7 @@ class GitHubIndexer:
                         payload=review,
                         author_login=review_author_login,
                         body_text=review_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
             for comment in self.github_api.list_pull_request_review_comments(owner, repo_name, number):
@@ -394,6 +409,7 @@ class GitHubIndexer:
                         payload=comment,
                         author_login=comment_author_login,
                         body_text=comment_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
             for comment in self.github_api.list_issue_comments(owner, repo_name, number):
@@ -408,6 +424,7 @@ class GitHubIndexer:
                         payload=comment,
                         author_login=comment_author_login,
                         body_text=comment_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
 
@@ -519,6 +536,7 @@ def _build_pull_request_body_observation_source(
     payload: Mapping[str, Any],
     author_login: str | None,
     body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     number = int(payload["number"])
     if not body_text:
@@ -541,6 +559,7 @@ def _build_pull_request_body_observation_source(
             "pull_request_number": number,
             "url": payload.get("html_url"),
             "state": payload.get("state"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -614,6 +633,7 @@ def _build_review_observation_source(
     payload: Mapping[str, Any],
     author_login: str | None,
     body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     review_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
@@ -643,6 +663,7 @@ def _build_review_observation_source(
             "review_state": payload.get("state"),
             "commit_id": payload.get("commit_id"),
             "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -655,6 +676,7 @@ def _build_review_comment_observation_source(
     payload: Mapping[str, Any],
     author_login: str | None,
     body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
@@ -685,6 +707,7 @@ def _build_review_comment_observation_source(
             "commit_id": payload.get("commit_id"),
             "pull_request_review_id": payload.get("pull_request_review_id"),
             "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -736,6 +759,7 @@ def _build_pull_request_issue_comment_observation_source(
     payload: Mapping[str, Any],
     author_login: str | None,
     body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
@@ -763,6 +787,7 @@ def _build_pull_request_issue_comment_observation_source(
             "pull_request_number": pull_number,
             "comment_id": comment_id,
             "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 

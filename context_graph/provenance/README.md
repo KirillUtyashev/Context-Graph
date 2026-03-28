@@ -1,204 +1,431 @@
-# Provenance Fact Invalidation
+# Claim-Centric Provenance Pipeline
 
-This document describes the current "fact invalidation before claim nodes" implementation in `context_graph/provenance`.
+This directory contains the provenance layer that turns raw authored observations
+into grounded claims, evidence, and claim relations.
 
-## Why this exists
+The current system is claim-centric:
 
-The provenance pipeline already extracts observations, validates claim bundles, and persists evidence records. What it did not previously do was handle the case where a newly ingested fact contradicts the current evidence for the same grounded target.
+- observations are the raw source records
+- extraction produces claim candidates plus exact supporting evidence
+- validation filters and grounds those candidates deterministically
+- claim planning reconciles new claims against existing claims
+- evidence is attached to claims, not treated as the top-level fact model
 
-Until first-class `Claim` nodes exist, we treat each validated claim bundle as a provisional fact carried by its `EvidenceRecord`s. That gives us a place to:
+Claim nodes are now the authoritative layer for currentness, reconciliation,
+and invalidation. New evidence writes are lean: they keep only source-bound
+support data plus claim attachments. Legacy evidence rows are still supported
+for backfill and compatibility reads.
 
-- preserve contradictory history instead of overwriting it
-- mark older evidence as no longer current
-- connect newer winning evidence to older losing evidence with `SUPERSEDES`
+## Core Objects
 
-This implementation is intentionally narrow and conservative.
+### Observation
 
-## Current scope
+An `Observation` is a single raw authored artifact, for example:
 
-V1 invalidation only runs when all of the following are true:
+- a commit message
+- a GitHub PR body
+- a GitHub issue body
+- a PR review
+- a review comment
+- an issue comment
 
-- the facts are in the same repo
-- the facts share the same `claim_kind`
-- the evidence overlaps on grounded `ABOUT` targets
-- the existing evidence is still current
+Observations are created outside this package by the ingestion entrypoints and
+passed into provenance as source-local text plus metadata.
 
-Conflict resolution is recency-based:
+### Claim
 
-- newer `observed_at` wins
-- if timestamps tie, the newly ingested fact wins
-- if either timestamp is missing or unparsable, the newly ingested fact wins
+A `Claim` is a normalized, coding-relevant proposition extracted from one
+observation. Claims are persisted as first-class backend nodes.
 
-Exact duplicates do not invalidate each other. We still keep separate evidence citations.
+Important current claim fields:
 
-## Data model changes
-
-`context_graph/provenance/models.py` extends `EvidenceRecord` with provisional fact state:
-
-- `fact_key`
 - `claim_text`
 - `claim_kind`
-- `claim_confidence`
-- `claim_derivation_kind`
-- `observation_id`
-- `observed_at`
+- `claim_subkind`
+- `canonical_key`
 - `is_current`
+- `first_observed_at`
+- `latest_observed_at`
 - `invalidated_at`
-- `invalidated_by_fact_key`
-- `invalidated_by_observation_id`
+- `invalidated_by_claim_id`
 
-These fields are mirrored onto both backend node properties and evidence search documents so later retrieval code can distinguish current evidence from historical evidence without losing provenance.
+Claims also keep stance information in metadata:
 
-The same module also adds:
+- `assertion_status`
+- `claim_frame`
 
-- `PersistedEvidenceRecord`: one hydrated evidence record plus its grounded `ABOUT` targets
-- `PersistedEvidenceFact`: one current fact candidate aggregated from one or more persisted evidence records
+### Evidence
 
-## Main components
+An `EvidenceRecord` is an exact support item extracted from a single
+observation. Evidence stays source-bound and immutable.
 
-### `EvidenceMutationPlanner`
+Important evidence fields:
 
-`context_graph/provenance/evidence_planner.py` is responsible for turning validated claim bundles into evidence mutation records.
+- `quote_text`
+- `support_source`
+- `span_start` / `span_end`
+- `support_kind`
 
-Key responsibilities:
+Claim-relative semantics now live on the evidence-to-claim attachment:
 
-- prepare evidence records for a validated claim bundle
-- attach provisional fact state to those records
-- mirror fact state onto backend nodes and search docs
-- update existing persisted evidence to `is_current = false`
-- emit `SUPERSEDES` edges in either direction
+- `support_role`
+- `support_rationale`
 
-The planner keeps the evidence layer source-bound: identical facts from different observations are not deduplicated into one record.
+Those are written on `SUPPORTS_CLAIM` edges from evidence to claim.
 
-### `CurrentEvidenceReader`
+## End-to-End Flow
 
-`context_graph/provenance/invalidation.py` contains a backend query helper that loads the newest current evidence candidates for a new fact.
+The runtime flow is:
 
-It filters candidates by:
+1. Build an observation.
+2. Build a sanitized prompt payload for extraction.
+3. Ask the extraction LLM for bounded claim candidates and exact support.
+4. Validate the returned claims and evidence deterministically.
+5. Resolve claim `ABOUT` targets against the current snapshot.
+6. Reconcile each validated claim against existing persisted claims.
+7. Persist claim nodes, evidence nodes, support edges, and claim relations.
 
-- `repo_id`
-- overlapping `ABOUT` target ids
-- `claim_kind`
-- `is_current = true` or missing `is_current`
+### 1. Observation Creation
 
-It also backfills legacy rows when claim fields only exist in `metadata_json` or when `observed_at` has to be recovered from the `DERIVED_FROM` observation node.
-
-### `FactConflictResolutionService`
-
-`context_graph/provenance/services.py` and `context_graph/provenance/prompts/resolve_fact_conflicts.py` define the provenance-local contradiction check.
-
-The service compares:
-
-- one new fact
-- up to ten current fact candidates
-
-The prompt returns only the ids of contradicted current candidates. It does not choose the winner; winner selection stays deterministic in Python.
-
-### `EvidenceInvalidationPlanner`
-
-`context_graph/provenance/invalidation.py` orchestrates the full invalidation flow.
-
-For each validated claim bundle it:
-
-1. prepares the new evidence records
-2. computes the new `fact_key`
-3. loads current persisted fact candidates
-4. runs contradiction resolution
-5. chooses the winner by recency
-6. emits insertion and invalidation mutation plans
-
-## Runtime flow
-
-The current ingestion path for commit and GitHub provenance looks like this:
-
-1. Create an `Observation`.
-2. Run claim-and-evidence extraction.
-3. Validate and ground the resulting claim bundles.
-4. For each validated bundle, prepare evidence records with grounded `ABOUT` targets.
-5. Load current evidence candidates that match the new bundle's repo, claim kind, and grounded targets.
-6. Exclude exact duplicates by `fact_key`.
-7. Ask the contradiction resolver which current candidates are actually contradicted.
-8. If there are no contradicted current facts, insert the new evidence as current.
-9. If a contradicted current fact is strictly newer, insert the new evidence already invalidated and connect the existing winner to the new loser with `SUPERSEDES`.
-10. Otherwise, insert the new evidence as current, invalidate the older contradictory evidence, and connect the new winner to the old losers with `SUPERSEDES`.
-
-This means history is append-only at the conceptual level: we preserve old evidence, but we stop treating it as current.
-
-## Conflict semantics
-
-The implementation intentionally separates "is this contradictory?" from "which side wins?"
-
-### Contradiction detection
-
-Contradiction detection is handled by the LLM prompt and only decides whether the new fact conflicts with a current candidate.
-
-### Winner selection
-
-Winner selection is deterministic:
-
-- existing fact wins only if its `observed_at` is strictly newer than the new observation
-- otherwise the new fact wins
-
-That policy makes ties and incomplete timestamps resolve in favor of the new ingest, which keeps the pipeline simple and predictable for now.
-
-## Legacy compatibility
-
-This implementation is designed to work with evidence that predates the new top-level fact fields.
-
-The reader treats missing `is_current` as current and attempts to recover:
-
-- `claim_text`
-- `claim_kind`
-- `claim_confidence`
-- `claim_derivation_kind`
-- `observation_id`
-- `observed_at`
-
-from existing metadata and observation links.
-
-No migration is required for the feature to work.
-
-## Fail-open behavior
-
-The invalidation layer is deliberately non-blocking.
-
-- If there is no readable backend driver, we skip persisted-current lookup and insert the new evidence unchanged.
-- If contradiction resolution fails, we insert the new evidence unchanged.
-- If no grounded `ABOUT` targets are available, invalidation does not run.
-
-This keeps provenance ingestion usable even when the invalidation path cannot execute.
-
-## Ingestion integration
-
-The invalidation planner is wired into both provenance ingestion entry points:
+Observation creation happens in the ingestion entrypoints:
 
 - `context_graph/ingestion/commit_indexing.py`
 - `context_graph/ingestion/git/github_indexer.py`
 
-Both flows now report invalidation counts, and the CLI surfaces those counts through `evidence_invalidated`.
+Those layers construct the raw `Observation` and also provide bounded
+deterministic context such as:
 
-## Tests covered
+- changed files
+- PR number and title
+- issue number and title
+- mentioned or touched code entities from the current snapshot
 
-`tests/test_provenance.py` includes coverage for the main behaviors:
+### 2. Sanitized Prompt Context
 
-- loading legacy evidence rows whose claim fields only live in `metadata_json`
-- newer contradictory fact invalidates older current evidence
-- older historical fact is inserted already invalidated
-- exact duplicate `fact_key` does not invalidate anything
-- different grounded `ABOUT` targets do not invalidate anything
-- commit ingestion reports invalidated evidence counts
-- GitHub ingestion reports invalidated evidence counts
-- `SUPERSEDES` edges are emitted in the expected direction
+Extraction prompt payloads are built in `prompt_context.py`.
 
-## What this does not do yet
+We do not send raw `Observation` dataclasses or backend internals to the LLM.
+Instead we build a compact prompt DTO with three parts:
 
-This implementation does not yet add first-class `Claim` nodes.
+- `observation`
+- `source_context`
+- `code_context`
 
-It also does not yet implement:
+The extraction LLM currently sees only:
 
-- authority-based winner selection
-- explicit contradiction edges between claims
-- retrieval APIs that filter to only current authoritative evidence
-- cross-observation fact canonicalization beyond the provisional `fact_key`
+- observation:
+  - `source_type`
+  - `title`
+  - `text`
+  - `observed_at`
+- source context:
+  - commit `changed_files`
+  - PR `pr_number`, `pr_title`
+  - issue `issue_number`, `issue_title`
+- code context:
+  - up to 10 `changed_files`
+  - up to 8 `mentioned_entities`
+  - up to 8 `touched_entities`
 
-Those are the next layer on top of this groundwork.
+We intentionally do not pass internal ids such as:
+
+- `observation_id`
+- `repo_id`
+- `source_id`
+- graph record ids
+- raw metadata blobs
+
+The goal is to let the model classify and scope the observation without asking
+it to reason over internal storage details.
+
+### 3. Claim + Evidence Extraction
+
+`ClaimEvidenceExtractionService` in `services.py` chooses a source-specific prompt
+from `prompts/extract_claims_and_evidence.py`.
+
+The extraction prompt asks for small, source-local claim instances with:
+
+- a normalized `claim_text`
+- an ontology-aligned `claim_subkind`
+- a coarse compatibility `claim_kind`
+- `assertion_status`
+- `claim_frame`
+- 1 to 3 exact support items
+
+Each support item must come from the observation title or text and includes:
+
+- `quote_text`
+- `support_source`
+- `support_kind`
+- `support_role`
+- `support_rationale`
+
+The prompt explicitly tells the model:
+
+- not to infer repo-wide truths
+- not to merge across documents
+- not to treat context as quoted evidence
+- to keep authored stance separate from ground truth
+
+### 4. Deterministic Validation and Grounding
+
+`ClaimBundleValidator` in `validation.py` is the hard gate before graph writes.
+We do not run a second LLM for validation.
+
+Validation currently checks:
+
+- allowed enums for `claim_kind`, `claim_subkind`, `assertion_status`,
+  `claim_frame`, `evidence_kind`, `support_kind`, `support_source`,
+  and `support_role`
+- the claim has 1 to 3 support items
+- each support item has a non-empty `support_rationale`
+- support quotes actually match `observation.text` or `observation.title`
+- title-sourced support cannot use spans
+- speculative language is rejected for `confirmed` and `observed` claims
+
+If a snapshot is available, validation also resolves `about_hints` with
+`SnapshotCodeResolver` and produces:
+
+- `resolved_about_record_ids`
+- `unresolved_about_hints`
+
+At the end of validation we have a `ValidatedClaimBundle`, which is the
+deterministic input to claim persistence.
+
+### 5. Claim Reconciliation and Planning
+
+`ClaimMutationPlanner` in `claim_planner.py` is the main claim-ingestion layer.
+
+For each validated claim bundle it:
+
+1. prepares evidence records with grounded `ABOUT` targets
+2. computes the claim `canonical_key`
+3. loads current candidate claims from the backend
+4. backfills legacy evidence-carried claims into temporary claim candidates
+5. checks for an exact canonical-key match
+6. if needed, asks the claim-resolution LLM about a bounded candidate set
+7. applies deterministic acceptance and winner-selection rules
+8. emits mutation plans for claims, evidence, and relations
+
+#### Canonical Identity
+
+Claim identity is currently:
+
+- `claim_kind`
+- canonicalized `claim_text`
+- sorted grounded `about_record_ids`
+
+This becomes `canonical_key`.
+
+`assertion_status` and `claim_frame` do not participate in identity.
+
+#### Candidate Retrieval
+
+Candidate retrieval is deterministic and local. Candidates are restricted to the
+same repo and same coarse `claim_kind`, then filtered by scope:
+
+- overlapping `ABOUT` targets when we have them
+- otherwise same source scope such as PR or issue
+
+Candidates are ranked by:
+
+- `ABOUT` overlap
+- lexical overlap of normalized claim text
+- recency
+
+Only a small candidate set is sent to the resolution LLM.
+
+#### Claim Resolution
+
+`ClaimResolutionService` in `services.py` uses
+`prompts/relate_claims.py` to compare one new claim against bounded existing
+candidates.
+
+The relation set is closed:
+
+- `same_as`
+- `refines`
+- `contradicts`
+- `explains`
+- `supersedes`
+- `mitigates`
+- `depends_on`
+- `supports`
+- `unrelated`
+
+Important behavior:
+
+- only `high` confidence results are accepted
+- `same_as` is a resolution outcome, not a persisted graph edge
+- accepted non-`same_as` results become real claim-to-claim edges
+
+If no accepted claim-resolution result exists and the legacy conflict resolver is
+configured, the planner can fall back to the older contradiction-only prompt in
+`prompts/resolve_fact_conflicts.py` for migration compatibility.
+
+### 6. Persistence
+
+Persistence currently writes:
+
+- claim nodes
+- evidence nodes
+- `ABOUT` edges from claim to grounded code targets
+- `ABOUT` edges from evidence to grounded code targets
+- `DERIVED_FROM` edges from claim to observation
+- `DERIVED_FROM` edges from evidence to observation
+- `SUPPORTS_CLAIM` edges from evidence to claim
+- claim-to-claim relation edges
+
+Persisted claim-to-claim edge types are:
+
+- `REFINES`
+- `CONTRADICTS`
+- `EXPLAINS`
+- `SUPERSEDES`
+- `MITIGATES`
+- `DEPENDS_ON`
+- `SUPPORTS`
+
+`SUPPORTS_CLAIM` edges currently carry:
+
+- `support_kind`
+- `support_source`
+- `support_role`
+- `support_rationale`
+- `assertion_status`
+- `claim_frame`
+
+## Current Invalidation Semantics
+
+Invalidation now happens at the claim level, not the evidence level.
+
+When a new claim is accepted as contradicting or superseding an older current
+claim:
+
+- the old claim is persisted with `is_current = false`
+- the new claim stays current if it is newer
+- if the new claim is older, the new claim is inserted already non-current
+- evidence remains immutable provenance
+
+This means we preserve:
+
+- the old claim
+- the new claim
+- the claim-to-claim contradiction or supersession relation
+- the exact evidence supporting each side
+
+`rejected` claims are stored as historical, non-current claims and do not
+participate in conflict resolution.
+
+## Migration State
+
+The migration is now claim-first for new writes.
+
+Current behavior:
+
+- new claim nodes carry identity, currentness, and invalidation state
+- new evidence nodes store only source-bound support fields
+- new evidence-to-claim semantics live on `SUPPORTS_CLAIM`
+- legacy evidence rows with embedded claim fields are still readable for backfill
+
+Why legacy parsing still exists:
+
+- older persisted evidence needs to reconcile into claim nodes
+- compatibility readers still need to understand pre-claim data already in the graph
+
+The intended steady state is now mostly in place:
+
+- claim identity and currentness live on claim nodes
+- evidence stores exact support only
+- claim-relative support meaning lives on `SUPPORTS_CLAIM`
+
+## What the LLM Does vs. What Stays Deterministic
+
+### LLM responsibilities
+
+- extract candidate claims from one observation
+- extract exact support items from that observation
+- classify claim subkind and stance
+- propose semantic relations between a new claim and bounded candidates
+
+### Deterministic responsibilities
+
+- observation creation
+- prompt sanitization
+- source and code context construction
+- evidence quote/span validation
+- code/entity grounding
+- candidate retrieval
+- canonical-key construction
+- graph writes
+- confidence thresholds
+- current/non-current winner selection
+
+This is the core design principle of the current pipeline:
+
+- the LLM proposes
+- the pipeline verifies and writes
+
+## Debugging
+
+Set:
+
+```bash
+CONTEXT_GRAPH_DEBUG_PROVENANCE_LLM=1
+```
+
+When enabled, provenance emits structured debug logs to stderr through
+`debug.py`.
+
+Current debug events include:
+
+- `llm_request`
+- `llm_response`
+- `llm_error`
+- `claim_validation`
+- `claim_resolution`
+- `claim_resolution_compat`
+
+This is the easiest way to inspect:
+
+- the sanitized extraction prompt payload
+- the parsed LLM output
+- validation rejection reasons
+- accepted claim-resolution outcomes
+
+## Main Files
+
+- `models.py`
+  - domain models for observations, evidence, claims, and LLM responses
+- `prompt_context.py`
+  - sanitized extraction prompt payload builders
+- `services.py`
+  - LLM-facing service boundaries
+- `validation.py`
+  - deterministic claim and evidence validation
+- `evidence_planner.py`
+  - evidence nodes and evidence-to-claim attachment planning
+- `claim_planner.py`
+  - claim persistence, reconciliation, backfill, and relation planning
+- `invalidation.py`
+  - compatibility wrapper for claim-level invalidation flows
+- `schema_registry.py`
+  - allowed ontology enums and compatibility mappings
+- `prompts/extract_claims_and_evidence.py`
+  - source-specific extraction prompts
+- `prompts/relate_claims.py`
+  - bounded claim-resolution prompts
+- `prompts/resolve_fact_conflicts.py`
+  - legacy contradiction-only compatibility prompt
+
+## What Is Not Done Yet
+
+The current implementation is intentionally conservative. We do not yet have:
+
+- embedding-based candidate retrieval
+- a separate canonical claim promotion layer beyond the current `canonical_key`
+- read APIs fully switched over to claim-first access patterns
+- complete removal of legacy evidence-field readers once old rows no longer matter
+- richer authority models for deciding which claim should remain current
+
+Those are the next layers on top of the current claim-centric ingestion path.

@@ -1307,11 +1307,19 @@ class DeterministicIngestionTests(unittest.TestCase):
             "MENTIONS",
             {edge.relationship_type for edge in result.observation_operations.upsert_edges},
         )
-        self.assertEqual(result.evidence_operations.operation_count(), 4)
+        self.assertEqual(result.evidence_operations.operation_count(), 9)
+        self.assertIn(
+            "SUPPORTS_CLAIM",
+            {edge.relationship_type for edge in result.evidence_operations.upsert_edges},
+        )
+        self.assertEqual(
+            {node.record_type for node in result.evidence_operations.upsert_nodes},
+            {"claim", "evidence_record"},
+        )
         self.assertEqual(result.claim_candidates_extracted, 1)
         self.assertEqual(result.claim_candidates_validated, 1)
         self.assertEqual(result.claim_candidates_rejected, 0)
-        self.assertEqual(result.operations.operation_count(), 26)
+        self.assertEqual(result.operations.operation_count(), 31)
         self.assertEqual(
             llm_client.calls[0]["prompt_name"],
             "provenance.extract_claims_and_evidence.from_commit_message.v1",

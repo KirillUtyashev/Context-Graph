@@ -43,8 +43,9 @@ EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GENERIC_OBSERVATION = ProvenancePromptMetadata(
 def from_commit_message(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one git commit message. "
-            "Only return claims that are directly supported by the observation text."
+            "You extract grounded candidate claim instances and supporting evidence from one git commit message. "
+            "Focus on code changes, fixes, mitigations, scope, constraints, and linked intent. "
+            "Treat the message as an authored statement about the change, not as an excuse to infer unstated repo-wide truths."
         ),
         context=context,
     )
@@ -53,8 +54,9 @@ def from_commit_message(context: dict[str, Any]) -> list[Message]:
 def from_github_pr_body(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one GitHub pull request body. "
-            "Focus on explicit change descriptions, constraints, rollout notes, and linked technical context."
+            "You extract grounded candidate claim instances and supporting evidence from one GitHub pull request body. "
+            "Focus on change descriptions, rationale, constraints, rollout notes, migration/dependency details, and claimed fixes. "
+            "Treat the PR body as an authored statement, not ground truth."
         ),
         context=context,
     )
@@ -63,8 +65,9 @@ def from_github_pr_body(context: dict[str, Any]) -> list[Message]:
 def from_github_issue_body(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one GitHub issue body. "
-            "Focus on explicit bug reports, reproduction details, desired behavior, and scope statements."
+            "You extract grounded candidate claim instances and supporting evidence from one GitHub issue body. "
+            "Focus on reported bugs, reproductions, expected behavior, requirements, and impact scope. "
+            "Treat the issue body as a report, not a confirmation that the reported condition is true."
         ),
         context=context,
     )
@@ -73,8 +76,9 @@ def from_github_issue_body(context: dict[str, Any]) -> list[Message]:
 def from_github_pr_review(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one GitHub pull request review. "
-            "Focus on explicit approval rationale, requested changes, blocking concerns, and technical feedback."
+            "You extract grounded candidate claim instances and supporting evidence from one GitHub pull request review. "
+            "Focus on objections, requested changes, approvals, blocking concerns, invariant violations, and review rationale. "
+            "Treat the review as reviewer feedback rather than an objective statement of repository truth."
         ),
         context=context,
     )
@@ -83,8 +87,8 @@ def from_github_pr_review(context: dict[str, Any]) -> list[Message]:
 def from_github_pr_review_comment(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one GitHub pull request review comment. "
-            "Focus on explicit line-level feedback, concerns, and suggested changes."
+            "You extract grounded candidate claim instances and supporting evidence from one GitHub pull request review comment. "
+            "Focus on line-level objections, requested changes, invariant violations, concerns, and suggested fixes."
         ),
         context=context,
     )
@@ -93,8 +97,8 @@ def from_github_pr_review_comment(context: dict[str, Any]) -> list[Message]:
 def from_github_issue_comment(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one GitHub issue comment. "
-            "Focus on explicit reproductions, confirmations, scope clarifications, and workaround details."
+            "You extract grounded candidate claim instances and supporting evidence from one GitHub issue comment. "
+            "Focus on confirmations, workarounds, scope narrowing, correction statements, additional reproductions, and follow-up rationale."
         ),
         context=context,
     )
@@ -103,8 +107,8 @@ def from_github_issue_comment(context: dict[str, Any]) -> list[Message]:
 def from_generic_observation(context: dict[str, Any]) -> list[Message]:
     return _build_messages(
         system_prompt=(
-            "You extract candidate claims and their supporting evidence from one raw provenance observation. "
-            "Only return claims that are explicitly supported by the provided source text."
+            "You extract grounded candidate claim instances and supporting evidence from one raw provenance observation. "
+            "Only return claims explicitly supported by the provided observation."
         ),
         context=context,
     )
@@ -122,13 +126,48 @@ def _build_messages(*, system_prompt: str, context: dict[str, Any]) -> list[Mess
         f"{to_prompt_json(code_context, indent=2)}\n\n"
         "Optional source context:\n"
         f"{to_prompt_json(source_context, indent=2)}\n\n"
-        "Extract up to 5 candidate claims useful for future coding tasks. For each claim, extract the exact "
-        "supporting evidence from the observation and keep it tightly grounded.\n\n"
-        f"Allowed claim kinds: {sorted(registry.claim_kinds)}\n"
+        "Extract up to 5 candidate claim instances from this single observation.\n\n"
+        "Rules:\n"
+        "- Only extract claims explicitly supported by the observation.\n"
+        "- Keep independent facts separate; do not merge multiple claims into one summary.\n"
+        "- Do not infer repo-wide truths, hidden intent, or unstated causality.\n"
+        "- If the observation contains no strong coding-relevant claim, return an empty list.\n"
+        "- Coarse claim_kind is derived by the pipeline; focus on claim_subkind, assertion_status, claim_frame, and exact support.\n"
+        "- Evidence may only come from observation text or title. Do not quote code_context or source_context.\n"
+        "- Every claim must include 1-3 exact supporting evidence items.\n"
+        "- For each support item, explain briefly how that quote supports this claim.\n"
+        "- If the observation explicitly corrects or rejects an earlier explanation, emit the replacement claim normally.\n"
+        "- Emit a rejected claim only when the rejected proposition is explicitly stated in the observation.\n"
+        "- If the text says maybe, might, I think, or similar, do not emit the claim as confirmed or observed.\n\n"
+        "Prefer claim instances of these subkinds:\n"
+        "- bug_or_regression\n"
+        "- fix_or_mitigation\n"
+        "- invariant_or_constraint\n"
+        "- desired_behavior_or_requirement\n"
+        "- reviewer_objection_or_requested_change\n"
+        "- test_result_or_validation\n"
+        "- rollout_migration_or_dependency\n"
+        "- ownership_or_impact_scope\n\n"
+        f"Allowed coarse claim kinds: {sorted(registry.claim_kinds)}\n"
+        f"Allowed claim subkinds: {sorted(registry.claim_subkinds)}\n"
+        f"Allowed assertion statuses: {sorted(registry.assertion_statuses)}\n"
+        f"Allowed claim frames: {sorted(registry.claim_frames)}\n"
         f"Allowed evidence kinds: {sorted(registry.evidence_kinds)}\n"
         f"Allowed support kinds: {sorted(registry.support_kinds)}\n"
+        f"Allowed support sources: {sorted(registry.support_sources)}\n"
+        f"Allowed support roles: {sorted(registry.support_roles)}\n"
         f"Allowed confidence levels: {sorted(registry.confidence_levels)}\n\n"
-        "Each claim must include supporting evidence spans and must not be speculative."
+        "For each claim:\n"
+        "1. Write a short normalized claim text.\n"
+        "2. Choose one claim_subkind.\n"
+        "3. Choose one assertion_status.\n"
+        "4. Choose one claim_frame.\n"
+        "5. Provide 1-3 exact supporting evidence items.\n"
+        "6. For each support item, set support_source to observation_text or observation_title.\n"
+        "7. For each support item, choose one support_role and write a short support_rationale.\n"
+        "8. Use spans only for observation_text support; keep title support spans null.\n"
+        "9. summary_text is optional legacy context and should not be used instead of support_rationale.\n"
+        "10. Assign confidence based only on how directly the observation supports the claim."
     )
     return [
         Message(role="system", content=system_prompt),

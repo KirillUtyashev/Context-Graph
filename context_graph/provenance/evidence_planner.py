@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from os.path import basename
 
+from context_graph.code_identity import SnapshotCodeResolver
 from context_graph.models import GraphSnapshot
 from context_graph.storage.backend import (
     EdgeRecord,
@@ -15,15 +17,13 @@ from context_graph.storage.backend import (
     merge_mutation_plans,
 )
 
-from .canonicalization import canonical_claim_key
 from .grounding import resolve_about_record_ids
-from .hint_enrichment import collect_grounding_hints
+from .hint_enrichment import collect_grounding_hints, collect_observation_grounding_hints
 from .models import (
     EvidenceCandidate,
     EvidenceExtractionResponse,
     EvidenceRecord,
     Observation,
-    PersistedEvidenceRecord,
     evidence_record_id,
 )
 from .validation import ClaimValidationResult, ValidatedClaimBundle
@@ -35,6 +35,10 @@ class PreparedEvidenceRecord:
 
     evidence: EvidenceRecord
     about_record_ids: tuple[str, ...] = ()
+    support_role: str = "provides_context"
+    support_rationale: str = ""
+    assertion_status: str | None = None
+    claim_frame: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,9 @@ class EvidenceFactState:
     fact_key: str | None = None
     claim_text: str | None = None
     claim_kind: str | None = None
+    claim_subkind: str | None = None
+    assertion_status: str | None = None
+    claim_frame: str | None = None
     claim_confidence: str | None = None
     claim_derivation_kind: str | None = None
     observation_id: str | None = None
@@ -109,10 +116,6 @@ class EvidenceMutationPlanner:
         bundle: ValidatedClaimBundle,
         snapshot: GraphSnapshot | None = None,
     ) -> MutationPlan:
-        fact_key = canonical_claim_key(
-            claim_kind=bundle.claim_kind,
-            claim_text=bundle.claim_text,
-        )
         return self.plan_prepared_records(
             observation=observation,
             prepared_records=self.prepare_validated_claim_bundle(
@@ -121,11 +124,6 @@ class EvidenceMutationPlanner:
                 snapshot=snapshot,
             ),
             fact_state=EvidenceFactState(
-                fact_key=fact_key,
-                claim_text=bundle.claim_text,
-                claim_kind=bundle.claim_kind,
-                claim_confidence=bundle.confidence,
-                claim_derivation_kind=bundle.derivation_kind,
                 observation_id=observation.observation_id,
                 observed_at=observation.observed_at,
             ),
@@ -154,20 +152,25 @@ class EvidenceMutationPlanner:
             span_start=candidate.span_start,
             span_end=candidate.span_end,
             support_kind=candidate.support_kind,
+            support_source=candidate.support_source,
             observation_id=observation.observation_id,
             observed_at=observation.observed_at,
-            metadata=candidate.metadata.model_dump(),
+            metadata={
+                **candidate.metadata.model_dump(),
+                "support_source": candidate.support_source,
+            },
         )
-        about_record_ids = resolve_about_record_ids(
-            snapshot,
-            collect_grounding_hints(
-                observation=observation,
-                evidence=candidate,
-            ),
+        about_record_ids = self._resolve_prepared_about_record_ids(
+            observation=observation,
+            claim=None,
+            evidence=candidate,
+            snapshot=snapshot,
         )
         return PreparedEvidenceRecord(
             evidence=evidence,
             about_record_ids=about_record_ids,
+            support_role=getattr(candidate, "support_role", "provides_context"),
+            support_rationale=self._support_rationale(candidate),
         )
 
     def prepare_validated_claim_bundle(
@@ -187,7 +190,6 @@ class EvidenceMutationPlanner:
                     quote_text=candidate.quote_text,
                     span_start=candidate.span_start,
                     span_end=candidate.span_end,
-                    claim_text=bundle.claim_text,
                 ),
                 repo_id=observation.repo_id,
                 evidence_kind=candidate.evidence_kind,
@@ -196,35 +198,27 @@ class EvidenceMutationPlanner:
                 span_start=candidate.span_start,
                 span_end=candidate.span_end,
                 support_kind=candidate.support_kind,
-                fact_key=canonical_claim_key(
-                    claim_kind=bundle.claim_kind,
-                    claim_text=bundle.claim_text,
-                ),
-                claim_text=bundle.claim_text,
-                claim_kind=bundle.claim_kind,
-                claim_confidence=bundle.confidence,
-                claim_derivation_kind=bundle.derivation_kind,
+                support_source=candidate.support_source,
                 observation_id=observation.observation_id,
                 observed_at=observation.observed_at,
                 metadata={
                     **candidate.metadata.model_dump(),
-                    "claim_text": bundle.claim_text,
-                    "claim_kind": bundle.claim_kind,
-                    "claim_confidence": bundle.confidence,
-                    "claim_derivation_kind": bundle.derivation_kind,
+                    "support_source": candidate.support_source,
                 },
             )
             prepared.append(
                 PreparedEvidenceRecord(
                     evidence=evidence,
-                    about_record_ids=resolve_about_record_ids(
-                        snapshot,
-                        collect_grounding_hints(
-                            observation=observation,
-                            claim=bundle,
-                            evidence=candidate,
-                        ),
+                    about_record_ids=self._resolve_prepared_about_record_ids(
+                        observation=observation,
+                        claim=bundle,
+                        evidence=candidate,
+                        snapshot=snapshot,
                     ),
+                    support_role=candidate.support_role,
+                    support_rationale=self._support_rationale(candidate),
+                    assertion_status=bundle.assertion_status,
+                    claim_frame=bundle.claim_frame,
                 )
             )
         return tuple(prepared)
@@ -235,6 +229,7 @@ class EvidenceMutationPlanner:
         observation: Observation,
         prepared_records: tuple[PreparedEvidenceRecord, ...] | list[PreparedEvidenceRecord],
         fact_state: EvidenceFactState,
+        claim_record_id: str | None = None,
         supersedes_record_ids: tuple[str, ...] | list[str] = (),
         superseded_by_record_ids: tuple[str, ...] | list[str] = (),
     ) -> MutationPlan:
@@ -244,46 +239,12 @@ class EvidenceMutationPlanner:
                     observation=observation,
                     prepared=prepared,
                     fact_state=fact_state,
+                    claim_record_id=claim_record_id,
                     supersedes_record_ids=tuple(supersedes_record_ids),
                     superseded_by_record_ids=tuple(superseded_by_record_ids),
                 )
                 for prepared in prepared_records
             )
-        )
-
-    def plan_existing_record_state_update(
-        self,
-        *,
-        record: PersistedEvidenceRecord,
-        invalidated_at: str | None,
-        invalidated_by_fact_key: str,
-        invalidated_by_observation_id: str,
-    ) -> MutationPlan:
-        evidence = EvidenceRecord(
-            evidence_id=record.evidence.evidence_id,
-            repo_id=record.evidence.repo_id,
-            evidence_kind=record.evidence.evidence_kind,
-            quote_text=record.evidence.quote_text,
-            summary_text=record.evidence.summary_text,
-            span_start=record.evidence.span_start,
-            span_end=record.evidence.span_end,
-            support_kind=record.evidence.support_kind,
-            fact_key=record.evidence.fact_key,
-            claim_text=record.evidence.claim_text,
-            claim_kind=record.evidence.claim_kind,
-            claim_confidence=record.evidence.claim_confidence,
-            claim_derivation_kind=record.evidence.claim_derivation_kind,
-            observation_id=record.evidence.observation_id,
-            observed_at=record.evidence.observed_at,
-            is_current=False,
-            invalidated_at=invalidated_at,
-            invalidated_by_fact_key=invalidated_by_fact_key,
-            invalidated_by_observation_id=invalidated_by_observation_id,
-            metadata=record.evidence.metadata,
-        )
-        return MutationPlan(
-            upsert_nodes=(self._node_record(evidence),),
-            upsert_search_documents=(self._search_document(evidence, observation_kind=None),),
         )
 
     def _plan_prepared_record(
@@ -292,6 +253,7 @@ class EvidenceMutationPlanner:
         observation: Observation,
         prepared: PreparedEvidenceRecord,
         fact_state: EvidenceFactState,
+        claim_record_id: str | None,
         supersedes_record_ids: tuple[str, ...] = (),
         superseded_by_record_ids: tuple[str, ...] = (),
     ) -> MutationPlan:
@@ -304,17 +266,9 @@ class EvidenceMutationPlanner:
             span_start=prepared.evidence.span_start,
             span_end=prepared.evidence.span_end,
             support_kind=prepared.evidence.support_kind,
-            fact_key=fact_state.fact_key or prepared.evidence.fact_key,
-            claim_text=fact_state.claim_text or prepared.evidence.claim_text,
-            claim_kind=fact_state.claim_kind or prepared.evidence.claim_kind,
-            claim_confidence=fact_state.claim_confidence or prepared.evidence.claim_confidence,
-            claim_derivation_kind=fact_state.claim_derivation_kind or prepared.evidence.claim_derivation_kind,
+            support_source=prepared.evidence.support_source,
             observation_id=fact_state.observation_id or prepared.evidence.observation_id,
             observed_at=fact_state.observed_at or prepared.evidence.observed_at,
-            is_current=fact_state.is_current,
-            invalidated_at=fact_state.invalidated_at,
-            invalidated_by_fact_key=fact_state.invalidated_by_fact_key,
-            invalidated_by_observation_id=fact_state.invalidated_by_observation_id,
             metadata=prepared.evidence.metadata,
         )
         derived_from_edge = EdgeRecord(
@@ -339,45 +293,35 @@ class EvidenceMutationPlanner:
             )
             for target_record_id in prepared.about_record_ids
         )
-        supersedes_edges = tuple(
+        support_edge = (
             EdgeRecord(
-                record_id=f"supersedes:{evidence.evidence_id}:{target_record_id}",
-                record_type="supersedes",
+                record_id=f"supports_claim:{evidence.evidence_id}:{claim_record_id}",
+                record_type="supports_claim",
                 repo_id=evidence.repo_id,
                 group_id=evidence.repo_id,
-                relationship_type="SUPERSEDES",
+                relationship_type="SUPPORTS_CLAIM",
                 source_record_id=evidence.evidence_id,
-                target_record_id=target_record_id,
-                properties={
-                    "fact_key": evidence.fact_key,
-                    "claim_kind": evidence.claim_kind,
-                },
+                target_record_id=claim_record_id,
+                properties=_compact_properties(
+                    {
+                        "support_kind": evidence.support_kind,
+                        "support_source": evidence.support_source,
+                        "support_role": prepared.support_role,
+                        "support_rationale": prepared.support_rationale,
+                        "assertion_status": prepared.assertion_status,
+                        "claim_frame": prepared.claim_frame,
+                    }
+                ),
             )
-            for target_record_id in supersedes_record_ids
-        )
-        superseded_by_edges = tuple(
-            EdgeRecord(
-                record_id=f"supersedes:{source_record_id}:{evidence.evidence_id}",
-                record_type="supersedes",
-                repo_id=evidence.repo_id,
-                group_id=evidence.repo_id,
-                relationship_type="SUPERSEDES",
-                source_record_id=source_record_id,
-                target_record_id=evidence.evidence_id,
-                properties={
-                    "fact_key": evidence.fact_key,
-                    "claim_kind": evidence.claim_kind,
-                },
-            )
-            for source_record_id in superseded_by_record_ids
+            if claim_record_id is not None
+            else None
         )
         return MutationPlan(
             upsert_nodes=(self._node_record(evidence),),
             upsert_edges=(
                 derived_from_edge,
                 *about_edges,
-                *supersedes_edges,
-                *superseded_by_edges,
+                *((support_edge,) if support_edge is not None else ()),
             ),
             upsert_search_documents=(self._search_document(evidence, observation_kind=observation.observation_kind.value),),
         )
@@ -386,23 +330,16 @@ class EvidenceMutationPlanner:
         properties = _compact_properties(
             {
                 "evidence_id": evidence.evidence_id,
+                "repo_id": evidence.repo_id,
                 "evidence_kind": evidence.evidence_kind,
                 "quote_text": evidence.quote_text,
                 "summary_text": evidence.summary_text,
                 "span_start": evidence.span_start,
                 "span_end": evidence.span_end,
                 "support_kind": evidence.support_kind,
-                "fact_key": evidence.fact_key,
-                "claim_text": evidence.claim_text,
-                "claim_kind": evidence.claim_kind,
-                "claim_confidence": evidence.claim_confidence,
-                "claim_derivation_kind": evidence.claim_derivation_kind,
+                "support_source": evidence.support_source,
                 "observation_id": evidence.observation_id,
                 "observed_at": evidence.observed_at,
-                "is_current": evidence.is_current,
-                "invalidated_at": evidence.invalidated_at,
-                "invalidated_by_fact_key": evidence.invalidated_by_fact_key,
-                "invalidated_by_observation_id": evidence.invalidated_by_observation_id,
                 "metadata_json": json.dumps(evidence.metadata, sort_keys=True, separators=(",", ":")),
             }
         )
@@ -419,18 +356,10 @@ class EvidenceMutationPlanner:
         properties = _compact_properties(
             {
                 "support_kind": evidence.support_kind,
+                "support_source": evidence.support_source,
                 "source_observation_kind": observation_kind,
-                "fact_key": evidence.fact_key,
-                "claim_text": evidence.claim_text,
-                "claim_kind": evidence.claim_kind,
-                "claim_confidence": evidence.claim_confidence,
-                "claim_derivation_kind": evidence.claim_derivation_kind,
                 "observation_id": evidence.observation_id,
                 "observed_at": evidence.observed_at,
-                "is_current": evidence.is_current,
-                "invalidated_at": evidence.invalidated_at,
-                "invalidated_by_fact_key": evidence.invalidated_by_fact_key,
-                "invalidated_by_observation_id": evidence.invalidated_by_observation_id,
             }
         )
         return SearchDocumentRecord(
@@ -443,6 +372,74 @@ class EvidenceMutationPlanner:
             properties=properties,
         )
 
+    def _resolve_prepared_about_record_ids(
+        self,
+        *,
+        observation: Observation,
+        claim: ValidatedClaimBundle | None,
+        evidence: EvidenceCandidate,
+        snapshot: GraphSnapshot | None,
+    ) -> tuple[str, ...]:
+        about_record_ids = resolve_about_record_ids(
+            snapshot,
+            collect_grounding_hints(
+                observation=observation,
+                claim=claim,
+                evidence=evidence,
+            ),
+        )
+        if about_record_ids or snapshot is None:
+            return about_record_ids
+        return self._fallback_about_record_ids(
+            observation=observation,
+            claim=claim,
+            evidence=evidence,
+            snapshot=snapshot,
+        )
+
+    def _fallback_about_record_ids(
+        self,
+        *,
+        observation: Observation,
+        claim: ValidatedClaimBundle | None,
+        evidence: EvidenceCandidate,
+        snapshot: GraphSnapshot,
+    ) -> tuple[str, ...]:
+        resolver = SnapshotCodeResolver(snapshot)
+        observation_candidates = resolver.resolve_about_hints(
+            tuple(
+                (hint.value, hint.hint_kind.value)
+                for hint in collect_observation_grounding_hints(observation=observation)
+            )
+        )
+        if not observation_candidates:
+            return ()
+        anchor_texts = tuple(
+            text
+            for text in (
+                getattr(claim, "claim_text", None),
+                evidence.quote_text,
+            )
+            if text
+        )
+        if not anchor_texts:
+            return ()
+        matched_record_ids = tuple(
+            f"{node.node_id}@{snapshot.revision_id}"
+            for node in observation_candidates
+            if any(_text_mentions_node(anchor_text, node) for anchor_text in anchor_texts)
+        )
+        return tuple(dict.fromkeys(matched_record_ids))
+
+    def _support_rationale(self, candidate: EvidenceCandidate) -> str:
+        rationale = " ".join(str(getattr(candidate, "support_rationale", "") or "").split()).strip()
+        if rationale:
+            return rationale
+        summary_text = " ".join(str(candidate.summary_text or "").split()).strip()
+        if summary_text:
+            return summary_text
+        return "This evidence directly supports the claim."
+
 
 def _evidence_search_text(evidence: EvidenceRecord) -> str:
     return " ".join(
@@ -450,8 +447,7 @@ def _evidence_search_text(evidence: EvidenceRecord) -> str:
         for part in (
             evidence.evidence_kind.strip(),
             evidence.quote_text.strip(),
-            evidence.summary_text.strip(),
-            (evidence.claim_text or "").strip(),
+            (evidence.summary_text or "").strip(),
         )
         if part
     )
@@ -463,3 +459,11 @@ def _compact_properties(properties: dict[str, object]) -> dict[str, object]:
         for key, value in properties.items()
         if value is not None
     }
+
+
+def _text_mentions_node(text: str, node) -> bool:
+    normalized_text = text.lower()
+    candidate_tokens = {node.name.lower()}
+    if node.file_path:
+        candidate_tokens.add(basename(node.file_path).lower())
+    return any(token and token in normalized_text for token in candidate_tokens)

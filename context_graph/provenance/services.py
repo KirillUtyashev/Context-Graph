@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
 import re
 import threading
 from typing import Any, Mapping, Sequence
 
+from context_graph.memory.prompts.models import Message
+
 from .canonicalization import canonicalize_claim_text
+from .debug import emit_provenance_debug
 from .models import (
     ClaimCanonicalizationResult,
     ClaimCanonicalizationGroup,
     ClaimDedupCandidate,
     ClaimEvidenceExtractionResponse,
+    ClaimResolutionCandidate,
+    ClaimResolutionResponse,
     ClaimWithEvidenceCandidate,
     ClaimCandidate,
     ClaimDerivationResponse,
@@ -29,6 +33,7 @@ from .models import (
     ResearchArtifactCandidate,
     ResearchArtifactSynthesisResponse,
 )
+from .prompt_context import build_prompt_context
 from .prompts import (
     ProvenancePromptRequest,
     extract_claims_and_evidence,
@@ -54,11 +59,11 @@ class ClaimEvidenceExtractionService:
     ) -> ProvenancePromptRequest:
         if not observation.text.strip():
             raise ValueError("observation text must not be empty")
-        context = {
-            "observation": _observation_payload(observation),
-            "code_context": dict(code_context or {}),
-            "source_context": dict(source_context or {}),
-        }
+        context = build_prompt_context(
+            observation,
+            code_context=code_context,
+            source_context=source_context,
+        )
         if observation.observation_kind == ObservationKind.GIT_COMMIT_MESSAGE:
             metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_COMMIT_MESSAGE
             messages = extract_claims_and_evidence.from_commit_message(context)
@@ -100,16 +105,20 @@ class ClaimEvidenceExtractionService:
             code_context=code_context,
             source_context=source_context,
         )
-        messages = [message.model_copy(deep=True) for message in request.messages]
-        response = _run_coroutine_sync(
-            self.llm_client.generate_response(
-                messages,
-                response_model=request.response_model,
-                group_id=observation.repo_id,
-                prompt_name=request.prompt_name,
-            )
+        return _execute_provenance_request(
+            llm_client=self.llm_client,
+            messages=request.messages,
+            response_model=request.response_model,
+            group_id=observation.repo_id,
+            prompt_name=request.prompt_name,
+            debug_metadata={
+                "observation_id": observation.observation_id,
+                "observation_kind": observation.observation_kind.value,
+                "repo_id": observation.repo_id,
+                "source_kind": observation.source_kind,
+                "source_id": observation.source_id,
+            },
         )
-        return request.response_model.model_validate(response)
 
 
 EvidenceExtractionService = ClaimEvidenceExtractionService
@@ -218,6 +227,57 @@ class ClaimRelationService:
         )
 
 
+class ClaimResolutionService:
+    """Resolve one new claim against bounded candidate claims."""
+
+    def __init__(self, *, llm_client: Any | None = None) -> None:
+        self.llm_client = llm_client
+
+    def build_request(
+        self,
+        *,
+        new_claim: Mapping[str, Any],
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> ProvenancePromptRequest:
+        claim_text = str(new_claim.get("claim_text", "")).strip()
+        if not claim_text:
+            raise ValueError("new_claim claim_text must not be empty")
+        if not candidates:
+            raise ValueError("candidates must not be empty")
+        context = {
+            "new_claim": dict(new_claim),
+            "candidates": [dict(candidate) for candidate in candidates],
+        }
+        return ProvenancePromptRequest(
+            metadata=relate_claims.RESOLVE_NEW_CLAIM_AGAINST_CANDIDATES,
+            messages=tuple(relate_claims.resolve_new_claim_against_candidates(context)),
+            response_model=ClaimResolutionResponse,
+        )
+
+    def resolve(
+        self,
+        *,
+        repo_id: str,
+        new_claim: Mapping[str, Any],
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> ClaimResolutionResponse:
+        if self.llm_client is None:
+            raise RuntimeError("claim resolution requires a configured llm_client")
+        request = self.build_request(new_claim=new_claim, candidates=candidates)
+        return _execute_provenance_request(
+            llm_client=self.llm_client,
+            messages=request.messages,
+            response_model=request.response_model,
+            group_id=repo_id,
+            prompt_name=request.prompt_name,
+            debug_metadata={
+                "repo_id": repo_id,
+                "new_claim": dict(new_claim),
+                "candidate_count": len(candidates),
+            },
+        )
+
+
 class FactConflictResolutionService:
     """Compare one new fact against current fact candidates."""
 
@@ -255,16 +315,18 @@ class FactConflictResolutionService:
         if self.llm_client is None:
             raise RuntimeError("fact conflict resolution requires a configured llm_client")
         request = self.build_request(new_fact=new_fact, current_facts=current_facts)
-        messages = [message.model_copy(deep=True) for message in request.messages]
-        response = _run_coroutine_sync(
-            self.llm_client.generate_response(
-                messages,
-                response_model=request.response_model,
-                group_id=repo_id,
-                prompt_name=request.prompt_name,
-            )
+        return _execute_provenance_request(
+            llm_client=self.llm_client,
+            messages=request.messages,
+            response_model=request.response_model,
+            group_id=repo_id,
+            prompt_name=request.prompt_name,
+            debug_metadata={
+                "repo_id": repo_id,
+                "new_fact": dict(new_fact),
+                "current_fact_count": len(current_facts),
+            },
         )
-        return request.response_model.model_validate(response)
 
 
 class ResearchArtifactSynthesisService:
@@ -291,15 +353,6 @@ class ResearchArtifactSynthesisService:
             messages=tuple(synthesize_research_artifact.from_code_and_evidence(context)),
             response_model=ResearchArtifactSynthesisResponse,
         )
-
-
-def _observation_payload(observation: Observation) -> dict[str, Any]:
-    payload = asdict(observation)
-    payload["observation_kind"] = observation.observation_kind.value
-    payload["metadata"] = dict(observation.metadata)
-    return payload
-
-
 def _run_coroutine_sync(coro: Any) -> Any:
     try:
         asyncio.get_running_loop()
@@ -328,3 +381,56 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def _normalize_text_key(value: str) -> str:
     return _WHITESPACE_RE.sub(" ", value.strip()).lower()
+
+
+def _execute_provenance_request(
+    *,
+    llm_client: Any,
+    messages: Sequence[Message],
+    response_model: type[Any],
+    group_id: str | None,
+    prompt_name: str,
+    debug_metadata: Mapping[str, Any],
+) -> Any:
+    copied_messages = [message.model_copy(deep=True) for message in messages]
+    emit_provenance_debug(
+        "llm_request",
+        {
+            "prompt_name": prompt_name,
+            "group_id": group_id,
+            "response_model": response_model.__name__,
+            "messages": [message.model_dump() for message in copied_messages],
+            **dict(debug_metadata),
+        },
+    )
+    try:
+        response = _run_coroutine_sync(
+            llm_client.generate_response(
+                copied_messages,
+                response_model=response_model,
+                group_id=group_id,
+                prompt_name=prompt_name,
+            )
+        )
+        emit_provenance_debug(
+            "llm_response",
+            {
+                "prompt_name": prompt_name,
+                "group_id": group_id,
+                "response": response,
+                **dict(debug_metadata),
+            },
+        )
+        return response_model.model_validate(response)
+    except Exception as exc:
+        emit_provenance_debug(
+            "llm_error",
+            {
+                "prompt_name": prompt_name,
+                "group_id": group_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                **dict(debug_metadata),
+            },
+        )
+        raise

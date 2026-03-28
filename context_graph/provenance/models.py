@@ -20,6 +20,49 @@ class ObservationKind(str, Enum):
     GITHUB_ISSUE_COMMENT = "github_issue_comment"
 
 
+ClaimSubkind = Literal[
+    "bug_or_regression",
+    "fix_or_mitigation",
+    "invariant_or_constraint",
+    "desired_behavior_or_requirement",
+    "reviewer_objection_or_requested_change",
+    "test_result_or_validation",
+    "rollout_migration_or_dependency",
+    "ownership_or_impact_scope",
+]
+AssertionStatus = Literal["reported", "proposed", "requested", "observed", "confirmed", "rejected"]
+ClaimFrame = Literal[
+    "author_statement",
+    "reviewer_feedback",
+    "user_requirement",
+    "reported_observation",
+    "observed_result",
+]
+SupportSource = Literal["observation_text", "observation_title"]
+SupportRole = Literal[
+    "states_change",
+    "states_rationale",
+    "states_constraint",
+    "reports_observation",
+    "requests_change",
+    "confirms_result",
+    "rejects_prior_explanation",
+    "provides_context",
+]
+ClaimResolutionType = Literal[
+    "same_as",
+    "refines",
+    "contradicts",
+    "explains",
+    "supersedes",
+    "mitigates",
+    "depends_on",
+    "supports",
+    "unrelated",
+]
+ResolutionConfidence = Literal["low", "medium", "high"]
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationSourceRef:
     """Stable reference to the structural record an observation came from."""
@@ -65,13 +108,17 @@ class EvidenceRecord:
     repo_id: str
     evidence_kind: str
     quote_text: str
-    summary_text: str
+    summary_text: str | None
     span_start: int | None
     span_end: int | None
     support_kind: str
+    support_source: str | None = None
     fact_key: str | None = None
     claim_text: str | None = None
     claim_kind: str | None = None
+    claim_subkind: str | None = None
+    assertion_status: str | None = None
+    claim_frame: str | None = None
     claim_confidence: str | None = None
     claim_derivation_kind: str | None = None
     observation_id: str | None = None
@@ -102,6 +149,37 @@ class PersistedEvidenceFact:
     observed_at: str | None
     about_record_ids: tuple[str, ...]
     evidence_records: tuple[PersistedEvidenceRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimRecord:
+    """Canonical persisted claim node."""
+
+    claim_id: str
+    repo_id: str
+    canonical_key: str
+    claim_text: str
+    claim_kind: str
+    claim_subkind: str
+    first_observed_at: str | None
+    latest_observed_at: str | None
+    is_current: bool = True
+    invalidated_at: str | None = None
+    invalidated_by_claim_id: str | None = None
+    observation_id: str | None = None
+    source_kind: str | None = None
+    source_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedClaimRecord:
+    """One persisted claim node hydrated from the backend."""
+
+    claim: ClaimRecord
+    about_record_ids: tuple[str, ...] = ()
+    evidence_record_ids: tuple[str, ...] = ()
+    legacy_evidence_records: tuple[PersistedEvidenceRecord, ...] = ()
 
 
 def git_commit_message_observation_id(repo_id: str, commit_sha: str) -> str:
@@ -156,6 +234,26 @@ def evidence_record_id(
     return f"evidence:{repo_id}:{digest}"
 
 
+def claim_record_id(
+    *,
+    repo_id: str,
+    canonical_key: str,
+    about_record_ids: tuple[str, ...] | list[str] = (),
+) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(
+        "|".join(
+            [
+                repo_id,
+                canonical_key,
+                ",".join(sorted(dict.fromkeys(about_record_ids))),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"claim:{repo_id}:{digest}"
+
+
 class ProvenanceBaseModel(BaseModel):
     """Base model for structured provenance extraction outputs."""
 
@@ -174,17 +272,23 @@ class ExtractionMetadata(ProvenanceBaseModel):
 class SupportingEvidenceCandidate(ProvenanceBaseModel):
     evidence_kind: str
     quote_text: str
-    summary_text: str
+    summary_text: str | None = None
     span_start: int | None = None
     span_end: int | None = None
     about_hints: list[str] = Field(default_factory=list)
     support_kind: str
+    support_source: SupportSource = "observation_text"
+    support_role: SupportRole = "provides_context"
+    support_rationale: str | None = None
     metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
 
 
 class ClaimWithEvidenceCandidate(ProvenanceBaseModel):
     claim_text: str
-    claim_kind: str
+    claim_kind: str | None = None
+    claim_subkind: ClaimSubkind | None = None
+    assertion_status: AssertionStatus | None = None
+    claim_frame: ClaimFrame | None = None
     about_hints: list[str] = Field(default_factory=list)
     confidence: str
     derivation_kind: str
@@ -203,6 +307,9 @@ class EvidenceCandidate(SupportingEvidenceCandidate):
 class ClaimCandidate(ProvenanceBaseModel):
     claim_text: str
     claim_kind: str
+    claim_subkind: ClaimSubkind | None = None
+    assertion_status: AssertionStatus | None = None
+    claim_frame: ClaimFrame | None = None
     about_hints: list[str] = Field(default_factory=list)
     supported_evidence_ids: list[str] = Field(default_factory=list)
     derivation_kind: str
@@ -257,6 +364,14 @@ class ClaimRelationCandidate(ProvenanceBaseModel):
     metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
 
 
+class ClaimResolutionCandidate(ProvenanceBaseModel):
+    candidate_claim_id: str
+    resolution_type: ClaimResolutionType
+    confidence: ResolutionConfidence
+    rationale: str
+    metadata: ExtractionMetadata = Field(default_factory=ExtractionMetadata)
+
+
 class ResearchArtifactCandidate(ProvenanceBaseModel):
     artifact_kind: str
     title: str
@@ -279,6 +394,10 @@ class ClaimDerivationResponse(ProvenanceBaseModel):
 
 class ClaimRelationResponse(ProvenanceBaseModel):
     relations: list[ClaimRelationCandidate] = Field(default_factory=list)
+
+
+class ClaimResolutionResponse(ProvenanceBaseModel):
+    relations: list[ClaimResolutionCandidate] = Field(default_factory=list)
 
 
 class ResearchArtifactSynthesisResponse(ProvenanceBaseModel):

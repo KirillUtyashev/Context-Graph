@@ -8,12 +8,14 @@ from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimResolutionService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
     FactConflictResolutionService,
     ObservationMutationPlanner,
 )
+from context_graph.provenance.prompt_context import build_deterministic_code_context
 from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .deterministic_planner import DeterministicMutationPlanner
@@ -106,6 +108,7 @@ class CommitIndexingService:
         evidence_service: EvidenceExtractionService | None = None,
         claim_validator: ClaimBundleValidator | None = None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
     ) -> None:
@@ -120,12 +123,16 @@ class CommitIndexingService:
         )
         self.claim_validator = claim_validator or ClaimBundleValidator()
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
+        self.claim_resolution_service = claim_resolution_service or (
+            ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
         self.writer = writer or TemporalGraphWriter(
@@ -564,15 +571,13 @@ class CommitIndexingService:
         try:
             extraction = self.claim_extraction_service.extract(
                 planned_observation.observation,
+                code_context=build_deterministic_code_context(
+                    planned_observation.observation,
+                    snapshot=snapshot,
+                ),
                 source_context={
-                    "source_kind": planned_observation.source.source_kind,
-                    "source_record_type": planned_observation.source.source_record_type,
-                    "source_id": planned_observation.source.source_id,
-                    "source_display_name": planned_observation.source.display_name,
                     "commit_sha": commit.sha,
-                    "branch": commit.branch,
                     "changed_files": list(commit.changed_files),
-                    "parent_shas": list(commit.parent_shas),
                 },
             )
         except Exception:

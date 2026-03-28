@@ -212,6 +212,60 @@ def make_harness_like_snapshot() -> GraphSnapshot:
     )
 
 
+def make_provenance_examples_snapshot() -> GraphSnapshot:
+    return GraphSnapshot(
+        repo_id="test",
+        revision_id="r1",
+        root_path="/tmp/test",
+        generated_at="2026-03-27T00:00:00+00:00",
+        nodes=(
+            CanonicalNode("project:test", "test", "Project", "test", qualified_name="test"),
+            CanonicalNode(
+                "file:test:test.db.__file__",
+                "test",
+                "File",
+                "db.py",
+                qualified_name="test.db.__file__",
+                file_path="db.py",
+            ),
+            CanonicalNode(
+                "function:test:test.db.init_db",
+                "test",
+                "Function",
+                "init_db",
+                qualified_name="test.db.init_db",
+                file_path="db.py",
+            ),
+            CanonicalNode(
+                "variable:test:test.db.DB_URL",
+                "test",
+                "Variable",
+                "DB_URL",
+                qualified_name="test.db.DB_URL",
+                file_path="db.py",
+            ),
+            CanonicalNode(
+                "file:test:test.config.__file__",
+                "test",
+                "File",
+                "config.py",
+                qualified_name="test.config.__file__",
+                file_path="config.py",
+            ),
+            CanonicalNode(
+                "variable:test:test.config.APP_PORT",
+                "test",
+                "Variable",
+                "APP_PORT",
+                qualified_name="test.config.APP_PORT",
+                file_path="config.py",
+            ),
+        ),
+        edges=(),
+        metadata={},
+    )
+
+
 def make_commit(*, subject: str = "Add helper support", body: str = "body text") -> CommitInfo:
     return CommitInfo(
         sha="abc123",
@@ -250,7 +304,10 @@ def make_observation(
 def make_extraction_response(
     *,
     claim_text: str = "demo.app.main was updated.",
-    claim_kind: str = "change_claim",
+    claim_kind: str | None = "change_claim",
+    claim_subkind: str | None = None,
+    assertion_status: str | None = None,
+    claim_frame: str | None = None,
     confidence: str = "high",
     source_hint: str | None = "demo.app.main",
     quote_text: str = "updates demo.app.main",
@@ -258,6 +315,9 @@ def make_extraction_response(
     span_end: int | None = 29,
     evidence_kind: str = "change_summary",
     support_kind: str = "direct_statement",
+    support_source: str = "observation_text",
+    support_role: str = "states_change",
+    support_rationale: str | None = None,
     summary_text: str | None = None,
 ) -> ClaimEvidenceExtractionResponse:
     return ClaimEvidenceExtractionResponse.model_validate(
@@ -266,6 +326,9 @@ def make_extraction_response(
                 {
                     "claim_text": claim_text,
                     "claim_kind": claim_kind,
+                    "claim_subkind": claim_subkind,
+                    "assertion_status": assertion_status,
+                    "claim_frame": claim_frame,
                     "about_hints": [source_hint] if source_hint else [],
                     "confidence": confidence,
                     "derivation_kind": "direct_from_observation",
@@ -287,6 +350,17 @@ def make_extraction_response(
                             "span_end": span_end,
                             "about_hints": [source_hint] if source_hint else [],
                             "support_kind": support_kind,
+                            "support_source": support_source,
+                            "support_role": support_role,
+                            "support_rationale": (
+                                support_rationale
+                                if support_rationale is not None
+                                else (
+                                    f"This quote directly supports the claim about {source_hint}."
+                                    if source_hint
+                                    else "This quote directly supports the claim."
+                                )
+                            ),
                             "metadata": {},
                         }
                     ],
@@ -320,9 +394,13 @@ def make_existing_evidence_row(
         "span_start": 0,
         "span_end": 25,
         "support_kind": "direct_statement",
+        "support_source": "observation_text",
         "fact_key": resolved_fact_key if top_level_claims else None,
         "claim_text": claim_text if top_level_claims else None,
         "claim_kind": claim_kind if top_level_claims else None,
+        "claim_subkind": "invariant_or_constraint" if top_level_claims else None,
+        "assertion_status": "reported" if top_level_claims else None,
+        "claim_frame": "author_statement" if top_level_claims else None,
         "claim_confidence": "high" if top_level_claims else None,
         "claim_derivation_kind": "direct_from_observation" if top_level_claims else None,
         "observation_id": "observation:github_pr_body:demo:5" if top_level_claims else None,
@@ -332,8 +410,12 @@ def make_existing_evidence_row(
             {
                 "claim_text": claim_text,
                 "claim_kind": claim_kind,
+                "claim_subkind": "invariant_or_constraint",
+                "assertion_status": "reported",
+                "claim_frame": "author_statement",
                 "claim_confidence": "high",
                 "claim_derivation_kind": "direct_from_observation",
+                "support_source": "observation_text",
             }
         ),
     }
@@ -737,6 +819,7 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertEqual(comment_observations[0].source_id, "github:pr:demo:2")
         self.assertEqual(comment_observations[0].metadata["pull_request_number"], 2)
         self.assertEqual(comment_observations[0].metadata["comment_id"], 4145222468)
+        self.assertEqual(comment_observations[0].metadata["anchor_revision_id"], "merge-sha")
 
 
 class CodeIdentityTests(unittest.TestCase):
@@ -897,6 +980,33 @@ class CodeIdentityTests(unittest.TestCase):
             ),
         )
 
+    def test_grounding_prefers_active_version_ids_from_snapshot_state(self):
+        base_snapshot = make_harness_like_snapshot()
+        snapshot = GraphSnapshot(
+            repo_id=base_snapshot.repo_id,
+            revision_id="new-revision",
+            root_path=base_snapshot.root_path,
+            generated_at=base_snapshot.generated_at,
+            nodes=base_snapshot.nodes,
+            edges=base_snapshot.edges,
+            metadata={
+                "deterministic_mutation_state": {
+                    "active_node_versions": {
+                        "variable:test:test.src.auth.SECRET_KEY": "variable:test:test.src.auth.SECRET_KEY@old-active",
+                        "file:test:test.src.auth.__file__": "file:test:test.src.auth.__file__@old-active",
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(
+            resolve_about_record_ids(snapshot, ["SECRET_KEY", "auth.py"]),
+            (
+                "variable:test:test.src.auth.SECRET_KEY@old-active",
+                "file:test:test.src.auth.__file__@old-active",
+            ),
+        )
+
 
 class ClaimValidationTests(unittest.TestCase):
     def setUp(self):
@@ -955,14 +1065,14 @@ class ClaimValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected_claims[0].reason_code, "missing_supporting_evidence")
 
-    def test_validator_rejects_invalid_spans(self):
+    def test_validator_accepts_observation_text_quotes_even_with_bad_spans(self):
         result = self.validator.validate(
             observation=self.observation,
             extraction=make_extraction_response(span_start=100, span_end=120),
             snapshot=self.snapshot,
         )
 
-        self.assertEqual(result.rejected_claims[0].reason_code, "invalid_evidence_span")
+        self.assertEqual(result.validated_count, 1)
 
     def test_validator_rejects_unsupported_source_kind(self):
         issue_observation = make_observation(kind=ObservationKind.GITHUB_ISSUE_BODY, source_kind="issue")
@@ -977,7 +1087,10 @@ class ClaimValidationTests(unittest.TestCase):
     def test_validator_rejects_speculative_or_low_confidence_claims(self):
         speculative = self.validator.validate(
             observation=self.observation,
-            extraction=make_extraction_response(claim_text="Maybe demo.app.main was updated."),
+            extraction=make_extraction_response(
+                claim_text="Maybe demo.app.main was updated.",
+                assertion_status="confirmed",
+            ),
             snapshot=self.snapshot,
         )
         low_confidence = self.validator.validate(
@@ -988,6 +1101,235 @@ class ClaimValidationTests(unittest.TestCase):
 
         self.assertEqual(speculative.rejected_claims[0].reason_code, "speculative_claim")
         self.assertEqual(low_confidence.rejected_claims[0].reason_code, "insufficient_confidence")
+
+    def test_validator_maps_subkind_and_accepts_title_sourced_evidence(self):
+        result = self.validator.validate(
+            observation=self.observation,
+            extraction=make_extraction_response(
+                claim_text="Rollback handling should be tightened.",
+                claim_kind=None,
+                claim_subkind="desired_behavior_or_requirement",
+                assertion_status="proposed",
+                claim_frame="author_statement",
+                source_hint=None,
+                quote_text="Tighten rollback handling",
+                span_start=None,
+                span_end=None,
+                evidence_kind="requirement_detail",
+                support_source="observation_title",
+                summary_text="The observation title states the requested change.",
+            ),
+            snapshot=self.snapshot,
+        )
+
+        self.assertEqual(result.validated_count, 1)
+        self.assertEqual(result.validated_claims[0].claim_kind, "requirement")
+        self.assertEqual(result.validated_claims[0].claim_subkind, "desired_behavior_or_requirement")
+        self.assertEqual(result.validated_claims[0].assertion_status, "proposed")
+        self.assertEqual(result.validated_claims[0].claim_frame, "author_statement")
+
+    def test_validator_rejects_title_support_with_spans(self):
+        result = self.validator.validate(
+            observation=self.observation,
+            extraction=make_extraction_response(
+                claim_text="Rollback handling should be tightened.",
+                claim_kind=None,
+                claim_subkind="desired_behavior_or_requirement",
+                source_hint=None,
+                quote_text="Tighten rollback handling",
+                span_start=0,
+                span_end=25,
+                evidence_kind="requirement_detail",
+                support_source="observation_title",
+                summary_text="The observation title states the requested change.",
+            ),
+            snapshot=self.snapshot,
+        )
+
+        self.assertEqual(result.rejected_claims[0].reason_code, "invalid_evidence_span")
+
+    def test_validator_accepts_multi_claim_examples_with_rejected_correction(self):
+        observation = Observation(
+            observation_id="observation:github_issue_comment:test:4145222468",
+            repo_id="test",
+            observation_kind=ObservationKind.GITHUB_ISSUE_COMMENT,
+            source_kind="issue",
+            source_id="github:issue:test:2",
+            observed_at="2026-03-27T20:58:11Z",
+            author="octocat",
+            title="Comment on issue #2: Fix app port",
+            text=(
+                "Correction: the `APP_PORT` change from 8080 to 9000 in `config.py` was caused by a load "
+                "balancer misconfiguration that permanently bound port 8080 to a different service - not a firewall block."
+            ),
+            metadata={"issue_number": 2},
+        )
+        extraction = ClaimEvidenceExtractionResponse.model_validate(
+            {
+                "claims": [
+                    {
+                        "claim_text": "The APP_PORT change from 8080 to 9000 in config.py was caused by a load balancer misconfiguration.",
+                        "claim_subkind": "rollout_migration_or_dependency",
+                        "assertion_status": "reported",
+                        "claim_frame": "author_statement",
+                        "about_hints": ["config.py", "APP_PORT"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "the `APP_PORT` change from 8080 to 9000 in `config.py` was caused by a load balancer misconfiguration",
+                                "summary_text": "The correction explains the new cause for the port change.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["config.py", "APP_PORT"],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    {
+                        "claim_text": "A firewall block caused the APP_PORT change from 8080 to 9000 in config.py.",
+                        "claim_subkind": "bug_or_regression",
+                        "assertion_status": "rejected",
+                        "claim_frame": "reported_observation",
+                        "about_hints": ["config.py", "APP_PORT"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "bug_signal",
+                                "quote_text": "not a firewall block",
+                                "summary_text": "The correction explicitly rejects the firewall explanation.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["config.py", "APP_PORT"],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+
+        result = self.validator.validate(
+            observation=observation,
+            extraction=extraction,
+            snapshot=make_harness_like_snapshot(),
+        )
+
+        self.assertEqual(result.validated_count, 2)
+        self.assertEqual(
+            {claim.assertion_status for claim in result.validated_claims},
+            {"reported", "rejected"},
+        )
+
+    def test_validator_accepts_three_claim_init_db_example(self):
+        observation = Observation(
+            observation_id="observation:github_pr_body:test:1",
+            repo_id="test",
+            observation_kind=ObservationKind.GITHUB_PR_BODY,
+            source_kind="pull_request",
+            source_id="github:pr:test:1",
+            observed_at="2026-03-27T20:58:07Z",
+            author="octocat",
+            title="Fix DB connection timeout",
+            text=(
+                "Updated `init_db()` in `db.py` to pass `CONNECTION_TIMEOUT` to the SQLAlchemy engine. "
+                "`DB_URL` in `db.py` now includes `connect_timeout=30` in the query string. "
+                "The timeout value was set to 30 seconds because of slow network conditions observed in the staging environment."
+            ),
+            metadata={"pull_request_number": 1},
+        )
+        extraction = ClaimEvidenceExtractionResponse.model_validate(
+            {
+                "claims": [
+                    {
+                        "claim_text": "init_db in db.py now passes CONNECTION_TIMEOUT to the SQLAlchemy engine.",
+                        "claim_subkind": "fix_or_mitigation",
+                        "assertion_status": "reported",
+                        "claim_frame": "author_statement",
+                        "about_hints": ["init_db", "db.py"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Updated `init_db()` in `db.py` to pass `CONNECTION_TIMEOUT` to the SQLAlchemy engine.",
+                                "summary_text": "The observation describes the init_db timeout wiring change.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["init_db", "db.py"],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    {
+                        "claim_text": "DB_URL in db.py now includes connect_timeout=30 in the query string.",
+                        "claim_subkind": "fix_or_mitigation",
+                        "assertion_status": "reported",
+                        "claim_frame": "author_statement",
+                        "about_hints": ["DB_URL", "db.py"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "`DB_URL` in `db.py` now includes `connect_timeout=30` in the query string.",
+                                "summary_text": "The observation describes the DB_URL query-string update.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["DB_URL", "db.py"],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    {
+                        "claim_text": "The timeout value was set to 30 seconds because of slow network conditions observed in the staging environment.",
+                        "claim_subkind": "rollout_migration_or_dependency",
+                        "assertion_status": "reported",
+                        "claim_frame": "author_statement",
+                        "about_hints": ["db.py"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "scope_detail",
+                                "quote_text": "The timeout value was set to 30 seconds because of slow network conditions observed in the staging environment.",
+                                "summary_text": "The observation states the rationale for the timeout value.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["db.py"],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+
+        result = self.validator.validate(
+            observation=observation,
+            extraction=extraction,
+            snapshot=make_provenance_examples_snapshot(),
+        )
+
+        self.assertEqual(result.validated_count, 3)
+        self.assertEqual(result.rejected_count, 0)
 
 
 class EvidencePlannerTests(unittest.TestCase):
@@ -1021,7 +1363,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
     def test_evidence_planner_grounds_exact_file_paths_from_text(self):
-        observation = make_observation(text="This PR updates the auth entrypoint.")
+        observation = make_observation(text="This PR updates src/auth/main.py.")
         validation = ClaimBundleValidator().validate(
             observation=observation,
             extraction=make_extraction_response(
@@ -1051,7 +1393,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
     def test_evidence_planner_grounds_exact_qualified_names_from_text(self):
-        observation = make_observation(text="This PR updates the main function.")
+        observation = make_observation(text="This PR updates demo.app.main.")
         validation = ClaimBundleValidator().validate(
             observation=observation,
             extraction=make_extraction_response(
@@ -1081,7 +1423,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
     def test_evidence_planner_grounds_dotted_partial_suffixes_from_text(self):
-        observation = make_observation(text="This PR updates the auth login method.")
+        observation = make_observation(text="This PR updates AuthService.login().")
         validation = ClaimBundleValidator().validate(
             observation=observation,
             extraction=make_extraction_response(
@@ -1111,7 +1453,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
     def test_evidence_planner_grounds_unique_bare_symbol_names_from_text(self):
-        observation = make_observation(text="This PR updates the auth service.")
+        observation = make_observation(text="This PR updates AuthService.")
         validation = ClaimBundleValidator().validate(
             observation=observation,
             extraction=make_extraction_response(
@@ -1168,7 +1510,9 @@ class EvidencePlannerTests(unittest.TestCase):
             },
             {"symbol:demo:demo.app.main@r1"},
         )
-        self.assertEqual(plan.upsert_search_documents[0].properties["claim_kind"], "change_claim")
+        self.assertNotIn("claim_kind", plan.upsert_nodes[0].properties)
+        self.assertNotIn("claim_kind", plan.upsert_search_documents[0].properties)
+        self.assertEqual(plan.upsert_search_documents[0].properties["support_source"], "observation_text")
 
     def test_evidence_planner_does_not_ground_ambiguous_file_basenames(self):
         observation = make_observation(text="This PR changes main.py.")
@@ -1253,6 +1597,76 @@ class EvidencePlannerTests(unittest.TestCase):
             {edge.relationship_type for edge in plan.upsert_edges},
             {"DERIVED_FROM"},
         )
+
+    def test_evidence_planner_falls_back_to_observation_mentions_when_support_is_thin(self):
+        observation = make_observation(text="This PR updates demo.app.main.")
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="main was updated.",
+                claim_kind=None,
+                claim_subkind="fix_or_mitigation",
+                source_hint=None,
+                quote_text="updates",
+                span_start=None,
+                span_end=None,
+                summary_text="The source indicates an update happened.",
+            ),
+            snapshot=make_snapshot(),
+        )
+
+        plan = EvidenceMutationPlanner().plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=make_snapshot(),
+        )
+
+        self.assertEqual(
+            {
+                edge.target_record_id
+                for edge in plan.upsert_edges
+                if edge.relationship_type == "ABOUT"
+            },
+            {"symbol:demo:demo.app.main@r1"},
+        )
+
+    def test_evidence_planner_persists_stance_fields_on_records(self):
+        observation = make_observation()
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="Rollback handling should be tightened.",
+                claim_kind=None,
+                claim_subkind="desired_behavior_or_requirement",
+                assertion_status="proposed",
+                claim_frame="author_statement",
+                source_hint=None,
+                quote_text="Tighten rollback handling",
+                span_start=None,
+                span_end=None,
+                evidence_kind="requirement_detail",
+                support_source="observation_title",
+                summary_text="The title states the requested change.",
+            ),
+            snapshot=make_snapshot(),
+        )
+
+        plan = EvidenceMutationPlanner().plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=make_snapshot(),
+        )
+
+        node_properties = plan.upsert_nodes[0].properties
+        search_properties = plan.upsert_search_documents[0].properties
+        self.assertEqual(node_properties["support_source"], "observation_title")
+        self.assertEqual(search_properties["support_source"], "observation_title")
+        self.assertNotIn("claim_subkind", node_properties)
+        self.assertNotIn("assertion_status", node_properties)
+        self.assertNotIn("claim_frame", node_properties)
+        self.assertNotIn("claim_subkind", search_properties)
+        self.assertNotIn("assertion_status", search_properties)
+        self.assertNotIn("claim_frame", search_properties)
 
 
 class CurrentEvidenceReaderTests(unittest.TestCase):
@@ -1347,26 +1761,39 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
 
         self.assertEqual(result.invalidated_count, 1)
         nodes = {node.record_id: node for node in result.plan.upsert_nodes}
-        existing_node = nodes["evidence:demo:existing"]
-        self.assertFalse(existing_node.properties["is_current"])
-        self.assertEqual(
-            existing_node.properties["invalidated_by_fact_key"],
-            canonical_claim_key(claim_kind="state_claim", claim_text="demo.app.main is enabled."),
-        )
-        new_node = next(
+        claim_nodes = [
             node
             for node in result.plan.upsert_nodes
-            if node.record_id != "evidence:demo:existing"
+            if node.record_type == "claim"
+        ]
+        self.assertEqual(len(claim_nodes), 2)
+        new_claim = next(
+            node
+            for node in claim_nodes
+            if node.properties["claim_text"] == "demo.app.main is enabled."
         )
-        self.assertTrue(new_node.properties["is_current"])
-        supersedes_edges = [
+        old_claim = next(
+            node
+            for node in claim_nodes
+            if node.properties["claim_text"] == "demo.app.main is disabled."
+        )
+        self.assertTrue(new_claim.properties["is_current"])
+        self.assertFalse(old_claim.properties["is_current"])
+        self.assertEqual(old_claim.properties["invalidated_by_claim_id"], new_claim.record_id)
+        contradicts_edges = [
             edge
             for edge in result.plan.upsert_edges
-            if edge.relationship_type == "SUPERSEDES"
+            if edge.relationship_type == "CONTRADICTS"
         ]
-        self.assertEqual(len(supersedes_edges), 1)
-        self.assertEqual(supersedes_edges[0].target_record_id, "evidence:demo:existing")
-        self.assertEqual(supersedes_edges[0].source_record_id, new_node.record_id)
+        self.assertEqual(len(contradicts_edges), 1)
+        self.assertEqual(contradicts_edges[0].source_record_id, new_claim.record_id)
+        self.assertEqual(contradicts_edges[0].target_record_id, old_claim.record_id)
+        support_edges = [
+            edge
+            for edge in result.plan.upsert_edges
+            if edge.relationship_type == "SUPPORTS_CLAIM"
+        ]
+        self.assertEqual(len(support_edges), 2)
 
     def test_older_new_fact_is_inserted_already_invalidated(self):
         existing_fact_key = canonical_claim_key(
@@ -1429,17 +1856,36 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.invalidated_count, 0)
-        new_node = next(node for node in result.plan.upsert_nodes if node.record_id != "evidence:demo:existing")
-        self.assertFalse(new_node.properties["is_current"])
-        self.assertEqual(new_node.properties["invalidated_by_fact_key"], existing_fact_key)
-        supersedes_edges = [
+        new_claim = next(
+            node
+            for node in result.plan.upsert_nodes
+            if node.record_type == "claim"
+            and node.properties["claim_text"] == "demo.app.main is enabled."
+        )
+        new_evidence = next(
+            node
+            for node in result.plan.upsert_nodes
+            if node.record_type == "evidence_record"
+        )
+        existing_claim = next(
+            node
+            for node in result.plan.upsert_nodes
+            if node.record_type == "claim"
+            and node.properties["claim_text"] == "demo.app.main is disabled."
+        )
+        self.assertFalse(new_claim.properties["is_current"])
+        self.assertTrue(existing_claim.properties["is_current"])
+        self.assertNotIn("is_current", new_evidence.properties)
+        self.assertNotIn("invalidated_by_fact_key", new_evidence.properties)
+        self.assertEqual(new_evidence.properties["observation_id"], old_observation.observation_id)
+        contradicts_edges = [
             edge
             for edge in result.plan.upsert_edges
-            if edge.relationship_type == "SUPERSEDES"
+            if edge.relationship_type == "CONTRADICTS"
         ]
-        self.assertEqual(len(supersedes_edges), 1)
-        self.assertEqual(supersedes_edges[0].source_record_id, "evidence:demo:existing")
-        self.assertEqual(supersedes_edges[0].target_record_id, new_node.record_id)
+        self.assertEqual(len(contradicts_edges), 1)
+        self.assertEqual(contradicts_edges[0].source_record_id, new_claim.record_id)
+        self.assertEqual(contradicts_edges[0].target_record_id, existing_claim.record_id)
 
     def test_exact_duplicate_fact_key_does_not_invalidate_anything(self):
         duplicate_fact_key = canonical_claim_key(
@@ -1478,7 +1924,10 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         self.assertEqual(result.invalidated_count, 0)
         self.assertEqual(
             {edge.relationship_type for edge in result.plan.upsert_edges},
-            {"DERIVED_FROM", "ABOUT"},
+            {"DERIVED_FROM", "ABOUT", "SUPPORTS_CLAIM"},
+        )
+        self.assertTrue(
+            any(node.record_type == "claim" for node in result.plan.upsert_nodes)
         )
 
     def test_different_about_targets_do_not_invalidate(self):
@@ -1510,7 +1959,67 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         self.assertEqual(result.invalidated_count, 0)
         self.assertEqual(
             {edge.relationship_type for edge in result.plan.upsert_edges},
-            {"DERIVED_FROM", "ABOUT"},
+            {"DERIVED_FROM", "ABOUT", "SUPPORTS_CLAIM"},
+        )
+        self.assertFalse(
+            any(edge.relationship_type == "CONTRADICTS" for edge in result.plan.upsert_edges)
+        )
+
+    def test_rejected_claims_are_persisted_as_non_current_without_conflict_checks(self):
+        backend_driver = FakeBackendDriver(
+            [
+                make_existing_evidence_row(
+                    claim_text="demo.app.main is disabled.",
+                    claim_kind="state_claim",
+                )
+            ]
+        )
+        resolution_client = PromptMapLLMClient(
+            {
+                "provenance.resolve_fact_conflicts.compare_against_current.v1": {
+                    "contradicted_fact_ids": ["unused"]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=backend_driver,
+            fact_conflict_resolution_service=FactConflictResolutionService(
+                llm_client=resolution_client
+            ),
+        )
+        rejected_validation = ClaimBundleValidator().validate(
+            observation=self.observation,
+            extraction=make_extraction_response(
+                claim_text="demo.app.main is disabled.",
+                claim_kind="state_claim",
+                claim_subkind="invariant_or_constraint",
+                assertion_status="rejected",
+                claim_frame="reported_observation",
+                quote_text="demo.app.main is enabled now",
+                summary_text="The observation rejects an older disabled state.",
+                span_start=None,
+                span_end=None,
+                evidence_kind="state_detail",
+            ),
+            snapshot=self.snapshot,
+        )
+
+        result = planner.plan_validated_claims(
+            observation=self.observation,
+            validation=rejected_validation,
+            snapshot=self.snapshot,
+        )
+
+        self.assertEqual(result.invalidated_count, 0)
+        self.assertEqual(backend_driver.calls, [])
+        self.assertEqual(resolution_client.calls, [])
+        self.assertEqual(len(result.plan.upsert_nodes), 2)
+        claim_node = next(node for node in result.plan.upsert_nodes if node.record_type == "claim")
+        evidence_node = next(node for node in result.plan.upsert_nodes if node.record_type == "evidence_record")
+        self.assertFalse(claim_node.properties["is_current"])
+        self.assertNotIn("is_current", evidence_node.properties)
+        self.assertTrue(
+            any(edge.relationship_type == "SUPPORTS_CLAIM" for edge in result.plan.upsert_edges)
         )
 
 
@@ -1754,6 +2263,67 @@ class PromptScaffoldingTests(unittest.TestCase):
         )
         self.assertIs(artifact_request.response_model, ResearchArtifactSynthesisResponse)
 
+    def test_extraction_request_sanitizes_internal_fields(self):
+        observation = Observation(
+            observation_id="observation:github_pr_body:demo:7",
+            repo_id="demo",
+            observation_kind=ObservationKind.GITHUB_PR_BODY,
+            source_kind="pull_request",
+            source_id="github:pr:demo:7",
+            observed_at="2026-03-26T00:01:00+00:00",
+            author="octocat",
+            title="Tighten rollback handling",
+            text="Updated `init_db()` in `db.py` to pass `CONNECTION_TIMEOUT`.",
+            metadata={
+                "pull_request_number": 7,
+                "source_id": "should-not-leak",
+                "record_id": "backend-record-123",
+                "revision_id": "r123",
+                "changed_files": ["db.py"],
+            },
+        )
+
+        request = ClaimEvidenceExtractionService().build_request(
+            observation,
+            source_context={
+                "pull_request_number": 7,
+                "source_id": "source-should-not-leak",
+                "pr_title": "Tighten rollback handling",
+            },
+            code_context={
+                "changed_files": ["db.py"],
+                "mentioned_entities": [
+                    {
+                        "name": "init_db",
+                        "kind": "Function",
+                        "file_path": "db.py",
+                        "node_id": "symbol:demo:init_db",
+                    }
+                ],
+                "touched_entities": [
+                    {
+                        "name": "db.py",
+                        "kind": "File",
+                        "file_path": "db.py",
+                        "record_id": "record:db",
+                    }
+                ],
+                "revision_id": "r123",
+            },
+        )
+        prompt = request.messages[1].content
+
+        self.assertIn('"source_type": "github_pr_body"', prompt)
+        self.assertIn('"pr_number": 7', prompt)
+        self.assertIn('"mentioned_entities"', prompt)
+        self.assertIn('"name": "init_db"', prompt)
+        self.assertNotIn('"observation_id"', prompt)
+        self.assertNotIn('"repo_id"', prompt)
+        self.assertNotIn('"source_id"', prompt)
+        self.assertNotIn('"record_id"', prompt)
+        self.assertNotIn('"revision_id"', prompt)
+        self.assertNotIn('"node_id"', prompt)
+
     def test_dedup_scaffolding_services_pregroup_deterministically(self):
         evidence_service = EvidenceDedupService()
         claim_service = ClaimCanonicalizationService()
@@ -1947,7 +2517,7 @@ class IngestionInvalidationTests(unittest.TestCase):
 
         self.assertEqual(counts["invalidated"], 1)
         self.assertTrue(
-            any(edge.relationship_type == "SUPERSEDES" for edge in plan.upsert_edges)
+            any(edge.relationship_type == "CONTRADICTS" for edge in plan.upsert_edges)
         )
 
     def test_github_evidence_planning_reports_invalidated_count(self):
@@ -2035,7 +2605,7 @@ class IngestionInvalidationTests(unittest.TestCase):
 
         self.assertEqual(counts["invalidated"], 1)
         self.assertTrue(
-            any(edge.relationship_type == "SUPERSEDES" for edge in plan.upsert_edges)
+            any(edge.relationship_type == "CONTRADICTS" for edge in plan.upsert_edges)
         )
 
 
