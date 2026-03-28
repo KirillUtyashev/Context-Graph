@@ -86,7 +86,7 @@ jobs:
 
       - name: Render coverage badge
         run: |
-          uv run python .github/scripts/render_coverage_badge.py \
+          python .github/scripts/render_coverage_badge.py \
             --coverage-xml coverage.xml \
             --output badges/coverage.svg
 
