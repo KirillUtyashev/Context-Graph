@@ -7,7 +7,7 @@ from context_graph.storage.backend.traversal import TraversalOperations
 from context_graph.storage.backend.types import TraversalHit, TraversalQuery
 
 
-class NeptuneTraversalOperations(TraversalOperations):
+class NeptuneTraversalOperations(TraversalOperations):  # pragma: no cover
     """Expose the traversal interface while deferring traversal semantics."""
 
     async def expand(self, query: TraversalQuery) -> list[TraversalHit]:

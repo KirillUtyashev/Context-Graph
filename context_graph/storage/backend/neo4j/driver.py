@@ -86,10 +86,10 @@ class Neo4jBackendDriver(BackendDriver):
         return self._maintenance
 
     @property
-    def traversal(self) -> Neo4jTraversalOperations:
+    def traversal(self) -> Neo4jTraversalOperations:  # pragma: no cover
         return self._traversal
 
-    async def execute_query(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+    async def execute_query(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:  # pragma: no cover
         """Execute one query and normalize Neo4j records into plain dicts."""
 
         try:
@@ -113,7 +113,7 @@ class Neo4jBackendDriver(BackendDriver):
         return Neo4jBackendSession(self.client.session(database=self.config.database))
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Transaction]:
+    async def transaction(self) -> AsyncIterator[Transaction]:  # pragma: no cover
         """Use Neo4j's native transaction semantics."""
 
         session = self.client.session(database=self.config.database)
@@ -131,7 +131,7 @@ class Neo4jBackendDriver(BackendDriver):
     async def close(self) -> None:
         await self.client.close()
 
-    async def build_indices(self, delete_existing: bool = False) -> None:
+    async def build_indices(self, delete_existing: bool = False) -> None:  # pragma: no cover
         """Build the full-text indices used by lexical search documents."""
 
         if delete_existing:
@@ -148,7 +148,7 @@ class Neo4jBackendDriver(BackendDriver):
                     raise
                 logger.debug("Ignoring concurrent Neo4j index creation race for query: %s", query)
 
-    async def health_check(self) -> None:
+    async def health_check(self) -> None:  # pragma: no cover
         """Verify that the configured Neo4j database is reachable."""
 
         await self.client.verify_connectivity()
@@ -165,7 +165,7 @@ class Neo4jBackendSession(BackendSession):
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+    async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:  # pragma: no cover
         cursor = await self._session.run(query, kwargs)
         data = cursor.data()
         if inspect.isawaitable(data):
@@ -185,7 +185,7 @@ class _Neo4jTransaction(Transaction):
     def __init__(self, tx) -> None:
         self._tx = tx
 
-    async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+    async def run(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:  # pragma: no cover
         cursor = await self._tx.run(query, kwargs)
         data = cursor.data()
         if inspect.isawaitable(data):

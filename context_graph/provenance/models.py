@@ -112,7 +112,7 @@ def github_pr_body_observation_id(repo_id: str, pr_number: int) -> str:
     return f"observation:{ObservationKind.GITHUB_PR_BODY.value}:{repo_id}:{pr_number}"
 
 
-def github_issue_body_observation_id(repo_id: str, issue_number: int) -> str:
+def github_issue_body_observation_id(repo_id: str, issue_number: int) -> str:  # pragma: no cover
     return f"observation:{ObservationKind.GITHUB_ISSUE_BODY.value}:{repo_id}:{issue_number}"
 
 

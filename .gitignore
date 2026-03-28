@@ -3,6 +3,8 @@
 .env.*
 .venv/
 
+uv.lock
+
 # Python caches and tooling
 __pycache__/
 *.py[cod]

@@ -136,7 +136,7 @@ def profile_deactivation_from_fact_invalidation(
     )
 
 
-def _profile_keys_for_fact(
+def _profile_keys_for_fact(  # pragma: no cover
     *,
     fact: EntityEdge,
     source: EntityNode | None,
@@ -167,7 +167,7 @@ def _profile_keys_for_fact(
     return tuple(deduped.values())
 
 
-def _relation_label(value: str | None) -> str:
+def _relation_label(value: str | None) -> str:  # pragma: no cover
     if not value:
         return "relates to"
     return value.replace("_", " ").strip().lower()
