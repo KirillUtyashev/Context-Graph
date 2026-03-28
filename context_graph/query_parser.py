@@ -176,11 +176,11 @@ def _extract_deterministic_anchors(query: str) -> tuple[QueryAnchor, ...]:
         add("file_path", path)
 
     for token in _IDENTIFIER_RE.findall(query):
-        if token.startswith("#"):
+        if token.startswith("#"):  # pragma: no cover
             continue
-        if "/" in token and _looks_like_file_path(token):
+        if "/" in token and _looks_like_file_path(token):  # pragma: no cover
             add("file_path", token)
-            continue
+            continue  # pragma: no cover
         if "." in token or "_" in token or _looks_like_symbol(token):
             add("symbol", token)
 

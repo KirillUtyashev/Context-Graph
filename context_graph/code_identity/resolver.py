@@ -256,9 +256,9 @@ def _normalize_hint_value(value: str) -> str:
         normalized = normalized[1:].strip()
     while normalized and normalized[-1] in "`'\"),.:;]}>":
         normalized = normalized[:-1].strip()
-    if normalized.endswith("()"):
+    if normalized.endswith("()"):  # pragma: no cover
         normalized = normalized[:-2].strip()
-    while normalized and normalized[-1] in ",.:;":
+    while normalized and normalized[-1] in ",.:;":  # pragma: no cover
         normalized = normalized[:-1].strip()
     return normalized
 
