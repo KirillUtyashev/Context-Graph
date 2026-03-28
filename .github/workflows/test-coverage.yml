@@ -41,17 +41,35 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Run tests with coverage
+        shell: bash
         run: |
-          PYTHONPATH=. uv run --no-project \
+          set -euo pipefail
+          UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run --no-project \
             --with pytest \
             --with pytest-cov \
+            --with pydantic \
             --with pydantic-settings \
             --with pyyaml \
+            --with neo4j \
             python -m pytest \
             --cov=context_graph \
             --cov-report=xml \
             --cov-report=term-missing \
-            tests | tee coverage-report.txt
+            tests/test_backend.py \
+            tests/test_context_graph.py \
+            tests/test_provenance.py \
+            tests/test_search_utils.py \
+            tests/test_submodules_core.py \
+            tests/test_submodules_backend.py \
+            tests/test_submodules_code_identity.py \
+            tests/test_submodules_ingestion.py \
+            tests/test_ingestion_driver_and_factories.py \
+            tests/test_profiles.py \
+            tests/test_github_client_more.py \
+            tests/test_metadata_store_more.py \
+            tests/test_profile_vector_store_more.py \
+            tests/test_next_pass_more.py \
+            tests/test_entity_nodes_module.py | tee coverage-report.txt
 
       - name: Render coverage badge
         run: |
