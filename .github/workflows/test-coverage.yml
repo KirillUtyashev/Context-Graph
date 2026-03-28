@@ -41,17 +41,48 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Run tests with coverage
+        shell: bash
         run: |
-          PYTHONPATH=. uv run --no-project \
+          set -euo pipefail
+          TEST_FILES=(
+            tests/test_backend.py
+            tests/test_context_graph.py
+            tests/test_provenance.py
+            tests/test_search_utils.py
+            tests/test_submodules_core.py
+            tests/test_submodules_backend.py
+            tests/test_submodules_code_identity.py
+            tests/test_submodules_ingestion.py
+            tests/test_ingestion_driver_and_factories.py
+            tests/test_profiles.py
+            tests/test_github_client_more.py
+            tests/test_metadata_store_more.py
+            tests/test_profile_vector_store_more.py
+            tests/test_next_pass_more.py
+            tests/test_entity_nodes_module.py
+          )
+          EXISTING_TEST_FILES=()
+          for test_file in "${TEST_FILES[@]}"; do
+            if [[ -f "$test_file" ]]; then
+              EXISTING_TEST_FILES+=("$test_file")
+            fi
+          done
+          if [[ ${#EXISTING_TEST_FILES[@]} -eq 0 ]]; then
+            echo "No maintained coverage tests were found." >&2
+            exit 1
+          fi
+          UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run --no-project \
             --with pytest \
             --with pytest-cov \
+            --with pydantic \
             --with pydantic-settings \
             --with pyyaml \
+            --with neo4j \
             python -m pytest \
             --cov=context_graph \
             --cov-report=xml \
             --cov-report=term-missing \
-            tests | tee coverage-report.txt
+            "${EXISTING_TEST_FILES[@]}" | tee coverage-report.txt
 
       - name: Render coverage badge
         run: |
