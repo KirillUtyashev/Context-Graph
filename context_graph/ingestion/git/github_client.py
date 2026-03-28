@@ -37,7 +37,7 @@ class GitHubApiError(RuntimeError):
         self.status_code = status_code
 
 
-class GitHubApiClient:  # pragma: no cover
+class GitHubApiClient:
     def __init__(
         self,
         *,
@@ -49,7 +49,7 @@ class GitHubApiClient:  # pragma: no cover
         self.api_base_url = api_base_url.rstrip("/")
         self.user_agent = user_agent
 
-    def get_repository(self, owner: str, repo: str) -> dict[str, Any]:  # pragma: no cover
+    def get_repository(self, owner: str, repo: str) -> dict[str, Any]:
         payload = self._request_json("GET", f"/repos/{owner}/{repo}")
         if not isinstance(payload, dict):
             raise RuntimeError("unexpected GitHub repository response")
@@ -60,7 +60,7 @@ class GitHubApiClient:  # pragma: no cover
             return self._list_commit_pull_requests_graphql(owner, repo, sha)
         return self._paginate(f"/repos/{owner}/{repo}/commits/{sha}/pulls")
 
-    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, Any]:  # pragma: no cover
+    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, Any]:
         payload = self._request_json("GET", f"/repos/{owner}/{repo}/pulls/{number}")
         if not isinstance(payload, dict):
             raise RuntimeError("unexpected GitHub pull request response")
@@ -78,7 +78,7 @@ class GitHubApiClient:  # pragma: no cover
     def list_issue_timeline(self, owner: str, repo: str, number: int) -> list[dict[str, Any]]:
         return self._paginate(f"/repos/{owner}/{repo}/issues/{number}/timeline")
 
-    def list_pull_request_linked_issue_numbers(  # pragma: no cover
+    def list_pull_request_linked_issue_numbers(
         self,
         owner: str,
         repo: str,
@@ -130,13 +130,13 @@ class GitHubApiClient:  # pragma: no cover
         linked_issue_numbers.update(active_connected_numbers)
         return tuple(sorted(linked_issue_numbers))
 
-    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, Any]:  # pragma: no cover
+    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, Any]:
         payload = self._request_json("GET", f"/repos/{owner}/{repo}/issues/{number}")
         if not isinstance(payload, dict):
             raise RuntimeError("unexpected GitHub issue response")
         return payload
 
-    def _paginate(self, path: str) -> list[dict[str, Any]]:  # pragma: no cover
+    def _paginate(self, path: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -188,7 +188,7 @@ class GitHubApiClient:  # pragma: no cover
             return None
         return json.loads(body)
 
-    def _graphql(self, *, query: str, variables: Mapping[str, Any]) -> Mapping[str, Any]:  # pragma: no cover
+    def _graphql(self, *, query: str, variables: Mapping[str, Any]) -> Mapping[str, Any]:
         payload = self._request_json(
             "POST",
             "/graphql",
@@ -213,9 +213,7 @@ class GitHubApiClient:  # pragma: no cover
             raise RuntimeError("GitHub GraphQL response missing data")
         return data
 
-    def _list_commit_pull_requests_graphql(  # pragma: no cover
-        self, owner: str, repo: str, sha: str
-    ) -> list[dict[str, Any]]:
+    def _list_commit_pull_requests_graphql(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
         payload = self._graphql(
             query=_COMMIT_ASSOCIATED_PULL_REQUESTS_QUERY,
             variables={
@@ -266,14 +264,14 @@ class GitHubApiClient:  # pragma: no cover
         return rows
 
 
-def _graphql_connection_nodes(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:  # pragma: no cover
+def _graphql_connection_nodes(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     nodes = payload.get("nodes")
     if not isinstance(nodes, Sequence):
         return []
     return [item for item in nodes if isinstance(item, Mapping)]
 
 
-def _graphql_issue_numbers_from_event(  # pragma: no cover
+def _graphql_issue_numbers_from_event(
     payload: Mapping[str, Any],
     repo_slug: str,
     *,
@@ -290,7 +288,7 @@ def _graphql_issue_numbers_from_event(  # pragma: no cover
     return values
 
 
-def _graphql_issue_number(payload: Mapping[str, Any], repo_slug: str) -> int | None:  # pragma: no cover
+def _graphql_issue_number(payload: Mapping[str, Any], repo_slug: str) -> int | None:
     if str(payload.get("__typename") or "") != "Issue":
         return None
     repository = payload.get("repository")
@@ -463,7 +461,7 @@ query PullRequestLinkedIssues($owner: String!, $repo: String!, $number: Int!) {
 """
 
 
-class GitHubRepoResolver:  # pragma: no cover
+class GitHubRepoResolver:
     def __init__(
         self,
         *,
@@ -547,7 +545,7 @@ class GitHubRepoResolver:  # pragma: no cover
         )
 
 
-def parse_github_repo_input(value: str) -> tuple[str, str]:  # pragma: no cover
+def parse_github_repo_input(value: str) -> tuple[str, str]:
     normalized = value.strip()
     for pattern in (_GITHUB_HTTP_RE, _GITHUB_SSH_RE, _GITHUB_SLUG_RE):
         match = pattern.match(normalized)
@@ -556,7 +554,7 @@ def parse_github_repo_input(value: str) -> tuple[str, str]:  # pragma: no cover
     raise RuntimeError(f"unsupported GitHub repository input: {value!r}")
 
 
-def is_github_remote(value: str) -> bool:  # pragma: no cover
+def is_github_remote(value: str) -> bool:
     try:
         parse_github_repo_input(value)
     except RuntimeError:
@@ -564,7 +562,7 @@ def is_github_remote(value: str) -> bool:  # pragma: no cover
     return True
 
 
-def collect_unique_numbers(payloads: Iterable[Mapping[str, Any]]) -> tuple[int, ...]:  # pragma: no cover
+def collect_unique_numbers(payloads: Iterable[Mapping[str, Any]]) -> tuple[int, ...]:
     values = {
         int(payload["number"])
         for payload in payloads

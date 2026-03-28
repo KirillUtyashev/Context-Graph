@@ -57,7 +57,7 @@ class EvidenceFactState:
 class EvidenceMutationPlanner:
     """Translate evidence extraction outputs into backend mutation records."""
 
-    def plan_evidence_records(  # pragma: no cover
+    def plan_evidence_records(
         self,
         *,
         observation: Observation,
@@ -102,7 +102,7 @@ class EvidenceMutationPlanner:
             )
         )
 
-    def plan_validated_claim_bundle(  # pragma: no cover
+    def plan_validated_claim_bundle(
         self,
         *,
         observation: Observation,
@@ -131,7 +131,7 @@ class EvidenceMutationPlanner:
             ),
         )
 
-    def prepare_evidence_record(  # pragma: no cover
+    def prepare_evidence_record(
         self,
         *,
         observation: Observation,

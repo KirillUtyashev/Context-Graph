@@ -81,7 +81,7 @@ class MetadataStore(ABC):
         """Persist one indexing run summary."""
 
     @abstractmethod
-    def reset_repo_context(self, repo_id: str) -> dict[str, int]:  # pragma: no cover
+    def reset_repo_context(self, repo_id: str) -> dict[str, int]:
         """Delete all metadata rows associated with one repository."""
 
 
@@ -215,7 +215,7 @@ class InMemoryMetadataStore(MetadataStore):
             }
         )
 
-    def reset_repo_context(self, repo_id: str) -> dict[str, int]:  # pragma: no cover
+    def reset_repo_context(self, repo_id: str) -> dict[str, int]:
         snapshot_deleted = 1 if repo_id in self._repo_states or repo_id in self._snapshots else 0
         source_deleted = 1 if repo_id in self._repo_sources else 0
         profile_deleted = len(self._profiles.get(repo_id, {}))
@@ -235,7 +235,7 @@ class InMemoryMetadataStore(MetadataStore):
         }
 
 
-class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
+class _DbApiMetadataStore(MetadataStore):
     """Shared DB-API implementation for SQLite and PostgreSQL stores."""
 
     def __init__(self, connection: Any, placeholder: str) -> None:
@@ -371,7 +371,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
             if callable(rollback):
                 rollback()
 
-    def load_latest_snapshot(self, repo_id: str) -> GraphSnapshot | None:  # pragma: no cover
+    def load_latest_snapshot(self, repo_id: str) -> GraphSnapshot | None:
         state_sql = f"""
             SELECT root_path, latest_revision_id, latest_indexed_at, stats_json
             FROM cg_repo_state
@@ -408,7 +408,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
             }
         )
 
-    def load_repo_index_state(self, repo_id: str) -> RepoIndexState | None:  # pragma: no cover
+    def load_repo_index_state(self, repo_id: str) -> RepoIndexState | None:
         self.bootstrap()
         state_sql = f"""
             SELECT
@@ -534,7 +534,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
         )
         self.connection.commit()
 
-    def load_repo_source_state(self, repo_id: str) -> RepoSourceState | None:  # pragma: no cover
+    def load_repo_source_state(self, repo_id: str) -> RepoSourceState | None:
         self.bootstrap()
         sql = f"""
             SELECT
@@ -634,7 +634,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
         )
         self.connection.commit()
 
-    def load_profiles(  # pragma: no cover
+    def load_profiles(
         self,
         repo_id: str,
         *,
@@ -671,7 +671,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
         rows = self._execute(sql, tuple(params)).fetchall()
         return tuple(_profile_from_row(row) for row in rows)
 
-    def upsert_profiles(self, profiles: Sequence[ProfileRecord]) -> None:  # pragma: no cover
+    def upsert_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
         if not profiles:
             return
         self.bootstrap()
@@ -748,9 +748,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
         self._executemany(sql, rows)
         self.connection.commit()
 
-    def deactivate_profiles(  # pragma: no cover
-        self, deactivations: Sequence[ProfileDeactivation]
-    ) -> None:
+    def deactivate_profiles(self, deactivations: Sequence[ProfileDeactivation]) -> None:
         if not deactivations:
             return
         self.bootstrap()
@@ -786,7 +784,7 @@ class _DbApiMetadataStore(MetadataStore):  # pragma: no cover
         self.connection.commit()
 
     @contextmanager
-    def repo_lock(self, repo_key: str) -> Iterator[None]:  # pragma: no cover
+    def repo_lock(self, repo_key: str) -> Iterator[None]:
         _ = repo_key
         yield
 
@@ -846,7 +844,7 @@ class SQLiteMetadataStore(_DbApiMetadataStore):
         super().__init__(connection=connection, placeholder="?")
 
 
-class PostgresMetadataStore(_DbApiMetadataStore):  # pragma: no cover
+class PostgresMetadataStore(_DbApiMetadataStore):
     """PostgreSQL-compatible metadata store with advisory repo locking."""
 
     def __init__(self, connection: Any) -> None:
@@ -870,7 +868,7 @@ class PostgresMetadataStore(_DbApiMetadataStore):  # pragma: no cover
             self.connection.commit()
 
     @classmethod
-    def from_dsn(cls, dsn: str) -> "PostgresMetadataStore":  # pragma: no cover
+    def from_dsn(cls, dsn: str) -> "PostgresMetadataStore":
         """Create a PostgreSQL-backed store from a DSN using psycopg or psycopg2."""
 
         try:
@@ -898,11 +896,11 @@ class AuroraMetadataStore(PostgresMetadataStore):
     """Backward-compatible alias for Aurora PostgreSQL deployments."""
 
 
-def _stable_lock_id(value: str) -> int:  # pragma: no cover
+def _stable_lock_id(value: str) -> int:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
-def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:  # pragma: no cover
+def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:
     return ProfileRecord(
         profile_id=str(row[0]),
         repo_id=str(row[1]),

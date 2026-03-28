@@ -7,7 +7,7 @@ from importlib import import_module
 __all__ = ["NeptuneBackendDriver", "NeptuneConfig"]
 
 
-def __getattr__(name: str):  # pragma: no cover
+def __getattr__(name: str):
     if name == "NeptuneConfig":
         return getattr(import_module(".config", __name__), name)
     if name == "NeptuneBackendDriver":

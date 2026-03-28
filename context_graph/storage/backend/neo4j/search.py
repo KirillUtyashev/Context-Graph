@@ -65,7 +65,7 @@ class Neo4jSearchOperations(SearchOperations):
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[: query.limit]
 
-    async def fetch(self, refs: list[GraphRecordRef]) -> list[dict[str, Any]]:  # pragma: no cover
+    async def fetch(self, refs: list[GraphRecordRef]) -> list[dict[str, Any]]:
         """Hydrate raw Neo4j node and edge records by `record_id`."""
 
         if not refs:
@@ -94,7 +94,7 @@ class Neo4jSearchOperations(SearchOperations):
         return ordered
 
 
-def _build_lexical_search_query(*, index_name: str, label: str, search_query: SearchQuery) -> tuple[str, dict[str, Any]]:  # pragma: no cover
+def _build_lexical_search_query(*, index_name: str, label: str, search_query: SearchQuery) -> tuple[str, dict[str, Any]]:
     """Build the Neo4j full-text query for one search-document kind."""
 
     where_clauses = [f"doc:{label}"]
@@ -146,7 +146,7 @@ LIMIT $search_limit
     return cypher.strip(), params
 
 
-def _append_list_filter(  # pragma: no cover
+def _append_list_filter(
     where_clauses: list[str],
     params: dict[str, Any],
     *,
@@ -160,7 +160,7 @@ def _append_list_filter(  # pragma: no cover
     params[param_name] = list(values)
 
 
-def _append_extra_filters(  # pragma: no cover
+def _append_extra_filters(
     where_clauses: list[str],
     params: dict[str, Any],
     extra_filters: dict[str, object],
@@ -175,7 +175,7 @@ def _append_extra_filters(  # pragma: no cover
             params[param_name] = value
 
 
-def _records_to_hits(*, kind: RecordKind, records: list[dict[str, Any]]) -> list[SearchHit]:  # pragma: no cover
+def _records_to_hits(*, kind: RecordKind, records: list[dict[str, Any]]) -> list[SearchHit]:
     hits: list[SearchHit] = []
     for record in records:
         ref = GraphRecordRef(
@@ -201,7 +201,7 @@ def _records_to_hits(*, kind: RecordKind, records: list[dict[str, Any]]) -> list
     return hits
 
 
-def _ref_params(refs: list[GraphRecordRef]) -> list[dict[str, str | None]]:  # pragma: no cover
+def _ref_params(refs: list[GraphRecordRef]) -> list[dict[str, str | None]]:
     return [
         {
             "record_id": ref.record_id,

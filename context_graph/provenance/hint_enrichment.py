@@ -77,7 +77,7 @@ class EnrichedAboutHint:
     raw_value: str
 
 
-def collect_grounding_hints(  # pragma: no cover
+def collect_grounding_hints(
     *,
     observation: Observation,
     claim: Any | None = None,
@@ -102,7 +102,7 @@ def collect_grounding_hints(  # pragma: no cover
     return tuple(deduped)
 
 
-def infer_hint_kind(value: str) -> HintKind | None:  # pragma: no cover
+def infer_hint_kind(value: str) -> HintKind | None:
     normalized = normalize_hint_value(value)
     if not normalized:
         return None
@@ -121,7 +121,7 @@ def infer_hint_kind(value: str) -> HintKind | None:  # pragma: no cover
     return None
 
 
-def normalize_hint_value(value: str) -> str:  # pragma: no cover
+def normalize_hint_value(value: str) -> str:
     normalized = " ".join(str(value).split()).strip()
     if not normalized:
         return ""
@@ -136,7 +136,7 @@ def normalize_hint_value(value: str) -> str:  # pragma: no cover
     return normalized
 
 
-def _enriched_from_values(values: Any, source: HintSource) -> list[EnrichedAboutHint]:  # pragma: no cover
+def _enriched_from_values(values: Any, source: HintSource) -> list[EnrichedAboutHint]:
     enriched: list[EnrichedAboutHint] = []
     for raw in values or ():
         normalized = normalize_hint_value(str(raw))
@@ -154,7 +154,7 @@ def _enriched_from_values(values: Any, source: HintSource) -> list[EnrichedAbout
     return enriched
 
 
-def _extract_hints_from_text(text: str, source: HintSource) -> list[EnrichedAboutHint]:  # pragma: no cover
+def _extract_hints_from_text(text: str, source: HintSource) -> list[EnrichedAboutHint]:
     raw_matches: list[str] = []
     if not text:
         return []
@@ -170,36 +170,36 @@ def _extract_hints_from_text(text: str, source: HintSource) -> list[EnrichedAbou
     return _enriched_from_values(raw_matches, source)
 
 
-def _looks_like_node_id(value: str) -> bool:  # pragma: no cover
+def _looks_like_node_id(value: str) -> bool:
     prefix, _, remainder = value.partition(":")
     return bool(remainder) and bool(prefix) and prefix.replace("_", "").isalpha()
 
 
-def _looks_like_file_path(value: str) -> bool:  # pragma: no cover
+def _looks_like_file_path(value: str) -> bool:
     if "/" not in value:
         return False
     return _has_known_extension(value.rsplit("/", 1)[-1])
 
 
-def _looks_like_file_basename(value: str) -> bool:  # pragma: no cover
+def _looks_like_file_basename(value: str) -> bool:
     if "/" in value:
         return False
     return _has_known_extension(value)
 
 
-def _has_known_extension(value: str) -> bool:  # pragma: no cover
+def _has_known_extension(value: str) -> bool:
     if "." not in value:
         return False
     extension = value.rsplit(".", 1)[-1].lower()
     return extension in _KNOWN_FILE_EXTENSIONS
 
 
-def _looks_like_dotted_identifier(value: str) -> bool:  # pragma: no cover
+def _looks_like_dotted_identifier(value: str) -> bool:
     if "." not in value:
         return False
     segments = value.split(".")
     return all(segment and segment.replace("_", "").isalnum() and segment[0].isalpha() for segment in segments)
 
 
-def _looks_like_symbol_name(value: str) -> bool:  # pragma: no cover
+def _looks_like_symbol_name(value: str) -> bool:
     return bool(value) and value.replace("_", "").isalnum() and value[0].isalpha()

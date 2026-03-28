@@ -24,13 +24,13 @@ _REL_TYPE_RE = re.compile(r"[^A-Z0-9_]")
 _NODE_LABEL_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
-class Neo4jMutationOperations(MutationOperations):  # pragma: no cover
+class Neo4jMutationOperations(MutationOperations):
     """Apply typed node, edge, and search-document upserts to Neo4j."""
 
     def __init__(self, driver) -> None:
         self._driver = driver
 
-    async def apply(self, plan: MutationPlan) -> MutationApplyResult:  # pragma: no cover
+    async def apply(self, plan: MutationPlan) -> MutationApplyResult:
         node_count = 0
         edge_count = 0
         search_doc_count = 0
@@ -76,7 +76,7 @@ class Neo4jMutationOperations(MutationOperations):  # pragma: no cover
         )
 
 
-def _group_nodes(records: tuple[NodeRecord, ...]) -> dict[tuple[str, ...], list[NodeRecord]]:  # pragma: no cover
+def _group_nodes(records: tuple[NodeRecord, ...]) -> dict[tuple[str, ...], list[NodeRecord]]:
     grouped: dict[tuple[str, ...], list[NodeRecord]] = defaultdict(list)
     for record in records:
         labels = tuple(_sanitize_node_label(label) for label in record.labels)
@@ -84,14 +84,14 @@ def _group_nodes(records: tuple[NodeRecord, ...]) -> dict[tuple[str, ...], list[
     return grouped
 
 
-def _group_edges(records: tuple[EdgeRecord, ...]) -> dict[str, list[EdgeRecord]]:  # pragma: no cover
+def _group_edges(records: tuple[EdgeRecord, ...]) -> dict[str, list[EdgeRecord]]:
     grouped: dict[str, list[EdgeRecord]] = defaultdict(list)
     for record in records:
         grouped[_sanitize_relationship_type(record.relationship_type)].append(record)
     return grouped
 
 
-def _group_search_documents(  # pragma: no cover
+def _group_search_documents(
     records: tuple[SearchDocumentRecord, ...],
 ) -> dict[RecordKind, list[SearchDocumentRecord]]:
     grouped: dict[RecordKind, list[SearchDocumentRecord]] = defaultdict(list)
@@ -100,7 +100,7 @@ def _group_search_documents(  # pragma: no cover
     return grouped
 
 
-def _node_upsert_query(labels: tuple[str, ...]) -> str:  # pragma: no cover
+def _node_upsert_query(labels: tuple[str, ...]) -> str:
     label_sql = "".join(f":{label}" for label in labels)
     return (
         "UNWIND $rows AS row "
@@ -109,7 +109,7 @@ def _node_upsert_query(labels: tuple[str, ...]) -> str:  # pragma: no cover
     )
 
 
-def _edge_upsert_query(relationship_type: str) -> str:  # pragma: no cover
+def _edge_upsert_query(relationship_type: str) -> str:
     return (
         "UNWIND $rows AS row "
         f"MATCH (source:BackendRecord {{{GRAPH_RECORD_ID_PROPERTY}: row.source_record_id}}) "
@@ -119,7 +119,7 @@ def _edge_upsert_query(relationship_type: str) -> str:  # pragma: no cover
     )
 
 
-def _search_document_upsert_query(record_kind: RecordKind) -> str:  # pragma: no cover
+def _search_document_upsert_query(record_kind: RecordKind) -> str:
     label = (
         NODE_SEARCH_DOCUMENT_LABEL
         if record_kind is RecordKind.NODE
@@ -132,7 +132,7 @@ def _search_document_upsert_query(record_kind: RecordKind) -> str:  # pragma: no
     )
 
 
-def _sanitize_relationship_type(value: str) -> str:  # pragma: no cover
+def _sanitize_relationship_type(value: str) -> str:
     normalized = _REL_TYPE_RE.sub("_", value.upper()).strip("_")
     if not normalized:
         raise ValueError(f"invalid relationship type: {value!r}")
@@ -141,7 +141,7 @@ def _sanitize_relationship_type(value: str) -> str:  # pragma: no cover
     return normalized
 
 
-def _sanitize_node_label(value: str) -> str:  # pragma: no cover
+def _sanitize_node_label(value: str) -> str:
     normalized = _NODE_LABEL_RE.sub("_", value).strip("_")
     if not normalized:
         raise ValueError(f"invalid node label: {value!r}")

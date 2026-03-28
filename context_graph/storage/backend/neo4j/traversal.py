@@ -7,7 +7,7 @@ from context_graph.storage.backend.traversal import TraversalOperations
 from context_graph.storage.backend.types import TraversalHit, TraversalQuery
 
 
-class Neo4jTraversalOperations(TraversalOperations):  # pragma: no cover
+class Neo4jTraversalOperations(TraversalOperations):
     """Expose the traversal interface while keeping V1 intentionally narrow."""
 
     async def expand(self, query: TraversalQuery) -> list[TraversalHit]:

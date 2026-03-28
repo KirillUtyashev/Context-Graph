@@ -42,13 +42,13 @@ class FactInvalidationPlanResult:
     invalidated_count: int = 0
 
 
-class CurrentEvidenceReader:  # pragma: no cover
+class CurrentEvidenceReader:
     """Load current evidence records that may be invalidated by a new fact."""
 
     def __init__(self, *, backend_driver: BackendDriver | None) -> None:
         self.backend_driver = backend_driver
 
-    def load_current_facts(  # pragma: no cover
+    def load_current_facts(
         self,
         *,
         repo_id: str,
@@ -97,7 +97,7 @@ class CurrentEvidenceReader:  # pragma: no cover
         return tuple(facts[:limit])
 
 
-class EvidenceInvalidationPlanner:  # pragma: no cover
+class EvidenceInvalidationPlanner:
     """Resolve contradictions against persisted current evidence before insertion."""
 
     def __init__(
@@ -115,7 +115,7 @@ class EvidenceInvalidationPlanner:  # pragma: no cover
         )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service
 
-    def plan_validated_claims(  # pragma: no cover
+    def plan_validated_claims(
         self,
         *,
         observation: Observation,
@@ -137,7 +137,7 @@ class EvidenceInvalidationPlanner:  # pragma: no cover
             invalidated_count=invalidated_count,
         )
 
-    def plan_validated_claim_bundle(  # pragma: no cover
+    def plan_validated_claim_bundle(
         self,
         *,
         observation: Observation,
@@ -246,7 +246,7 @@ class EvidenceInvalidationPlanner:  # pragma: no cover
             invalidated_count=invalidated_count,
         )
 
-    def _resolve_contradicted_facts(  # pragma: no cover
+    def _resolve_contradicted_facts(
         self,
         *,
         observation: Observation,
@@ -289,7 +289,7 @@ class EvidenceInvalidationPlanner:  # pragma: no cover
         )
 
 
-def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenceRecord | None:  # pragma: no cover
+def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenceRecord | None:
     properties = dict(row.get("evidence_properties") or {})
     metadata = _parse_json_object(properties.get("metadata_json"))
     observation_properties = [
@@ -350,7 +350,7 @@ def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenc
     return evidence
 
 
-def _build_evidence_record(  # pragma: no cover
+def _build_evidence_record(
     *,
     evidence_id: str,
     repo_id: str,
@@ -397,7 +397,7 @@ def _build_evidence_record(  # pragma: no cover
     )
 
 
-def _collapse_fact_group(records: Sequence[PersistedEvidenceRecord]) -> PersistedEvidenceFact:  # pragma: no cover
+def _collapse_fact_group(records: Sequence[PersistedEvidenceRecord]) -> PersistedEvidenceFact:
     ordered_records = sorted(records, key=_record_sort_key, reverse=True)
     representative = ordered_records[0]
     return PersistedEvidenceFact(
@@ -417,7 +417,7 @@ def _collapse_fact_group(records: Sequence[PersistedEvidenceRecord]) -> Persiste
     )
 
 
-def _record_sort_key(record: PersistedEvidenceRecord) -> tuple[bool, datetime, str]:  # pragma: no cover
+def _record_sort_key(record: PersistedEvidenceRecord) -> tuple[bool, datetime, str]:
     observed_at = _parse_datetime(record.evidence.observed_at)
     return (
         observed_at is not None,
@@ -426,7 +426,7 @@ def _record_sort_key(record: PersistedEvidenceRecord) -> tuple[bool, datetime, s
     )
 
 
-def _fact_sort_key(fact: PersistedEvidenceFact) -> tuple[bool, datetime, str]:  # pragma: no cover
+def _fact_sort_key(fact: PersistedEvidenceFact) -> tuple[bool, datetime, str]:
     observed_at = _parse_datetime(fact.observed_at)
     return (
         observed_at is not None,
@@ -435,13 +435,13 @@ def _fact_sort_key(fact: PersistedEvidenceFact) -> tuple[bool, datetime, str]:  
     )
 
 
-def _newest_fact(facts: Sequence[PersistedEvidenceFact]) -> PersistedEvidenceFact | None:  # pragma: no cover
+def _newest_fact(facts: Sequence[PersistedEvidenceFact]) -> PersistedEvidenceFact | None:
     if not facts:
         return None
     return sorted(facts, key=_fact_sort_key, reverse=True)[0]
 
 
-def _is_strictly_newer(existing_observed_at: str | None, new_observed_at: str | None) -> bool:  # pragma: no cover
+def _is_strictly_newer(existing_observed_at: str | None, new_observed_at: str | None) -> bool:
     existing = _parse_datetime(existing_observed_at)
     new = _parse_datetime(new_observed_at)
     if existing is None or new is None:
@@ -449,11 +449,11 @@ def _is_strictly_newer(existing_observed_at: str | None, new_observed_at: str | 
     return existing > new
 
 
-def _evidence_ids(fact: PersistedEvidenceFact) -> tuple[str, ...]:  # pragma: no cover
+def _evidence_ids(fact: PersistedEvidenceFact) -> tuple[str, ...]:
     return tuple(record.evidence.evidence_id for record in fact.evidence_records)
 
 
-def _parse_datetime(value: str | None) -> datetime | None:  # pragma: no cover
+def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     normalized = value.replace("Z", "+00:00")
@@ -463,7 +463,7 @@ def _parse_datetime(value: str | None) -> datetime | None:  # pragma: no cover
         return None
 
 
-def _parse_json_object(value: object) -> dict[str, Any]:  # pragma: no cover
+def _parse_json_object(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     if not isinstance(value, str) or not value.strip():
@@ -475,7 +475,7 @@ def _parse_json_object(value: object) -> dict[str, Any]:  # pragma: no cover
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
-def _coerce_bool(value: object, *, default: bool) -> bool:  # pragma: no cover
+def _coerce_bool(value: object, *, default: bool) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
@@ -489,14 +489,14 @@ def _coerce_bool(value: object, *, default: bool) -> bool:  # pragma: no cover
     return bool(value)
 
 
-def _string_or_none(value: object) -> str | None:  # pragma: no cover
+def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     normalized = str(value).strip()
     return normalized or None
 
 
-def _int_or_none(value: object) -> int | None:  # pragma: no cover
+def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, int):

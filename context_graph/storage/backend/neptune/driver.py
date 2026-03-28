@@ -66,7 +66,7 @@ class NeptuneBackendDriver(BackendDriver):
 
     provider = BackendProvider.NEPTUNE
 
-    def __init__(self, config: NeptuneConfig):  # pragma: no cover
+    def __init__(self, config: NeptuneConfig):
         if not config.host:
             raise BackendConfigurationError("Neptune host must not be empty")
         self.config = config
@@ -98,10 +98,10 @@ class NeptuneBackendDriver(BackendDriver):
         return self._maintenance
 
     @property
-    def traversal(self) -> NeptuneTraversalOperations:  # pragma: no cover
+    def traversal(self) -> NeptuneTraversalOperations:
         return self._traversal
 
-    async def execute_query(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:  # pragma: no cover
+    async def execute_query(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
         """Execute one OpenCypher query through Neptune's boto3 client."""
 
         params = {key: value for key, value in kwargs.items()}
@@ -110,12 +110,12 @@ class NeptuneBackendDriver(BackendDriver):
     def session(self) -> BackendSession:
         return NeptuneBackendSession(self)
 
-    async def close(self) -> None:  # pragma: no cover
+    async def close(self) -> None:
         close = getattr(self.client.client, "close", None)
         if callable(close):
             await asyncio.to_thread(close)
 
-    async def build_indices(self, delete_existing: bool = False) -> None:  # pragma: no cover
+    async def build_indices(self, delete_existing: bool = False) -> None:
         """Create or refresh the AOSS sidecar indices used for lexical search."""
 
         if self.aoss_client is None:

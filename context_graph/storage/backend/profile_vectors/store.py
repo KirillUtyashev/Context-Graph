@@ -23,11 +23,11 @@ class ProfileVectorStore(ABC):
         """Persist or update profile-key embeddings."""
 
     @abstractmethod
-    def deactivate_profile_keys(self, deactivations: Sequence[ProfileDeactivation]) -> None:  # pragma: no cover
+    def deactivate_profile_keys(self, deactivations: Sequence[ProfileDeactivation]) -> None:
         """Mark matching profile-key rows inactive."""
 
     @abstractmethod
-    def search_profile_keys(  # pragma: no cover
+    def search_profile_keys(
         self,
         *,
         repo_id: str,
@@ -39,11 +39,11 @@ class ProfileVectorStore(ABC):
         """Search profile-key vectors for one repository."""
 
     @abstractmethod
-    def reset_repo_context(self, repo_id: str) -> int:  # pragma: no cover
+    def reset_repo_context(self, repo_id: str) -> int:
         """Delete all profile-key rows associated with one repository."""
 
 
-class InMemoryProfileVectorStore(ProfileVectorStore):  # pragma: no cover
+class InMemoryProfileVectorStore(ProfileVectorStore):
     """In-memory cosine-similarity implementation used in tests and local flows."""
 
     def __init__(self) -> None:
@@ -130,7 +130,7 @@ class InMemoryProfileVectorStore(ProfileVectorStore):  # pragma: no cover
         return deleted
 
 
-class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
+class PgVectorProfileVectorStore(ProfileVectorStore):
     """PostgreSQL/pgvector-backed store for profile-key embeddings."""
 
     def __init__(self, connection: Any, *, embedding_dim: int = 1024) -> None:
@@ -139,7 +139,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
         self.placeholder = "%s"
 
     @classmethod
-    def from_metadata_store(  # pragma: no cover
+    def from_metadata_store(
         cls,
         metadata_store,
         *,
@@ -151,7 +151,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
             raise RuntimeError("PgVectorProfileVectorStore requires a PostgreSQL-compatible metadata store")
         return cls(metadata_store.connection, embedding_dim=embedding_dim)
 
-    def bootstrap(self) -> None:  # pragma: no cover
+    def bootstrap(self) -> None:
         cursor = self.connection.cursor()
         cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cursor.execute(
@@ -193,7 +193,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
         )
         self.connection.commit()
 
-    def upsert_profile_keys(self, records: Sequence[ProfileKeyRecord]) -> None:  # pragma: no cover
+    def upsert_profile_keys(self, records: Sequence[ProfileKeyRecord]) -> None:
         if not records:
             return
         self.bootstrap()
@@ -250,7 +250,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
         cursor.executemany(sql, rows)
         self.connection.commit()
 
-    def deactivate_profile_keys(self, deactivations: Sequence[ProfileDeactivation]) -> None:  # pragma: no cover
+    def deactivate_profile_keys(self, deactivations: Sequence[ProfileDeactivation]) -> None:
         if not deactivations:
             return
         self.bootstrap()
@@ -286,7 +286,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
         cursor.executemany(sql, rows)
         self.connection.commit()
 
-    def search_profile_keys(  # pragma: no cover
+    def search_profile_keys(
         self,
         *,
         repo_id: str,
@@ -338,7 +338,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):  # pragma: no cover
             for row in rows
         )
 
-    def reset_repo_context(self, repo_id: str) -> int:  # pragma: no cover
+    def reset_repo_context(self, repo_id: str) -> int:
         self.bootstrap()
         cursor = self.connection.cursor()
         cursor.execute("SELECT COUNT(*) FROM cg_profile_keys WHERE repo_id = %s", (repo_id,))
@@ -352,11 +352,11 @@ class AuroraProfileVectorStore(PgVectorProfileVectorStore):
     """Backward-compatible alias for Aurora PostgreSQL deployments."""
 
 
-def _vector_literal(values: Sequence[float]) -> str:  # pragma: no cover
+def _vector_literal(values: Sequence[float]) -> str:
     return "[" + ",".join(f"{float(value):.12g}" for value in values) + "]"
 
 
-def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:  # pragma: no cover
+def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     if not left or not right:
         return 0.0
     numerator = sum(float(a) * float(b) for a, b in zip(left, right))

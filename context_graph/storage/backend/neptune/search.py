@@ -32,7 +32,7 @@ class NeptuneSearchOperations(SearchOperations):
     def __init__(self, driver) -> None:
         self._driver = driver
 
-    async def search(self, query: SearchQuery) -> list[SearchHit]:  # pragma: no cover
+    async def search(self, query: SearchQuery) -> list[SearchHit]:
         """Run lexical search against the AOSS sidecar indices."""
 
         if query.mode is not SearchMode.LEXICAL:
@@ -56,7 +56,7 @@ class NeptuneSearchOperations(SearchOperations):
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[: query.limit]
 
-    async def fetch(self, refs: list[GraphRecordRef]) -> list[dict[str, Any]]:  # pragma: no cover
+    async def fetch(self, refs: list[GraphRecordRef]) -> list[dict[str, Any]]:
         """Hydrate raw graph records from Neptune using their `record_id`."""
 
         if not refs:
@@ -85,7 +85,7 @@ class NeptuneSearchOperations(SearchOperations):
         return ordered
 
 
-def build_aoss_query(search_query: SearchQuery) -> dict[str, Any]:  # pragma: no cover
+def build_aoss_query(search_query: SearchQuery) -> dict[str, Any]:
     """Translate a shared lexical query into an AOSS bool query."""
 
     filters: list[dict[str, Any]] = []
@@ -119,7 +119,7 @@ def build_aoss_query(search_query: SearchQuery) -> dict[str, Any]:  # pragma: no
     return query_body
 
 
-def _append_terms_filter(  # pragma: no cover
+def _append_terms_filter(
     filters: list[dict[str, Any]],
     field: str,
     values: tuple[str, ...] | None,
@@ -128,7 +128,7 @@ def _append_terms_filter(  # pragma: no cover
         filters.append({"terms": {field: list(values)}})
 
 
-def _aoss_response_to_hits(*, kind: RecordKind, response: dict[str, Any]) -> list[SearchHit]:  # pragma: no cover
+def _aoss_response_to_hits(*, kind: RecordKind, response: dict[str, Any]) -> list[SearchHit]:
     hits: list[SearchHit] = []
     for raw_hit in response.get("hits", {}).get("hits", []):
         source = raw_hit.get("_source", {})
@@ -151,7 +151,7 @@ def _aoss_response_to_hits(*, kind: RecordKind, response: dict[str, Any]) -> lis
     return hits
 
 
-def _ref_params(refs: list[GraphRecordRef]) -> list[dict[str, str | None]]:  # pragma: no cover
+def _ref_params(refs: list[GraphRecordRef]) -> list[dict[str, str | None]]:
     return [
         {
             "record_id": ref.record_id,

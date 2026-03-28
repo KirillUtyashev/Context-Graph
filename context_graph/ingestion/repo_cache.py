@@ -44,7 +44,7 @@ class RepoCacheManager:
             source_state=None,
         )
 
-    def ensure_managed_repo(  # pragma: no cover
+    def ensure_managed_repo(
         self,
         repo_ref: GitHubRepoRef,
         *,
@@ -87,13 +87,13 @@ class RepoCacheManager:
             source_state=source_state,
         )
 
-    def prepare_default_branch(self, repo_path: str, branch: str) -> None:  # pragma: no cover
+    def prepare_default_branch(self, repo_path: str, branch: str) -> None:
         """Move a cached clone to the remote default branch HEAD."""
 
         self.git_metadata.checkout_branch(repo_path, branch)
         self.git_metadata.hard_reset(repo_path, f"origin/{branch}")
 
-    def resolve_ref_sha(self, repo_path: str, ref: str) -> str:  # pragma: no cover
+    def resolve_ref_sha(self, repo_path: str, ref: str) -> str:
         """Resolve a user-provided ref across the common local and remote forms."""
 
         candidates = (
@@ -109,13 +109,13 @@ class RepoCacheManager:
                 continue
         raise RuntimeError(f"unable to resolve git ref {ref!r}")
 
-    def cleanup_request_workspace(self, repo_id: str, request_id: str) -> None:  # pragma: no cover
+    def cleanup_request_workspace(self, repo_id: str, request_id: str) -> None:
         """Best-effort cleanup of the temporary worktree root for one request."""
 
         work_root = self._request_work_root(repo_id, request_id)
         shutil.rmtree(work_root, ignore_errors=True)
 
-    def _ensure_clone(  # pragma: no cover
+    def _ensure_clone(
         self,
         repo_ref: GitHubRepoRef,
         clone_path: Path,
@@ -157,7 +157,7 @@ class RepoCacheManager:
                 auth_token=auth_token,
             )
 
-    def _looks_like_git_repo(self, clone_path: Path) -> bool:  # pragma: no cover
+    def _looks_like_git_repo(self, clone_path: Path) -> bool:
         try:
             resolved = Path(self.git_metadata.resolve_repo_root(str(clone_path)))
         except RuntimeError:

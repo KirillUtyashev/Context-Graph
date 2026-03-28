@@ -1,348 +1,454 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
-from context_graph.profile_vectors import build_profile_key_records, profile_key_id
-from context_graph.profiles import ProfileRecord
-from context_graph.storage.backend.errors import (
-    BackendFeatureNotImplementedError,
-    UnsupportedCapabilityError,
-)
-from context_graph.storage.backend.neo4j.search import (
-    Neo4jSearchOperations,
-    _build_lexical_search_query,
-    _records_to_hits as neo4j_records_to_hits,
-)
-from context_graph.storage.backend.neptune.search import (
-    NeptuneSearchOperations,
-    _aoss_response_to_hits,
-    build_aoss_query,
-)
-from context_graph.storage.backend.search import ensure_lexical_mode, validate_extra_filters
-from context_graph.storage.backend.types import (
-    GraphRecordRef,
-    RecordKind,
-    SearchMode,
-    SearchQuery,
-    SearchHit,
-)
+from context_graph.memory.search.search_filters import SearchFilters
+from context_graph.memory.search import search_utils as su
+from context_graph.storage.graph.driver import GraphProvider
 
 
-class FakeEmbeddingProvider:
-    def embed_texts(self, texts):
-        return [[float(len(text)), float(index + 1)] for index, text in enumerate(texts)]
+@dataclass
+class FakeNode:
+    uuid: str
+    group_id: str = "g1"
+    name: str = "node"
+    name_embedding: list[float] | None = None
 
 
-class FakeNeo4jDriver:
-    def __init__(self, results: list[list[dict]] | None = None) -> None:
-        self.results = list(results or [])
-        self.calls: list[tuple[str, dict]] = []
+@dataclass
+class FakeEdge:
+    uuid: str
+    source_node_uuid: str = "s1"
+    target_node_uuid: str = "t1"
+    group_id: str = "g1"
+    episodes: list[str] | None = None
+    fact_embedding: list[float] | None = None
 
-    async def execute_query(self, query: str, **kwargs):
-        self.calls.append((query, kwargs))
-        if self.results:
-            return self.results.pop(0)
-        return []
+    def __post_init__(self) -> None:
+        if self.episodes is None:
+            self.episodes = []
+
+    def model_dump(self) -> dict[str, object]:
+        return {
+            "uuid": self.uuid,
+            "source_node_uuid": self.source_node_uuid,
+            "target_node_uuid": self.target_node_uuid,
+            "group_id": self.group_id,
+            "fact_embedding": self.fact_embedding,
+        }
 
 
-class FakeNeptuneDriver:
+class FakeDriver:
     def __init__(
         self,
+        provider: GraphProvider,
         *,
-        aoss_client: object | None = object(),
-        aoss_responses: list[dict] | None = None,
-        query_results: list[list[dict]] | None = None,
+        execute_results: list[tuple[object, object, object]] | None = None,
+        search_interface=None,
+        graph_operations_interface=None,
+        aoss_result: dict | None = None,
     ) -> None:
-        self.aoss_client = aoss_client
-        self.aoss_responses = list(aoss_responses or [])
-        self.query_results = list(query_results or [])
-        self.aoss_calls: list[tuple[str, SearchQuery]] = []
-        self.query_calls: list[tuple[str, dict]] = []
+        self.provider = provider
+        self.search_interface = search_interface
+        self.graph_operations_interface = graph_operations_interface
+        self.fulltext_syntax = ""
+        self._execute_results = list(execute_results or [])
+        self.calls: list[tuple[str, dict]] = []
+        self.aoss_calls: list[tuple[str, str, int | None]] = []
+        self.aoss_result = aoss_result or {"hits": {"total": {"value": 0}, "hits": []}}
 
-    def _run_aoss_query(self, *, index_name: str, query: SearchQuery):
-        self.aoss_calls.append((index_name, query))
-        if self.aoss_responses:
-            return self.aoss_responses.pop(0)
-        return {"hits": {"hits": []}}
+    async def execute_query(self, cypher_query_: str, **kwargs):
+        self.calls.append((cypher_query_, kwargs))
+        if self._execute_results:
+            return self._execute_results.pop(0)
+        return [], [], None
 
-    async def execute_query(self, query: str, **kwargs):
-        self.query_calls.append((query, kwargs))
-        if self.query_results:
-            return self.query_results.pop(0)
-        return []
+    def run_aoss_query(self, index_name: str, query: str, limit: int | None = None):
+        self.aoss_calls.append((index_name, query, limit))
+        return self.aoss_result
+
+    def build_fulltext_query(
+        self, query: str, group_ids: list[str] | None = None, max_query_length: int = 128
+    ) -> str:
+        return f"ft::{query}::{group_ids}::{max_query_length}"
 
 
-def make_profile(*, profile_id: str = "profile:1", keys: tuple[str, ...] = ("helper", "rollback")) -> ProfileRecord:
-    return ProfileRecord(
-        profile_id=profile_id,
-        repo_id="demo",
-        profile_kind="semantic_fact_profile",
-        profile_target_kind="FactEdge",
-        profile_target_id="fact:1",
-        relation_type="JUSTIFIES",
-        source_node_id="node:source",
-        source_node_kind="Function",
-        target_node_id="node:target",
-        target_node_kind="Function",
-        target_revision_id=None,
-        value_text="main uses helper for rollback behavior",
-        keys=keys,
-        metadata={"source": "unit-test"},
-        is_active=True,
-        valid_from_revision=None,
-        valid_to_revision=None,
-        updated_at="2026-03-27T00:00:00+00:00",
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_calculate_cosine_similarity_handles_zero_and_nonzero_vectors() -> None:
+    assert su.calculate_cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+    assert su.calculate_cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0
+
+
+def test_fulltext_query_covers_provider_specific_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(su, "validate_group_ids", lambda group_ids: None)
+    monkeypatch.setattr(su, "lucene_sanitize", lambda query: f"sanitized:{query}")
+
+    kuzu_driver = FakeDriver(GraphProvider.KUZU)
+    assert su.fulltext_query("short query", ["g1"], kuzu_driver) == "short query"
+    assert su.fulltext_query(" ".join(["x"] * 129), ["g1"], kuzu_driver) == ""
+
+    falkor_driver = FakeDriver(GraphProvider.FALKORDB)
+    assert su.fulltext_query("hello", ["g1"], falkor_driver) == "ft::hello::['g1']::128"
+
+    neo4j_driver = FakeDriver(GraphProvider.NEO4J)
+    neo4j_driver.fulltext_syntax = "+"
+    assert su.fulltext_query("hello world", ["g1", "g2"], neo4j_driver) == (
+        '+group_id:"g1" OR +group_id:"g2" AND (sanitized:hello world)'
     )
 
-
-def test_search_validation_helpers_accept_safe_filters_and_reject_invalid_ones() -> None:
-    validate_extra_filters({"repo_id": "demo", "active": True, "score_band": "high"})
-
-    with pytest.raises(ValueError, match="invalid filter key"):
-        validate_extra_filters({"repo-id": "demo"})
-
-    ensure_lexical_mode(SearchQuery(mode=SearchMode.LEXICAL, text="helper"))
-    with pytest.raises(ValueError, match="only lexical mode"):
-        ensure_lexical_mode(SearchQuery(mode=SearchMode.VECTOR, embedding=(0.1, 0.2)))
+    monkeypatch.setattr(su, "lucene_sanitize", lambda query: " ".join(["x"] * 200))
+    assert su.fulltext_query("too long", ["g1"], neo4j_driver) == ""
 
 
-def test_neo4j_lexical_query_builder_includes_filters_and_limits() -> None:
-    query = SearchQuery(
-        mode=SearchMode.LEXICAL,
-        text="rollback helper",
-        record_kinds=(RecordKind.NODE,),
-        record_types=("research_artifact",),
-        repo_ids=("demo",),
-        group_ids=("demo",),
-        limit=5,
-        filters={"active": True, "kind": ["Function", "File"]},
+def test_rrf_combines_rankings_and_applies_min_score() -> None:
+    uuids, scores = su.rrf([["a", "b"], ["b", "a"], ["c"]], rank_const=1, min_score=1.0)
+    assert set(uuids) == {"a", "b", "c"}
+    assert scores[0] == pytest.approx(1.5)
+    assert len(scores) == 3
+
+
+def test_hybrid_node_search_deduplicates_and_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    node_a = FakeNode("a")
+    node_b = FakeNode("b")
+    node_c = FakeNode("c")
+
+    async def fake_gather(*aws):
+        return [
+            [node_a, node_b],
+            [node_b, node_c],
+            [node_c],
+        ]
+
+    monkeypatch.setattr(su, "semaphore_gather", fake_gather)
+    monkeypatch.setattr(su, "node_fulltext_search", lambda *args, **kwargs: None)
+    monkeypatch.setattr(su, "node_similarity_search", lambda *args, **kwargs: None)
+
+    result = run(
+        su.hybrid_node_search(
+            queries=["alpha", "beta"],
+            embeddings=[[0.1, 0.2]],
+            driver=FakeDriver(GraphProvider.NEO4J),
+            search_filter=SearchFilters(),
+            group_ids=["g1"],
+            limit=2,
+        )
     )
 
-    cypher, params = _build_lexical_search_query(
-        index_name="backend_node_search_documents",
-        label="NodeSearchDocument",
-        search_query=query,
-    )
-
-    assert 'db.index.fulltext.queryNodes("backend_node_search_documents"' in cypher
-    assert "doc.record_type IN $record_types" in cypher
-    assert "doc.repo_id IN $repo_ids" in cypher
-    assert "doc.group_id IN $group_ids" in cypher
-    assert "doc.active = $filter_active" in cypher
-    assert "doc.kind IN $filter_kind" in cypher
-    assert params["search_text"] == "rollback helper"
-    assert params["search_limit"] == 5
-    assert params["record_types"] == ["research_artifact"]
-    assert params["repo_ids"] == ["demo"]
-    assert params["group_ids"] == ["demo"]
-    assert params["filter_active"] is True
-    assert params["filter_kind"] == ["Function", "File"]
+    assert [node.uuid for node in result] == ["b", "c", "a"]
 
 
-def test_neo4j_records_to_hits_preserve_record_refs_and_scores() -> None:
-    hits = neo4j_records_to_hits(
-        kind=RecordKind.NODE,
-        records=[
-            {
-                "record_id": "node:1",
-                "record_type": "research_artifact",
-                "repo_id": "demo",
-                "group_id": "group-1",
-                "score": 4.5,
-            }
+def test_get_relevant_nodes_empty_and_kuzu_without_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run(
+        su.get_relevant_nodes(
+            FakeDriver(GraphProvider.NEO4J),
+            [],
+            SearchFilters(),
+        )
+    ) == []
+
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "ft")
+    assert run(
+        su.get_relevant_nodes(
+            FakeDriver(GraphProvider.KUZU),
+            [FakeNode("a", name_embedding=None)],
+            SearchFilters(),
+        )
+    ) == []
+
+
+def test_get_relevant_nodes_maps_matches_back_to_input_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(
+        GraphProvider.NEO4J,
+        execute_results=[
+            (
+                [
+                    {"search_node_uuid": "n1", "matches": [{"uuid": "m1"}, {"uuid": "m2"}]},
+                    {"search_node_uuid": "n2", "matches": [{"uuid": "m3"}]},
+                ],
+                [],
+                None,
+            )
         ],
     )
-
-    assert hits == [
-        SearchHit(
-            ref=GraphRecordRef(
-                record_kind=RecordKind.NODE,
-                record_id="node:1",
-                record_type="research_artifact",
-                repo_id="demo",
-                group_id="group-1",
-            ),
-            score=4.5,
-            lexical_score=4.5,
-            metadata={"repo_id": "demo", "group_id": "group-1", "provider": "neo4j"},
-        )
-    ]
-
-
-def test_neo4j_search_and_fetch_cover_current_backend_contract() -> None:
-    async def run_test() -> None:
-        driver = FakeNeo4jDriver(
-            results=[
-                [
-                    {
-                        "record_id": "node:1",
-                        "record_type": "research_artifact",
-                        "repo_id": "demo",
-                        "group_id": "group-1",
-                        "score": 3.0,
-                    }
-                ],
-                [
-                    {
-                        "record_kind": "node",
-                        "record_id": "node:1",
-                        "record_type": "research_artifact",
-                        "repo_id": "demo",
-                        "group_id": "group-1",
-                        "labels": ["BackendRecord", "ResearchArtifact"],
-                        "properties": {"title": "Rollback plan"},
-                    }
-                ],
-            ]
-        )
-        ops = Neo4jSearchOperations(driver)
-
-        hits = await ops.search(
-            SearchQuery(
-                mode=SearchMode.LEXICAL,
-                text="rollback",
-                record_kinds=(RecordKind.NODE,),
-                limit=3,
-            )
-        )
-        fetched = await ops.fetch([hits[0].ref])
-
-        assert len(hits) == 1
-        assert hits[0].ref.record_id == "node:1"
-        assert fetched[0]["properties"]["title"] == "Rollback plan"
-        assert any("db.index.fulltext.queryNodes" in query for query, _ in driver.calls)
-
-    asyncio.run(run_test())
-
-
-def test_neo4j_search_rejects_non_lexical_modes() -> None:
-    async def run_test() -> None:
-        ops = Neo4jSearchOperations(FakeNeo4jDriver())
-
-        with pytest.raises(BackendFeatureNotImplementedError, match="vector search is not implemented"):
-            await ops.search(SearchQuery(mode=SearchMode.VECTOR, embedding=(0.1,)))
-
-    asyncio.run(run_test())
-
-
-def test_neptune_aoss_query_builder_captures_terms_filters_and_limit() -> None:
-    query = SearchQuery(
-        mode=SearchMode.LEXICAL,
-        text="helper rollback",
-        record_types=("research_artifact",),
-        repo_ids=("demo",),
-        group_ids=("group-1",),
-        limit=7,
-        filters={"active": True, "kind": ["Function", "File"]},
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "ft")
+    monkeypatch.setattr(su, "node_search_filter_query_constructor", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_node_from_record",
+        lambda record, provider: FakeNode(record["uuid"]),
     )
+    monkeypatch.setattr(su, "get_vector_cosine_func_query", lambda *args, **kwargs: "score_fn")
+    monkeypatch.setattr(su, "get_nodes_query", lambda *args, **kwargs: "NODE_QUERY ")
 
-    body = build_aoss_query(query)
+    nodes = [
+        FakeNode("n1", name="one", name_embedding=[1.0, 0.0]),
+        FakeNode("n2", name="two", name_embedding=[0.0, 1.0]),
+    ]
+    result = run(su.get_relevant_nodes(driver, nodes, SearchFilters(), limit=2))
 
-    assert body["size"] == 7
-    assert body["query"]["bool"]["must"][0]["multi_match"]["query"] == "helper rollback"
-    assert {"terms": {"record_type": ["research_artifact"]}} in body["query"]["bool"]["filter"]
-    assert {"terms": {"repo_id": ["demo"]}} in body["query"]["bool"]["filter"]
-    assert {"terms": {"group_id": ["group-1"]}} in body["query"]["bool"]["filter"]
-    assert {"term": {"active": True}} in body["query"]["bool"]["filter"]
-    assert {"terms": {"kind": ["Function", "File"]}} in body["query"]["bool"]["filter"]
+    assert [[match.uuid for match in matches] for matches in result] == [["m1", "m2"], ["m3"]]
+    assert driver.calls
 
 
-def test_neptune_aoss_hits_are_translated_into_ranked_search_hits() -> None:
-    hits = _aoss_response_to_hits(
-        kind=RecordKind.EDGE,
-        response={
+def test_get_mentioned_nodes_uses_graph_ops_then_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    episodes = [SimpleNamespace(uuid="e1"), SimpleNamespace(uuid="e2")]
+    graph_ops = SimpleNamespace(
+        get_mentioned_nodes=lambda driver, episodes: (_ for _ in ()).throw(NotImplementedError())
+    )
+    driver = FakeDriver(
+        GraphProvider.NEO4J,
+        graph_operations_interface=graph_ops,
+        execute_results=[([{"uuid": "n1"}, {"uuid": "n2"}], [], None)],
+    )
+    monkeypatch.setattr(
+        su,
+        "get_entity_node_from_record",
+        lambda record, provider: FakeNode(record["uuid"]),
+    )
+    monkeypatch.setattr(su, "get_entity_node_return_query", lambda provider: " RETURN_NODE")
+
+    result = run(su.get_mentioned_nodes(driver, episodes))
+
+    assert [node.uuid for node in result] == ["n1", "n2"]
+    assert driver.calls[0][1]["uuids"] == ["e1", "e2"]
+
+
+def test_edge_fulltext_search_returns_empty_for_blank_or_empty_aoss(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(GraphProvider.NEPTUNE)
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "")
+    assert run(su.edge_fulltext_search(driver, "query", SearchFilters(), ["g1"])) == []
+
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "ft")
+    assert run(su.edge_fulltext_search(driver, "query", SearchFilters(), ["g1"])) == []
+
+
+def test_edge_fulltext_search_neptune_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(
+        GraphProvider.NEPTUNE,
+        aoss_result={
             "hits": {
+                "total": {"value": 2},
                 "hits": [
-                    {
-                        "_index": "backend_edge_documents",
-                        "_score": 8.2,
-                        "_source": {
-                            "record_id": "edge:1",
-                            "record_type": "github_pull_request",
-                            "repo_id": "demo",
-                            "group_id": "group-1",
-                        },
-                    }
-                ]
+                    {"_source": {"uuid": "e1"}, "_score": 4.0},
+                    {"_source": {"uuid": "e2"}, "_score": 2.5},
+                ],
             }
         },
+        execute_results=[([{"uuid": "edge-1"}, {"uuid": "edge-2"}], [], None)],
+    )
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "ft")
+    monkeypatch.setattr(su, "edge_search_filter_query_constructor", lambda *args, **kwargs: (["e.flag = true"], {"flag": True}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_edge_from_record",
+        lambda record, provider: FakeEdge(record["uuid"]),
     )
 
-    assert len(hits) == 1
-    assert hits[0].ref.record_kind is RecordKind.EDGE
-    assert hits[0].ref.record_id == "edge:1"
-    assert hits[0].score == pytest.approx(8.2)
-    assert hits[0].metadata == {"provider": "neptune", "index": "backend_edge_documents"}
+    result = run(su.edge_fulltext_search(driver, "query", SearchFilters(), ["g1"], limit=2))
+
+    assert [edge.uuid for edge in result] == ["edge-1", "edge-2"]
+    assert driver.aoss_calls == [("edge_name_and_fact", "query", None)]
+    assert driver.calls[0][1]["ids"] == [{"id": "e1", "score": 4.0}, {"id": "e2", "score": 2.5}]
 
 
-def test_neptune_search_and_fetch_use_current_driver_hooks() -> None:
-    async def run_test() -> None:
-        driver = FakeNeptuneDriver(
-            aoss_responses=[
-                {
-                    "hits": {
-                        "hits": [
-                            {
-                                "_index": "backend_node_documents",
-                                "_score": 5.0,
-                                "_source": {
-                                    "record_id": "node:1",
-                                    "record_type": "research_artifact",
-                                    "repo_id": "demo",
-                                    "group_id": "group-1",
-                                },
-                            }
-                        ]
-                    }
-                }
-            ],
-            query_results=[
+def test_edge_similarity_search_neptune_filters_by_cosine_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(
+        GraphProvider.NEPTUNE,
+        execute_results=[
+            (
                 [
-                    {
-                        "record_kind": "node",
-                        "record_id": "node:1",
-                        "record_type": "research_artifact",
-                        "repo_id": "demo",
-                        "group_id": "group-1",
-                        "labels": ["ResearchArtifact"],
-                        "properties": {"title": "Rollback note"},
-                    }
-                ]
-            ],
+                    {"id": 1, "embedding": "1.0,0.0"},
+                    {"id": 2, "embedding": "0.0,1.0"},
+                    {"id": 3, "embedding": None},
+                ],
+                [],
+                None,
+            ),
+            ([{"uuid": "edge-1"}], [], None),
+        ],
+    )
+    monkeypatch.setattr(su, "edge_search_filter_query_constructor", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_edge_from_record",
+        lambda record, provider: FakeEdge(record["uuid"]),
+    )
+
+    result = run(
+        su.edge_similarity_search(
+            driver,
+            search_vector=[1.0, 0.0],
+            source_node_uuid="source",
+            target_node_uuid="target",
+            search_filter=SearchFilters(),
+            group_ids=None,
+            min_score=0.5,
         )
-        ops = NeptuneSearchOperations(driver)
+    )
 
-        hits = await ops.search(SearchQuery(mode=SearchMode.LEXICAL, text="rollback", limit=4))
-        fetched = await ops.fetch([hits[0].ref])
-
-        assert len(hits) == 1
-        assert driver.aoss_calls[0][0] == "backend_node_documents"
-        assert fetched[0]["properties"]["title"] == "Rollback note"
-
-    asyncio.run(run_test())
+    assert [edge.uuid for edge in result] == ["edge-1"]
+    assert driver.calls[1][1]["ids"] == [{"id": 1, "score": pytest.approx(1.0)}]
+    assert "source_uuid" not in driver.calls[0][1]
+    assert "target_uuid" not in driver.calls[0][1]
 
 
-def test_neptune_search_requires_aoss_and_lexical_mode() -> None:
-    async def run_test() -> None:
-        no_aoss_ops = NeptuneSearchOperations(FakeNeptuneDriver(aoss_client=None))
-        with pytest.raises(UnsupportedCapabilityError, match="requires an AOSS host"):
-            await no_aoss_ops.search(SearchQuery(mode=SearchMode.LEXICAL, text="rollback"))
+def test_edge_bfs_search_early_return_and_kuzu_multi_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run(
+        su.edge_bfs_search(
+            FakeDriver(GraphProvider.NEO4J),
+            [],
+            2,
+            SearchFilters(),
+        )
+    ) == []
 
-        ops = NeptuneSearchOperations(FakeNeptuneDriver())
-        with pytest.raises(BackendFeatureNotImplementedError, match="hybrid search is not implemented"):
-            await ops.search(SearchQuery(mode=SearchMode.HYBRID, text="rollback"))
+    driver = FakeDriver(
+        GraphProvider.KUZU,
+        execute_results=[
+            ([{"uuid": "edge-1"}], [], None),
+            ([{"uuid": "edge-2"}], [], None),
+        ],
+    )
+    monkeypatch.setattr(su, "edge_search_filter_query_constructor", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_edge_from_record",
+        lambda record, provider: FakeEdge(record["uuid"]),
+    )
+    monkeypatch.setattr(su, "get_entity_edge_return_query", lambda provider: " EDGE_RETURN")
 
-    asyncio.run(run_test())
+    result = run(
+        su.edge_bfs_search(
+            driver,
+            ["n1"],
+            2,
+            SearchFilters(),
+            group_ids=["g1"],
+            limit=5,
+        )
+    )
+
+    assert [edge.uuid for edge in result] == ["edge-1", "edge-2"]
+    assert len(driver.calls) == 2
 
 
-def test_profile_key_helpers_build_stable_ids_and_embeddings() -> None:
-    profile = make_profile(keys=("helper", "helper", "rollback path"))
-    records = build_profile_key_records((profile,), FakeEmbeddingProvider())
+def test_node_fulltext_search_blank_and_neptune_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(GraphProvider.NEPTUNE)
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "")
+    assert run(su.node_fulltext_search(driver, "query", SearchFilters(), ["g1"])) == []
 
-    assert len(records) == 3
-    assert records[0].profile_key_id == profile_key_id(profile.profile_id, "helper")
-    assert records[0].embedding == (6.0, 1.0)
-    assert records[-1].key_text == "rollback path"
+    driver = FakeDriver(
+        GraphProvider.NEPTUNE,
+        aoss_result={
+            "hits": {
+                "total": {"value": 1},
+                "hits": [{"_source": {"uuid": "n1"}, "_score": 8.0}],
+            }
+        },
+        execute_results=[([{"uuid": "node-1"}], [], None)],
+    )
+    monkeypatch.setattr(su, "fulltext_query", lambda *args, **kwargs: "ft")
+    monkeypatch.setattr(su, "node_search_filter_query_constructor", lambda *args, **kwargs: (["n.kind = 'x'"], {"kind": "x"}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_node_from_record",
+        lambda record, provider: FakeNode(record["uuid"]),
+    )
+    monkeypatch.setattr(su, "get_entity_node_return_query", lambda provider: " NODE_RETURN")
+
+    result = run(su.node_fulltext_search(driver, "query", SearchFilters(), ["g1"], limit=3))
+
+    assert [node.uuid for node in result] == ["node-1"]
+    assert driver.calls[0][1]["ids"] == [{"id": "n1", "score": 8.0}]
+
+
+def test_node_similarity_search_neptune_returns_only_above_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    driver = FakeDriver(
+        GraphProvider.NEPTUNE,
+        execute_results=[
+            (
+                [
+                    {"id": 1, "embedding": "1.0,0.0"},
+                    {"id": 2, "embedding": "0.0,1.0"},
+                ],
+                [],
+                None,
+            ),
+            ([{"uuid": "node-1"}], [], None),
+        ],
+    )
+    monkeypatch.setattr(su, "node_search_filter_query_constructor", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_node_from_record",
+        lambda record, provider: FakeNode(record["uuid"]),
+    )
+    monkeypatch.setattr(su, "get_entity_node_return_query", lambda provider: " NODE_RETURN")
+
+    result = run(
+        su.node_similarity_search(
+            driver,
+            search_vector=[1.0, 0.0],
+            search_filter=SearchFilters(),
+            min_score=0.5,
+        )
+    )
+
+    assert [node.uuid for node in result] == ["node-1"]
+    assert driver.calls[1][1]["ids"] == [{"id": 1, "score": pytest.approx(1.0)}]
+
+
+def test_node_bfs_search_covers_early_return_and_kuzu_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run(
+        su.node_bfs_search(
+            FakeDriver(GraphProvider.NEO4J),
+            None,
+            SearchFilters(),
+            bfs_max_depth=1,
+        )
+    ) == []
+    assert run(
+        su.node_bfs_search(
+            FakeDriver(GraphProvider.NEO4J),
+            ["n1"],
+            SearchFilters(),
+            bfs_max_depth=0,
+        )
+    ) == []
+
+    driver = FakeDriver(
+        GraphProvider.KUZU,
+        execute_results=[
+            ([{"uuid": "n1"}], [], None),
+            ([{"uuid": "n2"}], [], None),
+            ([{"uuid": "n3"}], [], None),
+        ],
+    )
+    monkeypatch.setattr(su, "node_search_filter_query_constructor", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(
+        su,
+        "get_entity_node_from_record",
+        lambda record, provider: FakeNode(record["uuid"]),
+    )
+    monkeypatch.setattr(su, "get_entity_node_return_query", lambda provider: " NODE_RETURN")
+
+    result = run(
+        su.node_bfs_search(
+            driver,
+            ["origin-1"],
+            SearchFilters(),
+            bfs_max_depth=2,
+            group_ids=["g1"],
+            limit=5,
+        )
+    )
+
+    assert [node.uuid for node in result] == ["n1", "n2", "n3"]
+    assert len(driver.calls) == 3
