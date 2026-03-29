@@ -1250,8 +1250,7 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_node_neighborhood_wrapper_requires_exact_node_id(self) -> None:
         response = await server_module.get_node_neighborhood(
-            node_id=None,
-            concept="auth",
+            node_id="",
             repo_id="demo",
         )
 
@@ -1259,7 +1258,8 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
             response,
             {
                 "error": (
-                    "get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
+                    "node_id is required and must be an exact id such as project:owner-repo, "
+                    "file:owner-repo:path/to/file.py, or symbol:owner-repo:pkg.module.func"
                 )
             },
         )

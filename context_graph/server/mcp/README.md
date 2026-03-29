@@ -40,6 +40,44 @@ Normal flow:
 2. Start this MCP server
 3. Query the indexed repo by `repo_id`
 
+## Agent Usage
+
+Use the MCP tools in two phases when possible:
+
+- Start with a search tool when you do not yet know an exact identifier.
+- Switch to the exact-id tool after the search response gives you the right `qualified_name`, `node_id`, or `target_id`.
+
+Identifier examples:
+
+- `repo_id`: stable repository identifier used at indexing time, for example `owner-repo`
+- `qualified_name`: fully qualified code symbol such as `pkg.module.func`
+- `node_id`: exact indexed graph id such as `project:owner-repo`, `file:owner-repo:path/to/file.py`, or `symbol:owner-repo:pkg.module.func`
+- `target_id`: exact provenance graph id such as `claim:123`, `observation:456`, or `evidence:789`
+
+Tool selection guide:
+
+- Use `search_code` for plain-text or regex search in indexed files.
+- Use `get_code_graph_schema` to inspect the latest snapshot structure for a repo.
+- Use `search_code_graph` when you are discovering symbols or files and do not yet know an exact `qualified_name`.
+- Use `trace_call_path` and `get_code_snippet` only after you have an exact `qualified_name`.
+- Use `get_code_context` for a deterministic file or symbol-centered summary, optionally narrowed with `target_kind`.
+- Use `search_context` when you need provenance, claims, observations, relations, or code retrieval and do not yet know an exact graph anchor.
+- Use `get_node_neighborhood` only with an exact `node_id`.
+- Use `get_timeline` only with an exact `target_id`.
+- Use `record_agent_observation` to persist an agent note or trace into the provenance pipeline.
+
+Example code workflow:
+
+1. Call `search_code_graph(repo_id="owner-repo", query="AuthService")`
+2. Read the returned `qualified_name`
+3. Call `get_code_snippet(...)` or `trace_call_path(...)` with that exact `qualified_name`
+
+Example provenance workflow:
+
+1. Call `search_context(repo_id="owner-repo", query="JWT audience validation", sources=["claims", "code"])`
+2. Read the returned `record_id` or `node_id`
+3. Call `get_timeline(...)` or `get_node_neighborhood(...)` with that exact graph id
+
 ## Quick Start
 
 ### 1. Index a repository

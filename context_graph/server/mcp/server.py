@@ -12,14 +12,16 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
 from context_graph.models import GraphSnapshot
+from context_graph.provenance.models import ObservationKind
 from context_graph.server.mcp import code_graph as code_graph_queries
 from context_graph.server.mcp import provenance_tools
 from context_graph.server.mcp.backend_runtime import (
@@ -89,26 +91,85 @@ backend_runtime: MCPBackendRuntime | None = None
 metadata_snapshot_service: MetadataSnapshotService | None = None
 
 
+TraceDirection = Literal["inbound", "outbound", "both"]
+SearchContextSource = Literal["claims", "observations", "relations", "code"]
+CodeContextTargetKind = Literal["symbol", "function", "class", "module", "file"]
+
+TRACE_DIRECTION_VALUES = ("inbound", "outbound", "both")
+CODE_CONTEXT_TARGET_KIND_VALUES = ("symbol", "function", "class", "module", "file")
+BUILT_IN_OBSERVATION_KIND_VALUES = tuple(kind.value for kind in ObservationKind)
+
+REPO_ID_FIELD_DESCRIPTION = (
+    "Stable repository identifier used at indexing time. Example: 'owner-repo'."
+)
+QUALIFIED_NAME_FIELD_DESCRIPTION = (
+    "Exact fully qualified code symbol. Example: 'pkg.module.func'."
+)
+NODE_ID_FIELD_DESCRIPTION = (
+    "Exact indexed graph node identifier. Examples: 'project:owner-repo', "
+    "'file:owner-repo:path/to/file.py', or 'symbol:owner-repo:pkg.module.func'."
+)
+TARGET_ID_FIELD_DESCRIPTION = (
+    "Exact provenance graph identifier. Examples: 'claim:123', 'observation:456', "
+    "or 'evidence:789'."
+)
+TRACE_DIRECTION_FIELD_DESCRIPTION = (
+    "Call traversal direction. Supported values: inbound, outbound, both."
+)
+SEARCH_CONTEXT_SOURCES_FIELD_DESCRIPTION = (
+    "Optional source filters for provenance retrieval. Supported values: claims, "
+    "observations, relations, code."
+)
+CODE_CONTEXT_TARGET_KIND_FIELD_DESCRIPTION = (
+    "Optional target disambiguation when resolving code context. Supported values: "
+    "symbol, function, class, module, file."
+)
+OBSERVATION_KIND_FIELD_DESCRIPTION = (
+    "Observation kind to persist. Built-in kinds: "
+    f"{', '.join(BUILT_IN_OBSERVATION_KIND_VALUES)}. Custom values are allowed but "
+    "intended for advanced callers."
+)
+METADATA_FIELD_DESCRIPTION = (
+    "Optional JSON metadata stored with the observation. This is pass-through context "
+    "and does not control routing or retrieval behavior."
+)
+NODE_ID_REQUIRED_ERROR = (
+    "node_id is required and must be an exact id such as project:owner-repo, "
+    "file:owner-repo:path/to/file.py, or symbol:owner-repo:pkg.module.func"
+)
+
+
+class ParameterValidationError(ValueError):
+    """Raised when one MCP parameter uses an unsupported public value."""
+
+
 def _current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-CONTEXT_GRAPH_MCP_INSTRUCTIONS = """
+CONTEXT_GRAPH_MCP_INSTRUCTIONS = f"""
 Context Graph exposes a small, opinionated MCP surface for repository analysis.
 
-Implemented deterministic code tools:
-1. search_code
-2. get_code_graph_schema
-3. search_code_graph
-4. trace_call_path
-5. get_code_snippet
-6. get_code_context
+Tool selection guide:
+- Use search_code when you need text or regex matches in indexed repository files.
+- Use get_code_graph_schema when you need the structural node kinds and edge types in the latest snapshot.
+- Use search_code_graph when you are discovering symbols, files, or modules and do not yet know an exact qualified_name.
+- Use trace_call_path when you already know an exact qualified_name and need bounded inbound or outbound CALLS edges.
+- Use get_code_snippet when you already know an exact qualified_name and need the source text for that symbol.
+- Use get_code_context when you want a deterministic summary around a file or symbol target and can optionally narrow with target_kind.
+- Use search_context when you need provenance, claim, observation, relation, or code retrieval and do not yet know an exact graph anchor.
+- Use get_node_neighborhood when you already know an exact node_id and need immediate graph neighbors around that anchor.
+- Use get_timeline when you already know an exact target_id and need claim-history events around that anchor.
+- Use record_agent_observation when you want to persist an agent note or trace into the provenance pipeline.
 
-Implemented backend-native provenance tools:
-7. search_context
-8. get_node_neighborhood
-9. get_timeline
-10. record_agent_observation
+Identifier primer:
+- repo_id: stable repository identifier used at indexing time, for example `owner-repo`.
+- qualified_name: fully qualified code symbol such as `pkg.module.func`.
+- node_id: exact indexed graph id such as `project:owner-repo`, `file:owner-repo:path/to/file.py`, or `symbol:owner-repo:pkg.module.func`.
+- target_id: exact provenance graph id such as `claim:123`, `observation:456`, or `evidence:789`.
+
+Recovery rule:
+- If an exact id is unknown, start with a search tool, inspect the returned ids, then switch to the exact-id tool.
 
 Code tools operate on the latest stored GraphSnapshot for a repo_id.
 search_context runs separate node and relation provenance retrieval pipelines, with optional historical semantic retrieval.
@@ -278,6 +339,53 @@ def _normalize_repo_file_path(root_path: str, file_path: str | None) -> Path | N
     return (Path(root_path) / file_path).resolve()
 
 
+def _supported_values_error(parameter_name: str, supported_values: tuple[str, ...]) -> str:
+    return f"{parameter_name} must be one of: {', '.join(supported_values)}"
+
+
+def _normalize_supported_value(
+    value: str | None,
+    *,
+    parameter_name: str,
+    supported_values: tuple[str, ...],
+) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized not in supported_values:
+        raise ParameterValidationError(_supported_values_error(parameter_name, supported_values))
+    return normalized
+
+
+def _normalize_supported_list(
+    values: list[str] | None,
+    *,
+    parameter_name: str,
+    supported_values: tuple[str, ...],
+) -> list[str] | None:
+    if values is None:
+        return None
+
+    normalized_values: list[str] = []
+    seen: set[str] = set()
+    invalid_values: list[str] = []
+    for raw_value in values:
+        normalized = (raw_value or "").strip().lower()
+        if normalized not in supported_values:
+            invalid_values.append(str(raw_value))
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_values.append(normalized)
+
+    if invalid_values:
+        raise ParameterValidationError(
+            f"{parameter_name} must only contain: {', '.join(supported_values)}"
+        )
+    return normalized_values
+
+
 async def _get_metadata_snapshot(repo_id: str) -> GraphSnapshot:
     snapshot_service = _require_metadata_snapshot_service()
     ready = await asyncio.to_thread(snapshot_service.initialize_metadata_store)
@@ -355,11 +463,14 @@ def _iter_file_matches(
 
 @mcp.tool()
 async def search_code(
-    repo_id: str,
-    query: str,
-    file_pattern: str | None = None,
-    limit: int = 20,
-    regex: bool = False,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    query: Annotated[str, Field(description="Text or regex pattern to search for in indexed files.")],
+    file_pattern: Annotated[
+        str | None,
+        Field(description="Optional glob filter such as '*.py' or 'src/**/*.ts'."),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum number of line matches to return.")] = 20,
+    regex: Annotated[bool, Field(description="Treat query as a regular expression when true.")] = False,
 ) -> SearchCodeResponse | ErrorResponse:
     """Search indexed repository files by text or regex."""
 
@@ -399,7 +510,9 @@ async def search_code(
 
 
 @mcp.tool()
-async def get_code_graph_schema(repo_id: str) -> CodeGraphSchemaResponse | ErrorResponse:
+async def get_code_graph_schema(
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+) -> CodeGraphSchemaResponse | ErrorResponse:
     """Return structural node kinds, edge types, and relationship patterns for the latest snapshot."""
 
     try:
@@ -414,14 +527,23 @@ async def get_code_graph_schema(repo_id: str) -> CodeGraphSchemaResponse | Error
 
 @mcp.tool()
 async def search_code_graph(
-    repo_id: str,
-    query: str | None = None,
-    node_kinds: list[str] | None = None,
-    file_pattern: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    query: Annotated[
+        str | None,
+        Field(description="Optional search text for symbol names, qualified names, or file paths."),
+    ] = None,
+    node_kinds: Annotated[
+        list[str] | None,
+        Field(description="Optional structural node kinds such as Function, Class, Module, or File."),
+    ] = None,
+    file_pattern: Annotated[
+        str | None,
+        Field(description="Optional glob filter applied to indexed file paths."),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum number of ranked matches to return.")] = 20,
+    offset: Annotated[int, Field(description="Pagination offset into the ranked match set.")] = 0,
 ) -> SearchCodeGraphResponse | ErrorResponse:
-    """Search structural code nodes in the latest indexed snapshot."""
+    """Search structural code nodes in the latest indexed snapshot when exact ids are not yet known."""
 
     try:
         snapshot = await _get_metadata_snapshot(repo_id)
@@ -443,22 +565,32 @@ async def search_code_graph(
 
 @mcp.tool()
 async def trace_call_path(
-    repo_id: str,
-    qualified_name: str,
-    direction: str = "both",
-    depth: int = 3,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    qualified_name: Annotated[str, Field(description=QUALIFIED_NAME_FIELD_DESCRIPTION)],
+    direction: Annotated[
+        TraceDirection,
+        Field(description=TRACE_DIRECTION_FIELD_DESCRIPTION),
+    ] = "both",
+    depth: Annotated[int, Field(description="Bounded traversal depth from 1 to 5.")] = 3,
 ) -> TraceCallPathResponse | ErrorResponse:
-    """Trace bounded BFS call relationships from one exact qualified name."""
+    """Requires exact qualified_name. Trace bounded BFS call relationships from one indexed symbol."""
 
     try:
+        normalized_direction = _normalize_supported_value(
+            direction,
+            parameter_name="direction",
+            supported_values=TRACE_DIRECTION_VALUES,
+        )
         snapshot = await _get_metadata_snapshot(repo_id)
         return await asyncio.to_thread(
             code_graph_queries.trace_call_path,
             snapshot,
             qualified_name=qualified_name,
-            direction=direction,
+            direction=normalized_direction,
             depth=depth,
         )
+    except ParameterValidationError as exc:
+        return ErrorResponse(error=str(exc))
     except code_graph_queries.CodeGraphQueryError as exc:
         return ErrorResponse(error=str(exc))
     except Exception as exc:
@@ -468,11 +600,14 @@ async def trace_call_path(
 
 @mcp.tool()
 async def get_code_snippet(
-    repo_id: str,
-    qualified_name: str,
-    include_neighbors: bool = False,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    qualified_name: Annotated[str, Field(description=QUALIFIED_NAME_FIELD_DESCRIPTION)],
+    include_neighbors: Annotated[
+        bool,
+        Field(description="Include a small amount of surrounding source context when true."),
+    ] = False,
 ) -> CodeSnippetResponse | ErrorResponse:
-    """Return source code for one exact qualified name in the latest snapshot."""
+    """Requires exact qualified_name. Return source code for one indexed symbol in the latest snapshot."""
 
     try:
         snapshot = await _get_metadata_snapshot(repo_id)
@@ -491,23 +626,37 @@ async def get_code_snippet(
 
 @mcp.tool()
 async def search_context(
-    repo_id: str,
-    query: str,
-    group_id: str | None = None,
-    sources: list[str] | None = None,
-    limit: int = 10,
-    include_historical: bool = False,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    query: Annotated[str, Field(description="Natural-language provenance query text.")],
+    group_id: Annotated[
+        str | None,
+        Field(description="Optional group or namespace override. Defaults to the server namespace."),
+    ] = None,
+    sources: Annotated[
+        list[SearchContextSource] | None,
+        Field(description=SEARCH_CONTEXT_SOURCES_FIELD_DESCRIPTION),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum number of provenance hits to return.")] = 10,
+    include_historical: Annotated[
+        bool,
+        Field(description="Include inactive semantic profiles for historical provenance inspection."),
+    ] = False,
 ) -> SearchContextResponse | ErrorResponse:
-    """Search indexed provenance and code records using node and relation retrieval pipelines."""
+    """Search indexed provenance and code records when you do not yet have an exact target_id or node_id."""
 
     try:
         if limit <= 0:
             return ErrorResponse(error="limit must be a positive integer")
+        normalized_sources = _normalize_supported_list(
+            sources,
+            parameter_name="sources",
+            supported_values=provenance_tools.SEARCH_CONTEXT_SOURCES,
+        )
 
         runtime = await _get_backend_runtime()
         driver = await runtime.get_driver()
         effective_group_id = group_id or config.namespace.group_id
-        requested_sources = sources or list(provenance_tools.SEARCH_CONTEXT_SOURCES)
+        requested_sources = normalized_sources or list(provenance_tools.SEARCH_CONTEXT_SOURCES)
         semantic_search = (
             metadata_snapshot_service.search_profiles_sync
             if metadata_snapshot_service is not None
@@ -523,6 +672,8 @@ async def search_context(
             limit=limit,
             include_historical=include_historical,
         )
+    except ParameterValidationError as exc:
+        return ErrorResponse(error=str(exc))
     except ValueError as exc:
         return ErrorResponse(error=str(exc))
     except Exception as exc:
@@ -532,23 +683,22 @@ async def search_context(
 
 @mcp.tool()
 async def get_node_neighborhood(
-    node_id: str | None = None,
-    concept: str | None = None,
-    repo_id: str | None = None,
-    hops: int = 2,
-    edge_types: list[str] | None = None,
+    node_id: Annotated[str, Field(description=NODE_ID_FIELD_DESCRIPTION)],
+    repo_id: Annotated[
+        str | None,
+        Field(description="Optional repo_id used to load a snapshot for code-node expansion."),
+    ] = None,
+    hops: Annotated[int, Field(description="Positive hop count for neighborhood expansion.")] = 2,
+    edge_types: Annotated[
+        list[str] | None,
+        Field(description="Optional edge-type filters such as CALLS or DEFINES."),
+    ] = None,
 ) -> NodeNeighborhoodResponse | ErrorResponse:
-    """Return the exact neighborhood around one indexed node."""
+    """Requires exact node_id. Return the neighborhood around one indexed graph node."""
 
     try:
         if not node_id:
-            return ErrorResponse(
-                error="get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
-            )
-        if concept is not None:
-            return ErrorResponse(
-                error="get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
-            )
+            return ErrorResponse(error=NODE_ID_REQUIRED_ERROR)
         if hops <= 0:
             return ErrorResponse(error="hops must be a positive integer")
 
@@ -578,11 +728,14 @@ async def get_node_neighborhood(
 
 @mcp.tool()
 async def get_timeline(
-    target_id: str,
-    repo_id: str | None = None,
-    limit: int = 50,
+    target_id: Annotated[str, Field(description=TARGET_ID_FIELD_DESCRIPTION)],
+    repo_id: Annotated[
+        str | None,
+        Field(description="Optional repo_id used to scope historical provenance assembly."),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum number of historical events to return.")] = 50,
 ) -> TimelineResponse | ErrorResponse:
-    """Return a historical provenance timeline around one exact target."""
+    """Requires exact target_id. Return a historical provenance timeline around one graph anchor."""
 
     try:
         if limit <= 0:
@@ -605,18 +758,43 @@ async def get_timeline(
 
 @mcp.tool()
 async def get_code_context(
-    repo_id: str,
-    target: str,
-    target_kind: str | None = None,
-    include_neighbors: bool = True,
-    include_references: bool = True,
-    max_related_symbols: int = 10,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    target: Annotated[
+        str,
+        Field(
+            description=(
+                "Code target to resolve. This can be an exact qualified_name, exact node_id, "
+                "file path, or a search-like string when target_kind is provided."
+            )
+        ),
+    ],
+    target_kind: Annotated[
+        CodeContextTargetKind | None,
+        Field(description=CODE_CONTEXT_TARGET_KIND_FIELD_DESCRIPTION),
+    ] = None,
+    include_neighbors: Annotated[
+        bool,
+        Field(description="Include nearby sibling snippets for the resolved primary symbol."),
+    ] = True,
+    include_references: Annotated[
+        bool,
+        Field(description="Include directly related referenced symbols in the response."),
+    ] = True,
+    max_related_symbols: Annotated[
+        int,
+        Field(description="Maximum number of related symbols to include in the context slice."),
+    ] = 10,
 ) -> CodeContextResponse | ErrorResponse:
     """Return a deterministic code-context slice for a file, symbol, class, or module."""
 
     try:
         if max_related_symbols <= 0:
             return ErrorResponse(error="max_related_symbols must be a positive integer")
+        normalized_target_kind = _normalize_supported_value(
+            target_kind,
+            parameter_name="target_kind",
+            supported_values=CODE_CONTEXT_TARGET_KIND_VALUES,
+        )
 
         snapshot = await _get_metadata_snapshot(repo_id)
         return await asyncio.to_thread(
@@ -624,11 +802,13 @@ async def get_code_context(
             snapshot=snapshot,
             repo_id=repo_id,
             target=target,
-            target_kind=target_kind,
+            target_kind=normalized_target_kind,
             include_neighbors=include_neighbors,
             include_references=include_references,
             max_related_symbols=max_related_symbols,
         )
+    except ParameterValidationError as exc:
+        return ErrorResponse(error=str(exc))
     except code_graph_queries.CodeGraphQueryError as exc:
         return ErrorResponse(error=str(exc))
     except Exception as exc:
@@ -638,12 +818,27 @@ async def get_code_context(
 
 @mcp.tool()
 async def record_agent_observation(
-    repo_id: str,
-    observation_text: str,
-    observation_kind: str = "agent_note",
-    title: str | None = None,
-    task_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    repo_id: Annotated[str, Field(description=REPO_ID_FIELD_DESCRIPTION)],
+    observation_text: Annotated[
+        str,
+        Field(description="Free-form agent note or trace text to persist."),
+    ],
+    observation_kind: Annotated[
+        str,
+        Field(description=OBSERVATION_KIND_FIELD_DESCRIPTION),
+    ] = "agent_note",
+    title: Annotated[
+        str | None,
+        Field(description="Optional short title for the observation."),
+    ] = None,
+    task_id: Annotated[
+        str | None,
+        Field(description="Optional task or workflow identifier for caller-side correlation."),
+    ] = None,
+    metadata: Annotated[
+        dict[str, Any] | None,
+        Field(description=METADATA_FIELD_DESCRIPTION),
+    ] = None,
 ) -> RecordAgentObservationResponse | ErrorResponse:
     """Persist an agent-originated observation through the provenance pipeline."""
 
