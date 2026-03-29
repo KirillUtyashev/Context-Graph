@@ -420,17 +420,27 @@ class SmallModuleTests(unittest.TestCase):
         self.assertEqual(result.high_level_keywords, ("Architecture", "Testing"))
         self.assertIn("why", result.intent_tags)
 
-    def test_embedding_run_async_raises_when_nested_event_loop_is_active(self) -> None:
+    def test_embedding_run_async_handles_nested_event_loop(self) -> None:
         async def inner() -> None:
             coro = asyncio.sleep(0, result="done")
-            with self.assertRaises(RuntimeError):
-                embeddings._run_async(coro)
-            coro.close()
+            self.assertEqual(embeddings._run_async(coro), "done")
 
         async def runner() -> None:
             await inner()
 
         asyncio.run(runner())
+
+    def test_query_parser_run_async_handles_nested_event_loop(self) -> None:
+        class FakeLLM:
+            async def generate_response(self, *_args, **_kwargs):
+                return {"high_level_keywords": ["Architecture", "Testing"]}
+
+        async def inner() -> None:
+            parser = QueryParser(llm_client=FakeLLM())
+            result = parser.parse("why did auth_service change?", llm_enabled=True)
+            self.assertEqual(result.high_level_keywords, ("Architecture", "Testing"))
+
+        asyncio.run(inner())
 
     def test_mcp_config_helpers_expand_yaml_and_apply_cli_overrides(self) -> None:
         try:

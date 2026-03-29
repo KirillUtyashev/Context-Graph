@@ -244,12 +244,20 @@ class _DbApiMetadataStore(MetadataStore):
 
     def _execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         cursor = self.connection.cursor()
-        cursor.execute(sql, params)
+        try:
+            cursor.execute(sql, params)
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
         return cursor
 
     def _executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
         cursor = self.connection.cursor()
-        cursor.executemany(sql, rows)
+        try:
+            cursor.executemany(sql, rows)
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
 
     def bootstrap(self) -> None:
         self._execute(
@@ -899,6 +907,13 @@ class AuroraMetadataStore(PostgresMetadataStore):
 def _stable_lock_id(value: str) -> int:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _rollback_connection(connection: Any) -> None:
+    rollback = getattr(connection, "rollback", None)
+    if callable(rollback):
+        rollback()
+
 
 def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:
     raw_keys = json.loads(row[12] or "[]")

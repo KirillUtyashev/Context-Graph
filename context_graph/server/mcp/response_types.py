@@ -151,15 +151,9 @@ class TraceCallPathResponse(TypedDict):
     steps: list[CallTraceStep]
 
 
-ToolImplementationStatus = Literal["scaffold", "implemented"]
-ClaimRelationType = Literal[
-    "same_as",
-    "refines",
-    "contradicts",
-    "supersedes",
-    "unrelated",
-]
+ToolImplementationStatus = Literal["scaffold", "implemented", "unsupported"]
 TimelineTargetKind = Literal["pull_request", "issue", "file", "symbol", "claim_cluster", "topic"]
+ContextHitKind = Literal["node", "relation"]
 
 
 class ToolScaffoldResponse(TypedDict):
@@ -170,6 +164,7 @@ class ToolScaffoldResponse(TypedDict):
 
 
 class ContextSearchHit(TypedDict):
+    hit_kind: ContextHitKind
     record_id: str
     record_type: str
     title: str | None
@@ -177,9 +172,15 @@ class ContextSearchHit(TypedDict):
     score: float | None
     lexical_score: float | None
     semantic_score: float | None
+    is_active: bool
     observed_at: str | None
     source: str | None
     file_path: str | None
+    relation_type: str | None
+    source_record_id: str | None
+    source_record_type: str | None
+    target_record_id: str | None
+    target_record_type: str | None
     retrieval_channels: list[str]
     matched_profile_key_text: str | None
     matched_profile_key_origin: str | None
@@ -231,41 +232,6 @@ class TimelineResponse(ToolScaffoldResponse):
     target_kind: TimelineTargetKind
     target_id: str
     events: list[TimelineEvent]
-
-
-class ClaimResolutionCandidate(TypedDict):
-    candidate_claim_id: str | None
-    candidate_claim_text: str | None
-    relation: ClaimRelationType
-    confidence: str | None
-    rationale: str | None
-
-
-class ResolveClaimResponse(ToolScaffoldResponse):
-    repo_id: str
-    candidate_claim_text: str
-    claim_kind: str | None
-    claim_subkind: str | None
-    matches: list[ClaimResolutionCandidate]
-
-
-class ArtifactOutlineSection(TypedDict):
-    section_id: str
-    title: str
-    summary: str | None
-
-
-class SynthesizeArtifactResponse(ToolScaffoldResponse):
-    repo_id: str
-    subject_kind: str
-    subject_id: str
-    artifact_kind: str
-    artifact_id: str | None
-    title: str | None
-    summary: str | None
-    sections: list[ArtifactOutlineSection]
-    supporting_claim_ids: list[str]
-    supporting_observation_ids: list[str]
 
 
 class CodeContextSnippet(TypedDict):

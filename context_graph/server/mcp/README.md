@@ -12,19 +12,17 @@ This package contains the internal MCP server for `context_graph`. The server us
 | `trace_call_path` | implemented | metadata snapshot |
 | `get_code_snippet` | implemented | metadata snapshot |
 | `get_code_context` | implemented | metadata snapshot |
-| `search_context` | implemented | hybrid lexical + semantic provenance retrieval |
-| `resolve_claim` | implemented | hybrid claim retrieval + configured LLM |
-| `synthesize_artifact` | implemented | backend lexical search + metadata snapshot + configured LLM |
-| `get_node_neighborhood` | scaffold | `TODO(context_graph.backend.traversal.neighborhood)` |
-| `get_timeline` | scaffold | `TODO(context_graph.backend.timeline)` |
+| `search_context` | implemented | split node/edge provenance retrieval with optional historical semantic mode |
+| `get_node_neighborhood` | implemented on Neo4j, unsupported on Neptune | exact `node_id`; snapshot-backed for code nodes, graph-backed for provenance nodes |
+| `get_timeline` | implemented on Neo4j, unsupported on Neptune | exact target id with historical provenance assembly |
 | `record_agent_observation` | implemented | backend driver + metadata store; semantic indexing when available |
 
 Notes:
 
-- `search_context` fuses backend lexical search with semantic claim and observation profiles when available.
-- `synthesize_artifact` is read-only in this pass and does not persist artifact nodes.
+- `search_context` runs a node pipeline over claims/observations plus a separate relation-profile pipeline, and can include inactive semantic profiles for provenance/history inspection.
+- `get_node_neighborhood` intentionally does not support concept anchoring in this phase; callers must pass an exact `node_id`.
 - `record_agent_observation` persists agent notes/traces as provenance observations and routes extractable kinds through the same observation-ingestion service used by repository ingestion.
-- Scaffolded tools return typed `status="scaffold"` responses with `capability` and `todo` fields.
+- Unsupported backend paths return typed `status="unsupported"` responses with `capability` and `todo` fields.
 
 ## Runtime Model
 

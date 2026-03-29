@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import re
 import sys
+import threading
 from typing import Any, Sequence
 
 try:
@@ -263,11 +264,21 @@ def _run_async(coro: Any) -> Any:
     except RuntimeError:
         return asyncio.run(coro)
 
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    result: dict[str, Any] = {}
+    error: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - defensive handoff
+            error.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True, name="context-graph-query-parser")
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result.get("value")
 
 
 def _dedupe_texts(values: Sequence[str]) -> list[str]:

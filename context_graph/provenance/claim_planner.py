@@ -11,6 +11,7 @@ from typing import Any
 
 from context_graph.models import GraphSnapshot
 from context_graph.profiles import (
+    ProfileDeactivation,
     ProfileRecord,
     RelationProfileSpec,
     semantic_claim_profile_from_claim,
@@ -103,7 +104,9 @@ class ClaimPromotionCandidate:
 class ClaimMutationPlanResult:
     plan: MutationPlan
     invalidated_count: int = 0
+    invalidated_claim_ids: tuple[str, ...] = ()
     profiles: tuple[ProfileRecord, ...] = ()
+    profile_deactivations: tuple[ProfileDeactivation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -976,6 +979,16 @@ class ClaimMutationPlanner:
                     relation_type=relation["resolution_type"],
                     rationale=relation["rationale"],
                     confidence=relation["confidence"],
+                    observed_at=observation.observed_at or claim_to_write.latest_observed_at or "",
+                    is_active=(
+                        claim_to_write.is_current
+                        and relation["candidate_claim_id"] not in invalidated_claim_ids
+                        and (
+                            relation_states[relation["candidate_claim_id"]].claim.is_current
+                            if relation["candidate_claim_id"] in relation_states
+                            else True
+                        )
+                    ),
                 )
                 for relation in relation_candidates
             ),
@@ -1018,6 +1031,15 @@ class ClaimMutationPlanner:
                     relation_type=relation["resolution_type"],
                     rationale=relation["rationale"],
                     confidence=relation["confidence"],
+                    is_active=(
+                        claim_to_write.is_current
+                        and relation["candidate_claim_id"] not in invalidated_claim_ids
+                        and (
+                            relation_states[relation["candidate_claim_id"]].claim.is_current
+                            if relation["candidate_claim_id"] in relation_states
+                            else True
+                        )
+                    ),
                     updated_at=observation.observed_at or claim_to_write.latest_observed_at or "",
                 ),
             )
@@ -1026,6 +1048,7 @@ class ClaimMutationPlanner:
         return ClaimMutationPlanResult(
             plan=plan,
             invalidated_count=len(invalidated_claim_ids),
+            invalidated_claim_ids=invalidated_claim_ids,
             profiles=(
                 self._build_claim_profile(
                     claim=claim_to_write,
@@ -1242,16 +1265,19 @@ class ClaimMutationPlanner:
         relation_type: str,
         rationale: str,
         confidence: str,
+        observed_at: str,
+        is_active: bool,
     ) -> MutationPlan:
         edge_type = _RELATION_EDGE_TYPES.get(relation_type)
         if edge_type is None:
             return MutationPlan()
+        record_id = _claim_relation_record_id(
+            source_claim_id=source_claim_id,
+            target_claim_id=target_claim_id,
+            edge_type=edge_type,
+        )
         edge = EdgeRecord(
-            record_id=_claim_relation_record_id(
-                source_claim_id=source_claim_id,
-                target_claim_id=target_claim_id,
-                edge_type=edge_type,
-            ),
+            record_id=record_id,
             record_type="claim_relation",
             repo_id=repo_id,
             group_id=repo_id,
@@ -1263,10 +1289,38 @@ class ClaimMutationPlanner:
                     "resolution_type": relation_type,
                     "resolution_confidence": confidence,
                     "resolution_rationale": rationale,
+                    "observed_at": observed_at,
+                    "is_active": is_active,
                 }
             ),
         )
-        return MutationPlan(upsert_edges=(edge,))
+        search_document = SearchDocumentRecord(
+            record_kind=RecordKind.EDGE,
+            record_id=record_id,
+            record_type="claim_relation",
+            repo_id=repo_id,
+            group_id=repo_id,
+            search_text=" ".join(
+                part
+                for part in (
+                    rationale.strip(),
+                    relation_type.strip(),
+                )
+                if part
+            ),
+            properties=_compact_properties(
+                {
+                    "relation_type": relation_type,
+                    "resolution_confidence": confidence,
+                    "resolution_rationale": rationale,
+                    "source_record_id": source_claim_id,
+                    "target_record_id": target_claim_id,
+                    "observed_at": observed_at,
+                    "is_active": is_active,
+                }
+            ),
+        )
+        return MutationPlan(upsert_edges=(edge,), upsert_search_documents=(search_document,))
 
     def _plan_claim_state_update(
         self,
@@ -1341,6 +1395,7 @@ class ClaimMutationPlanner:
         relation_type: str,
         rationale: str,
         confidence: str,
+        is_active: bool,
         updated_at: str,
     ) -> ProfileRecord | None:
         edge_type = _RELATION_EDGE_TYPES.get(relation_type)
@@ -1363,8 +1418,9 @@ class ClaimMutationPlanner:
                 value_text=rationale,
                 metadata={
                     "resolution_confidence": confidence,
+                    "observed_at": updated_at,
                 },
-                is_active=True,
+                is_active=is_active,
                 updated_at=updated_at,
             )
         )

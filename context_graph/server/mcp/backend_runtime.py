@@ -16,7 +16,7 @@ from context_graph.profile_vectors import (
     ProfileVectorIndexer,
     SemanticProvenanceSearchService,
 )
-from context_graph.provenance import ClaimResolutionService, ResearchArtifactSynthesisService
+from context_graph.provenance import ClaimResolutionService
 from context_graph.query_parser import QueryParser
 from context_graph.runtime.providers.factories import (
     DatabaseDriverFactory,
@@ -206,13 +206,27 @@ class MetadataSnapshotService:
         if self._metadata is None:
             return []
 
+        self._rollback_aborted_profile_search_connections()
         try:
-            if isinstance(self._profile_vector_store, InMemoryProfileVectorStore) and self._profile_indexer:
+            if self._profile_vector_store is not None:
+                self._profile_vector_store.bootstrap()
+
+            should_sync_vectors = False
+            if self._profile_indexer is not None:
+                if isinstance(self._profile_vector_store, InMemoryProfileVectorStore):
+                    should_sync_vectors = True
+                elif bool(getattr(self._profile_vector_store, "needs_resync", False)):
+                    should_sync_vectors = True
+
+            if should_sync_vectors and self._profile_indexer:
                 try:
                     self._profile_indexer.sync_repo(
                         repo_id=repo_id,
                         metadata_store=self._metadata,
                     )
+                    mark_resynced = getattr(self._profile_vector_store, "mark_resynced", None)
+                    if callable(mark_resynced):
+                        mark_resynced()
                 except Exception as sync_exc:
                     logger.warning("Profile auto-sync failed for %s: %s", repo_id, sync_exc)
 
@@ -257,8 +271,67 @@ class MetadataSnapshotService:
                 for hit, profile in zip(result.hits, result.profiles)
             ]
         except Exception as exc:
+            self._rollback_profile_search_connections()
             logger.error("MetadataSnapshotService.search_profiles_sync error: %s", exc)
             return []
+
+    def _rollback_profile_search_connections(self) -> None:
+        seen: set[int] = set()
+        for connection in (
+            getattr(self._metadata, "connection", None),
+            getattr(self._profile_vector_store, "connection", None),
+        ):
+            if connection is None:
+                continue
+            identity = id(connection)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rollback = getattr(connection, "rollback", None)
+            if callable(rollback):
+                try:
+                    rollback()
+                except Exception:
+                    continue
+
+    def _rollback_aborted_profile_search_connections(self) -> None:
+        seen: set[int] = set()
+        for connection in (
+            getattr(self._metadata, "connection", None),
+            getattr(self._profile_vector_store, "connection", None),
+        ):
+            if connection is None:
+                continue
+            identity = id(connection)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if _connection_transaction_in_error(connection):
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    try:
+                        rollback()
+                    except Exception:
+                        continue
+
+
+def _connection_transaction_in_error(connection: Any) -> bool:
+    info = getattr(connection, "info", None)
+    status = getattr(info, "transaction_status", None)
+    if status is not None:
+        status_name = getattr(status, "name", None)
+        if isinstance(status_name, str) and status_name.upper() == "INERROR":
+            return True
+        if str(status).upper().endswith("INERROR"):
+            return True
+
+    getter = getattr(connection, "get_transaction_status", None)
+    if callable(getter):
+        try:
+            return int(getter()) == 3
+        except Exception:
+            return False
+    return False
 
 
 class MCPBackendRuntime:
@@ -273,7 +346,6 @@ class MCPBackendRuntime:
         self.llm_client: Any | None = None
         self.embedder_client: Any | None = None
         self.claim_resolution_service: ClaimResolutionService | None = None
-        self.research_artifact_synthesis_service: ResearchArtifactSynthesisService | None = None
         self._initialized = False
         self._init_error: str | None = None
 
@@ -300,9 +372,6 @@ class MCPBackendRuntime:
             self.driver = create_driver(backend_config)
             await self.driver.build_indices()
             self.claim_resolution_service = ClaimResolutionService(
-                llm_client=self.llm_client,
-            )
-            self.research_artifact_synthesis_service = ResearchArtifactSynthesisService(
                 llm_client=self.llm_client,
             )
             self._initialized = True

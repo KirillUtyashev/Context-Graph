@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from context_graph.models import GraphSnapshot
-from context_graph.profiles import ProfileRecord
+from context_graph.profiles import ProfileDeactivation, ProfileRecord
 from context_graph.storage.backend import (
     BackendDriver,
     MutationPlan,
@@ -53,7 +53,9 @@ class FactInvalidationPlanResult:
 
     plan: MutationPlan
     invalidated_count: int = 0
+    invalidated_claim_ids: tuple[str, ...] = ()
     profiles: tuple[ProfileRecord, ...] = ()
+    profile_deactivations: tuple[ProfileDeactivation, ...] = ()
 
 
 class CurrentEvidenceReader:
@@ -161,7 +163,9 @@ class EvidenceInvalidationPlanner:
         return FactInvalidationPlanResult(
             plan=result.plan,
             invalidated_count=result.invalidated_count,
+            invalidated_claim_ids=result.invalidated_claim_ids,
             profiles=result.profiles,
+            profile_deactivations=result.profile_deactivations,
         )
 
     def begin_claim_session(self, *, repo_id: str) -> ClaimPlanningSession:

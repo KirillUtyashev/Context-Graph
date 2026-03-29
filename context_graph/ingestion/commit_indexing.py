@@ -483,6 +483,7 @@ class CommitIndexingService:
         observation_plan = observation_ingestion_result.observation_plan
         evidence_plan = observation_ingestion_result.evidence_plan
         profiles = observation_ingestion_result.profiles
+        profile_deactivations = observation_ingestion_result.profile_deactivations
         all_operation_plans = [structural_plan.plan]
         if not commit_plan.is_empty():
             all_operation_plans.append(commit_plan)
@@ -497,8 +498,11 @@ class CommitIndexingService:
             all_operations,
             execute=execute,
         )
-        if execute and profiles:
-            self.observation_ingestion_service.persist_profiles(profiles)
+        if execute and (profiles or profile_deactivations):
+            self.observation_ingestion_service.persist_profiles(
+                profiles,
+                deactivations=profile_deactivations,
+            )
         self.metadata_store.save_repo_index_state(
             RepoIndexState(
                 repo_id=structural_plan.snapshot.repo_id,
@@ -661,8 +665,8 @@ class CommitIndexingService:
             },
         )
 
-    def _persist_profiles(self, profiles: Sequence[Any]) -> None:
-        self.observation_ingestion_service.persist_profiles(profiles)
+    def _persist_profiles(self, profiles: Sequence[Any], deactivations: Sequence[Any] = ()) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles, deactivations=deactivations)
 
 def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
     counts: dict[str, int] = {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
 from context_graph.server.mcp import provenance_tools
 from context_graph.server.mcp import server as server_module
 from context_graph.server.mcp.queue import ObservationWriteResult
-from context_graph.storage.backend import GraphRecordRef, RecordKind, SearchHit
+from context_graph.storage.backend import BackendProvider, GraphRecordRef, RecordKind, SearchHit
 
 
 def make_code_graph_snapshot(root_path: str) -> GraphSnapshot:
@@ -75,13 +76,28 @@ class FakeSearchOperations:
 
     async def search(self, query):
         self.search_queries.append(query)
+        results = list(self._hits)
+        if query.record_kinds:
+            allowed_kinds = set(query.record_kinds)
+            results = [hit for hit in results if hit.ref.record_kind in allowed_kinds]
         if query.record_types:
-            return [
-                hit
-                for hit in self._hits
-                if hit.ref.record_type in query.record_types
-            ][: query.limit]
-        return self._hits[: query.limit]
+            allowed_types = set(query.record_types)
+            results = [hit for hit in results if hit.ref.record_type in allowed_types]
+        if query.filters:
+            filtered: list[SearchHit] = []
+            for hit in results:
+                record = self._records.get(hit.ref.record_id, {})
+                properties = dict(record.get("properties") or {})
+                include = True
+                for key, value in query.filters.items():
+                    candidate = properties.get(key, record.get(key))
+                    if candidate != value:
+                        include = False
+                        break
+                if include:
+                    filtered.append(hit)
+            results = filtered
+        return results[: query.limit]
 
     async def fetch(self, refs):
         return [
@@ -92,54 +108,22 @@ class FakeSearchOperations:
 
 
 class FakeDriver:
-    def __init__(self, hits: list[SearchHit], records: dict[str, dict]) -> None:
-        self.search = FakeSearchOperations(hits, records)
-
-
-class FakeClaimResolutionService:
-    def __init__(self) -> None:
-        self.llm_client = object()
-        self.calls = []
-
-    def resolve(self, *, repo_id: str, new_claim: dict, candidates: list[dict]):
-        self.calls.append((repo_id, new_claim, candidates))
-        return SimpleNamespace(
-            relations=[
-                SimpleNamespace(
-                    candidate_claim_id="claim:1",
-                    resolution_type="same_as",
-                    confidence="high",
-                    rationale="The wording differs but the assertion is the same.",
-                )
-            ]
-        )
-
-
-class FakeArtifactSynthesisService:
-    def __init__(self) -> None:
-        self.llm_client = object()
-        self.calls = []
-
-    def synthesize(
+    def __init__(
         self,
+        hits: list[SearchHit],
+        records: dict[str, dict],
         *,
-        repo_id: str,
-        repo_region: dict,
-        code_context: dict,
-        evidence: list,
-        claims: list,
-    ):
-        self.calls.append((repo_id, repo_region, code_context, evidence, claims))
-        return SimpleNamespace(
-            artifacts=[
-                SimpleNamespace(
-                    artifact_kind="research_note",
-                    title="Auth audience check",
-                    summary="The indexed evidence shows an audience-validation change.",
-                    key_points=["JWT audience validation was introduced."],
-                )
-            ]
-        )
+        provider: BackendProvider = BackendProvider.NEO4J,
+        execute_query_results: list[dict] | None = None,
+    ) -> None:
+        self.provider = provider
+        self.search = FakeSearchOperations(hits, records)
+        self.execute_query_calls = []
+        self._execute_query_results = list(execute_query_results or [])
+
+    async def execute_query(self, query: str, **kwargs):
+        self.execute_query_calls.append((query, kwargs))
+        return list(self._execute_query_results)
 
 
 class FakeRuntime:
@@ -149,14 +133,12 @@ class FakeRuntime:
         driver=None,
         llm_client=None,
         claim_resolution_service=None,
-        research_artifact_synthesis_service=None,
         queue_service=None,
         observation_write_service=None,
     ) -> None:
         self._driver = driver
         self.llm_client = llm_client
         self.claim_resolution_service = claim_resolution_service
-        self.research_artifact_synthesis_service = research_artifact_synthesis_service
         self.queue_service = queue_service
         self.observation_write_service = observation_write_service
 
@@ -272,7 +254,7 @@ class ProvenanceToolTests(unittest.TestCase):
         self.assertEqual(response["status"], "implemented")
         self.assertEqual(response["requested_sources"], ["claims", "code"])
         self.assertEqual([hit["record_type"] for hit in response["hits"]], ["claim", "code_node"])
-        self.assertIn("Semantic profile search is unavailable", response["message"])
+        self.assertIn("Semantic node and relation profile search is unavailable", response["message"])
         self.assertEqual(self.driver.search.search_queries[0].mode.value, "lexical")
         self.assertEqual(response["hits"][0]["retrieval_channels"], ["lexical"])
         self.assertIsNotNone(response["hits"][0]["lexical_score"])
@@ -321,7 +303,242 @@ class ProvenanceToolTests(unittest.TestCase):
         self.assertEqual(hit["matched_profile_key_text"], "audience requirement")
         self.assertEqual(hit["matched_profile_key_origin"], "generated_semantic")
         self.assertEqual(hit["semantic_profile_kind"], "semantic_claim_profile")
-        self.assertIn("hybrid provenance retrieval", response["message"])
+        self.assertEqual(hit["hit_kind"], "node")
+        self.assertIn("separate node and relation search pipelines", response["message"])
+
+    def test_search_context_includes_relation_hits_by_default(self) -> None:
+        def fake_semantic_search(**kwargs):
+            if kwargs["profile_kinds"] == ("semantic_claim_profile",):
+                return [
+                    {
+                        "profile_id": "profile:demo:semantic_claim_profile:claim:1",
+                        "profile_kind": "semantic_claim_profile",
+                        "profile_target_kind": "Claim",
+                        "profile_target_id": "claim:1",
+                        "relation_type": None,
+                        "value_text": "JWT audience validation is required.",
+                        "source_node_id": None,
+                        "target_node_id": None,
+                        "is_active": True,
+                        "score": 0.88,
+                        "matched_key_text": "audience requirement",
+                        "matched_key_origin": "generated_semantic",
+                        "metadata": {
+                            "claim_id": "claim:1",
+                            "claim_text": "JWT audience validation is required.",
+                            "claim_kind": "state_claim",
+                            "claim_subkind": "desired_behavior_or_requirement",
+                            "is_current": True,
+                        },
+                    }
+                ]
+            if kwargs["profile_kinds"] == ("semantic_relation_profile",):
+                self.assertTrue(kwargs["active_only"])
+                return [
+                    {
+                        "profile_id": "profile:demo:semantic_relation_profile:claim_relation:claim:2:claim:1:contradicts",
+                        "profile_kind": "semantic_relation_profile",
+                        "profile_target_kind": "Relation",
+                        "profile_target_id": "claim_relation:claim:2:claim:1:contradicts",
+                        "relation_type": "contradicts",
+                        "value_text": "The rollout note contradicts the required audience validation.",
+                        "source_node_id": "claim:2",
+                        "target_node_id": "claim:1",
+                        "is_active": True,
+                        "score": 0.79,
+                        "matched_key_text": "contradicts the required audience validation",
+                        "matched_key_origin": "raw_text",
+                        "metadata": {
+                            "source_record_id": "claim:2",
+                            "source_record_type": "claim",
+                            "target_record_id": "claim:1",
+                            "target_record_type": "claim",
+                            "observed_at": "2026-03-29T00:00:00Z",
+                        },
+                    }
+                ]
+            return []
+
+        response = provenance_tools.search_context(
+            driver=self.driver,
+            semantic_search=fake_semantic_search,
+            repo_id="demo",
+            query="audience validation contradiction",
+            group_id="main",
+            sources=["claims", "relations"],
+            limit=10,
+        )
+
+        self.assertEqual([hit["hit_kind"] for hit in response["hits"]], ["node", "relation"])
+        relation_hit = response["hits"][1]
+        self.assertEqual(relation_hit["source"], "relations")
+        self.assertEqual(relation_hit["record_type"], "relation")
+        self.assertEqual(relation_hit["relation_type"], "contradicts")
+        self.assertEqual(relation_hit["source_record_id"], "claim:2")
+        self.assertEqual(relation_hit["target_record_id"], "claim:1")
+        self.assertEqual(relation_hit["retrieval_channels"], ["semantic_relation"])
+
+    def test_search_context_can_return_lexical_relation_hits(self) -> None:
+        relation_record_id = "claim_relation:claim:2:claim:1:contradicts"
+        driver = FakeDriver(
+            [
+                SearchHit(
+                    ref=GraphRecordRef(
+                        record_kind=RecordKind.EDGE,
+                        record_id=relation_record_id,
+                        record_type="claim_relation",
+                        repo_id="demo",
+                        group_id="main",
+                    ),
+                    score=0.84,
+                )
+            ],
+            {
+                relation_record_id: {
+                    "record_id": relation_record_id,
+                    "record_type": "claim_relation",
+                    "relationship_type": "CONTRADICTS",
+                    "source_record_id": "claim:2",
+                    "target_record_id": "claim:1",
+                    "properties": {
+                        "resolution_type": "contradicts",
+                        "resolution_rationale": "The rollout note contradicts the required audience validation.",
+                        "resolution_confidence": "high",
+                        "observed_at": "2026-03-29T00:00:00Z",
+                        "is_active": True,
+                    },
+                }
+            },
+        )
+
+        response = provenance_tools.search_context(
+            driver=driver,
+            repo_id="demo",
+            query="audience validation contradiction",
+            group_id="main",
+            sources=["relations"],
+            limit=10,
+        )
+
+        self.assertEqual(len(response["hits"]), 1)
+        relation_hit = response["hits"][0]
+        self.assertEqual(relation_hit["hit_kind"], "relation")
+        self.assertEqual(relation_hit["record_id"], relation_record_id)
+        self.assertEqual(relation_hit["relation_type"], "contradicts")
+        self.assertEqual(relation_hit["retrieval_channels"], ["lexical"])
+        self.assertEqual(relation_hit["source_record_id"], "claim:2")
+        self.assertEqual(relation_hit["target_record_id"], "claim:1")
+
+    def test_search_context_include_historical_surfaces_inactive_relation_hits(self) -> None:
+        def fake_semantic_search(**kwargs):
+            if kwargs["profile_kinds"] == ("semantic_relation_profile",):
+                if kwargs["active_only"]:
+                    return []
+                return [
+                    {
+                        "profile_id": "profile:demo:semantic_relation_profile:claim_relation:claim:2:claim:1:contradicts",
+                        "profile_kind": "semantic_relation_profile",
+                        "profile_target_kind": "Relation",
+                        "profile_target_id": "claim_relation:claim:2:claim:1:contradicts",
+                        "relation_type": "contradicts",
+                        "value_text": "The rollout note contradicts the required audience validation.",
+                        "source_node_id": "claim:2",
+                        "target_node_id": "claim:1",
+                        "is_active": False,
+                        "score": 0.79,
+                        "matched_key_text": "contradicts the required audience validation",
+                        "matched_key_origin": "raw_text",
+                        "metadata": {
+                            "source_record_id": "claim:2",
+                            "source_record_type": "claim",
+                            "target_record_id": "claim:1",
+                            "target_record_type": "claim",
+                            "observed_at": "2026-03-29T00:00:00Z",
+                        },
+                    }
+                ]
+            return []
+
+        hidden_response = provenance_tools.search_context(
+            driver=self.driver,
+            semantic_search=fake_semantic_search,
+            repo_id="demo",
+            query="audience validation contradiction",
+            group_id="main",
+            sources=["relations"],
+            limit=10,
+        )
+        self.assertEqual(hidden_response["hits"], [])
+
+        historical_response = provenance_tools.search_context(
+            driver=self.driver,
+            semantic_search=fake_semantic_search,
+            repo_id="demo",
+            query="audience validation contradiction",
+            group_id="main",
+            sources=["relations"],
+            limit=10,
+            include_historical=True,
+        )
+        self.assertEqual(len(historical_response["hits"]), 1)
+        self.assertFalse(historical_response["hits"][0]["is_active"])
+
+    def test_search_context_include_historical_surfaces_inactive_claim_profile_hits(self) -> None:
+        driver = FakeDriver([], {})
+
+        def fake_semantic_search(**kwargs):
+            if kwargs["profile_kinds"] == ("semantic_claim_profile",):
+                if kwargs["active_only"]:
+                    return []
+                return [
+                    {
+                        "profile_id": "profile:demo:semantic_claim_profile:claim:inactive",
+                        "profile_kind": "semantic_claim_profile",
+                        "profile_target_kind": "Claim",
+                        "profile_target_id": "claim:inactive",
+                        "relation_type": None,
+                        "value_text": "JWT audience validation was later rolled back.",
+                        "source_node_id": None,
+                        "target_node_id": None,
+                        "is_active": False,
+                        "score": 0.77,
+                        "matched_key_text": "audience validation rollback",
+                        "matched_key_origin": "generated_semantic",
+                        "metadata": {
+                            "claim_id": "claim:inactive",
+                            "claim_text": "JWT audience validation was later rolled back.",
+                            "claim_kind": "change_claim",
+                            "claim_subkind": "fix_or_mitigation",
+                            "is_current": False,
+                        },
+                    }
+                ]
+            return []
+
+        current_only = provenance_tools.search_context(
+            driver=driver,
+            semantic_search=fake_semantic_search,
+            repo_id="demo",
+            query="audience rollback",
+            group_id="main",
+            sources=["claims"],
+            limit=10,
+        )
+        self.assertEqual(current_only["hits"], [])
+
+        historical = provenance_tools.search_context(
+            driver=driver,
+            semantic_search=fake_semantic_search,
+            repo_id="demo",
+            query="audience rollback",
+            group_id="main",
+            sources=["claims"],
+            limit=10,
+            include_historical=True,
+        )
+        self.assertEqual(len(historical["hits"]), 1)
+        self.assertEqual(historical["hits"][0]["hit_kind"], "node")
+        self.assertFalse(historical["hits"][0]["is_active"])
 
     def test_get_code_context_builds_deterministic_slice(self) -> None:
         response = provenance_tools.get_code_context(
@@ -342,115 +559,231 @@ class ProvenanceToolTests(unittest.TestCase):
         )
         self.assertTrue(response["snippets"])
 
-    def test_resolve_claim_queries_candidates_and_maps_relations(self) -> None:
-        service = FakeClaimResolutionService()
-
-        response = provenance_tools.resolve_claim(
-            driver=self.driver,
-            claim_resolution_service=service,
-            repo_id="demo",
-            group_id="main",
-            claim_text="JWT audience validation is required.",
-            claim_kind="state_claim",
-            claim_subkind="desired_behavior_or_requirement",
-            candidate_limit=5,
-        )
-
-        self.assertEqual(response["status"], "implemented")
-        self.assertEqual(response["matches"][0]["relation"], "same_as")
-        self.assertEqual(service.calls[0][0], "demo")
-        self.assertEqual(self.driver.search.search_queries[0].group_ids, ("main",))
-
-    def test_synthesize_artifact_returns_read_only_artifact(self) -> None:
-        service = FakeArtifactSynthesisService()
-
-        response = provenance_tools.synthesize_artifact(
-            driver=self.driver,
-            artifact_synthesis_service=service,
-            snapshot=self.snapshot,
-            repo_id="demo",
-            group_id="main",
-            subject_kind="symbol",
-            subject_id="demo.app.main",
-            artifact_kind="research_note",
-            include_code_context=True,
-        )
-
-        self.assertEqual(response["status"], "implemented")
-        self.assertEqual(response["title"], "Auth audience check")
-        self.assertEqual(response["sections"][0]["title"], "Key Point 1")
-        self.assertIn("TODO(context_graph.backend.artifacts.persistence)", response["message"])
-
-    def test_scaffold_helpers_include_capability_and_todo(self) -> None:
+    def test_get_node_neighborhood_uses_snapshot_for_code_nodes(self) -> None:
         neighborhood = provenance_tools.get_node_neighborhood(
-            service=provenance_tools.NeighborhoodQueryService(),
+            service=provenance_tools.NeighborhoodQueryService(
+                driver=self.driver,
+                snapshot=self.snapshot,
+            ),
+            repo_id="demo",
+            node_id="symbol:demo:demo.app.main",
+            hops=1,
+            edge_types=None,
+        )
+
+        self.assertEqual(neighborhood["status"], "implemented")
+        self.assertEqual(neighborhood["center_record_id"], "symbol:demo:demo.app.main")
+        self.assertEqual(
+            [node["record_id"] for node in neighborhood["nodes"]],
+            ["symbol:demo:demo.app.main", "file:demo:app", "symbol:demo:demo.app.helper"],
+        )
+        self.assertEqual(
+            [edge["edge_type"] for edge in neighborhood["edges"]],
+            ["CALLS", "DEFINES"],
+        )
+
+    def test_get_node_neighborhood_uses_neo4j_backend_for_provenance_nodes(self) -> None:
+        relation_record_id = "claim_relation:claim:2:claim:1:contradicts"
+        driver = FakeDriver(
+            [],
+            {
+                "claim:1": {
+                    "record_id": "claim:1",
+                    "record_type": "claim",
+                    "properties": {
+                        "claim_id": "claim:1",
+                        "claim_text": "JWT audience validation is required.",
+                        "latest_observed_at": "2026-03-27T00:00:00Z",
+                    },
+                }
+            },
+            execute_query_results=[
+                {
+                    "nodes": [
+                        {
+                            "record_id": "observation:1",
+                            "record_type": "observation",
+                            "properties": {
+                                "title": "Auth note",
+                                "text": "Added JWT audience validation.",
+                                "observed_at": "2026-03-28T00:00:00Z",
+                            },
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "record_id": relation_record_id,
+                            "record_type": "claim_relation",
+                            "relationship_type": "CONTRADICTS",
+                            "source_record_id": "claim:2",
+                            "target_record_id": "claim:1",
+                            "properties": {
+                                "resolution_type": "contradicts",
+                                "resolution_rationale": "The rollout note contradicts the required audience validation.",
+                                "observed_at": "2026-03-29T00:00:00Z",
+                                "is_active": True,
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+
+        neighborhood = provenance_tools.get_node_neighborhood(
+            service=provenance_tools.NeighborhoodQueryService(driver=driver),
             repo_id="demo",
             node_id="claim:1",
-            concept=None,
+            hops=2,
+            edge_types=["claim_relation"],
         )
+
+        self.assertEqual(neighborhood["status"], "implemented")
+        self.assertEqual(neighborhood["nodes"][0]["record_id"], "claim:1")
+        self.assertEqual(neighborhood["edges"][0]["edge_type"], "contradicts")
+        self.assertEqual(driver.execute_query_calls[0][1]["node_id"], "claim:1")
+
+    def test_get_node_neighborhood_returns_typed_unsupported_for_neptune(self) -> None:
+        driver = FakeDriver(
+            [],
+            {
+                "claim:1": {
+                    "record_id": "claim:1",
+                    "record_type": "claim",
+                    "properties": {"claim_text": "JWT audience validation is required."},
+                }
+            },
+            provider=BackendProvider.NEPTUNE,
+        )
+
+        neighborhood = provenance_tools.get_node_neighborhood(
+            service=provenance_tools.NeighborhoodQueryService(driver=driver),
+            repo_id="demo",
+            node_id="claim:1",
+            hops=2,
+            edge_types=None,
+        )
+
+        self.assertEqual(neighborhood["status"], "unsupported")
+        self.assertEqual(neighborhood["capability"], provenance_tools.NEIGHBORHOOD_CAPABILITY)
+
+    def test_get_timeline_builds_historical_events_from_exact_target(self) -> None:
+        relation_record_id = "claim_relation:claim:2:claim:1:contradicts"
+        driver = FakeDriver(
+            [],
+            {
+                "claim:1": {
+                    "record_id": "claim:1",
+                    "record_type": "claim",
+                    "properties": {
+                        "claim_id": "claim:1",
+                        "claim_text": "JWT audience validation is required.",
+                        "latest_observed_at": "2026-03-27T00:00:00Z",
+                    },
+                }
+            },
+            execute_query_results=[
+                {
+                    "nodes": [
+                        {
+                            "record_id": "observation:1",
+                            "record_type": "observation",
+                            "properties": {
+                                "title": "Auth note",
+                                "text": "Added JWT audience validation.",
+                                "observed_at": "2026-03-28T00:00:00Z",
+                            },
+                        },
+                        {
+                            "record_id": "claim:2",
+                            "record_type": "claim",
+                            "properties": {
+                                "claim_id": "claim:2",
+                                "claim_text": "JWT audience validation was removed.",
+                                "latest_observed_at": "2026-03-30T00:00:00Z",
+                                "is_current": False,
+                                "valid_to": "2026-03-31T00:00:00Z",
+                            },
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "record_id": relation_record_id,
+                            "record_type": "claim_relation",
+                            "relationship_type": "CONTRADICTS",
+                            "source_record_id": "claim:2",
+                            "target_record_id": "claim:1",
+                            "properties": {
+                                "resolution_type": "contradicts",
+                                "resolution_rationale": "The rollout note contradicts the required audience validation.",
+                                "observed_at": "2026-03-29T00:00:00Z",
+                                "is_active": False,
+                                "deactivated_at": "2026-03-31T00:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+
         timeline = provenance_tools.get_timeline(
-            service=provenance_tools.TimelineQueryService(),
+            service=provenance_tools.TimelineQueryService(driver=driver),
+            repo_id="demo",
+            target_kind="claim_cluster",
+            target_id="claim:1",
+            limit=10,
+        )
+
+        self.assertEqual(timeline["status"], "implemented")
+        self.assertTrue(timeline["events"])
+        self.assertIn("relation:contradicts", [event["event_type"] for event in timeline["events"]])
+        self.assertEqual(timeline["events"][0]["observed_at"], "2026-03-27T00:00:00Z")
+
+    def test_get_timeline_returns_typed_unsupported_for_neptune(self) -> None:
+        driver = FakeDriver([], {}, provider=BackendProvider.NEPTUNE)
+
+        timeline = provenance_tools.get_timeline(
+            service=provenance_tools.TimelineQueryService(driver=driver),
             repo_id="demo",
             target_kind="topic",
             target_id="auth",
+            limit=10,
         )
 
-        self.assertEqual(neighborhood["status"], "scaffold")
-        self.assertIn("capability", neighborhood)
-        self.assertIn("todo", neighborhood)
-        self.assertEqual(timeline["status"], "scaffold")
-        self.assertIn("capability", timeline)
-        self.assertIn("todo", timeline)
+        self.assertEqual(timeline["status"], "unsupported")
+        self.assertEqual(timeline["capability"], provenance_tools.TIMELINE_CAPABILITY)
 
 
 class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
-    async def test_resolve_claim_wrapper_requires_llm_provider(self) -> None:
-        runtime = FakeRuntime(
-            driver=object(),
-            llm_client=None,
-            claim_resolution_service=None,
-        )
-        config = SimpleNamespace(namespace=SimpleNamespace(group_id="main"))
+    def test_removed_public_tools_are_not_exposed(self) -> None:
+        self.assertFalse(hasattr(server_module, "resolve_claim"))
+        self.assertFalse(hasattr(server_module, "synthesize_artifact"))
 
-        with patch.object(server_module, "backend_runtime", runtime), patch.object(
-            server_module,
-            "config",
-            config,
-            create=True,
-        ):
-            response = await server_module.resolve_claim(
-                "demo",
-                "JWT audience validation is required.",
-            )
+    async def test_get_node_neighborhood_wrapper_requires_exact_node_id(self) -> None:
+        response = await server_module.get_node_neighborhood(
+            node_id=None,
+            concept="auth",
+            repo_id="demo",
+        )
 
         self.assertEqual(
             response,
-            {"error": "resolve_claim requires a configured llm provider"},
+            {
+                "error": (
+                    "get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
+                )
+            },
         )
 
-    async def test_synthesize_artifact_wrapper_requires_llm_provider(self) -> None:
-        runtime = FakeRuntime(
-            driver=object(),
-            llm_client=None,
-            research_artifact_synthesis_service=None,
+    async def test_get_timeline_wrapper_requires_repo_id_for_file_targets(self) -> None:
+        response = await server_module.get_timeline(
+            target_kind="file",
+            target_id="app.py",
+            repo_id=None,
         )
-        config = SimpleNamespace(namespace=SimpleNamespace(group_id="main"))
-
-        with patch.object(server_module, "backend_runtime", runtime), patch.object(
-            server_module,
-            "config",
-            config,
-            create=True,
-        ):
-            response = await server_module.synthesize_artifact(
-                "demo",
-                "symbol",
-                "demo.app.main",
-            )
 
         self.assertEqual(
             response,
-            {"error": "synthesize_artifact requires a configured llm provider"},
+            {"error": "repo_id is required for exact file timelines"},
         )
 
     async def test_record_agent_observation_wrapper_returns_scaffold_payload(self) -> None:
@@ -543,6 +876,51 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "implemented")
         self.assertTrue(response["persisted"])
         self.assertEqual(response["observation_id"], "observation:agent_note:demo:1")
+
+
+class ProvenanceToolAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_context_async_runs_sync_semantic_search_off_loop(self) -> None:
+        driver = FakeDriver(
+            hits=[],
+            records={},
+        )
+
+        def semantic_search(**kwargs):
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            return [
+                {
+                    "profile_id": "profile:claim:1",
+                    "profile_kind": "semantic_claim_profile",
+                    "profile_target_kind": "Claim",
+                    "profile_target_id": "claim:1",
+                    "value_text": "JWT audience validation is required.",
+                    "score": 0.92,
+                    "matched_key_text": "audience requirement",
+                    "matched_key_origin": "generated_semantic",
+                    "metadata": {
+                        "claim_id": "claim:1",
+                        "claim_text": "JWT audience validation is required.",
+                    },
+                }
+            ]
+
+        response = await provenance_tools.search_context_async(
+            driver=driver,
+            semantic_search=semantic_search,
+            repo_id="demo",
+            query="audience validation",
+            group_id="main",
+            sources=["claims"],
+            limit=10,
+        )
+
+        self.assertEqual(response["status"], "implemented")
+        self.assertEqual(len(response["hits"]), 1)
+        self.assertEqual(response["hits"][0]["record_type"], "claim")
+        self.assertIn("semantic_claim", response["hits"][0]["retrieval_channels"])
+        self.assertEqual(response["hits"][0]["hit_kind"], "node")
+        self.assertTrue(response["hits"][0]["is_active"])
 
 
 if __name__ == "__main__":

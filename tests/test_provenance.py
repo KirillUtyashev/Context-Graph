@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from context_graph.code_identity import CodeIdentityCanonicalizer, SnapshotCodeResolver
@@ -82,7 +83,7 @@ from context_graph.profiles import (
     semantic_relation_profile_from_spec,
 )
 from context_graph.query_parser import QueryParseResult
-from context_graph.storage.backend import GraphRecordRef, RecordKind, SearchHit
+from context_graph.storage.backend import GraphRecordRef, MutationPlan, RecordKind, SearchHit
 
 
 def make_snapshot() -> GraphSnapshot:
@@ -1385,6 +1386,102 @@ class ObservationGeneralizationTests(unittest.TestCase):
         self.assertTrue(result.evidence_plan.is_empty())
         self.assertEqual(len(result.profiles), 1)
         self.assertEqual(result.profiles[0].profile_kind, SEMANTIC_OBSERVATION_PROFILE_KIND)
+
+    def test_observation_ingestion_service_deactivates_active_relation_profiles_for_invalidated_claims(self):
+        metadata = InMemoryMetadataStore()
+        active_relation_profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:new:claim:old:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:new",
+                source_record_type="claim",
+                target_record_id="claim:old",
+                target_record_type="claim",
+                value_text="The new claim contradicts the older claim.",
+                updated_at="2026-03-28T00:00:00Z",
+            )
+        )
+        assert active_relation_profile is not None
+        metadata.upsert_profiles((active_relation_profile,))
+
+        class ObservationOnlyExtractionService:
+            def extract(self, *args, **kwargs):
+                return make_extraction_response(
+                    claim_text="demo.app.main is enabled.",
+                    claim_kind="state_claim",
+                    quote_text="demo.app.main is enabled",
+                    summary_text="The source says demo.app.main is enabled.",
+                    span_start=None,
+                    span_end=None,
+                    evidence_kind="state_detail",
+                )
+
+        class InvalidatingPlanner:
+            def begin_claim_session(self, *, repo_id: str):
+                return object()
+
+            def plan_validated_claims(self, **kwargs):
+                return SimpleNamespace(
+                    plan=MutationPlan(),
+                    invalidated_count=1,
+                    invalidated_claim_ids=("claim:old",),
+                    profiles=(),
+                    profile_deactivations=(),
+                )
+
+        planned = ObservationMutationPlanner().build_observation(
+            observation_id="observation:agent_note:demo:1",
+            repo_id="demo",
+            observation_kind=ObservationKind.AGENT_NOTE.value,
+            source_kind="agent",
+            source_id="observation_source:agent:demo:task-1",
+            source_record_type="observation_source",
+            title="Auth contradiction",
+            text="The new note says the old auth claim is incorrect.",
+            context_kind="agent_task",
+            context_id="task-1",
+            observed_at="2026-03-29T00:00:00Z",
+            ensure_source_node=True,
+        )
+        service = ObservationIngestionService(
+            metadata_store=metadata,
+            observation_planner=ObservationMutationPlanner(),
+            claim_extraction_service=ObservationOnlyExtractionService(),
+            evidence_invalidation_planner=InvalidatingPlanner(),
+        )
+
+        result = service.plan_ingestion(
+            items=(ObservationIngestionItem(planned_observation=planned),),
+            snapshot=None,
+        )
+
+        self.assertEqual(result.invalidated_claim_ids, ("claim:old",))
+        self.assertEqual(len(result.profile_deactivations), 1)
+        deactivation = result.profile_deactivations[0]
+        self.assertEqual(deactivation.profile_kind, SEMANTIC_RELATION_PROFILE_KIND)
+        self.assertEqual(deactivation.target_node_id, "claim:old")
+        self.assertEqual(deactivation.observed_at, "2026-03-29T00:00:00Z")
+        relation_edge_update = next(
+            edge for edge in result.plan.upsert_edges
+            if edge.record_id == "claim_relation:claim:new:claim:old:contradicts"
+        )
+        self.assertFalse(relation_edge_update.properties["is_active"])
+        relation_search_doc = next(
+            doc
+            for doc in result.plan.upsert_search_documents
+            if doc.record_kind is RecordKind.EDGE
+            and doc.record_id == "claim_relation:claim:new:claim:old:contradicts"
+        )
+        self.assertFalse(relation_search_doc.properties["is_active"])
+
+        service.persist_profiles(result.profiles, deactivations=result.profile_deactivations)
+        stored_relation_profile = next(
+            profile
+            for profile in metadata.load_profiles("demo", active_only=False)
+            if profile.profile_kind == SEMANTIC_RELATION_PROFILE_KIND
+        )
+        self.assertFalse(stored_relation_profile.is_active)
 
 
 class CodeIdentityTests(unittest.TestCase):
@@ -2763,6 +2860,7 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
             relation_profile.value_text,
             "Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
         )
+        self.assertFalse(relation_profile.is_active)
         self.assertEqual(
             relation_profile.metadata["resolution_confidence"],
             "high",
@@ -3006,6 +3104,10 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
             edge for edge in result.plan.upsert_edges if edge.relationship_type == "CONTRADICTS"
         )
         self.assertEqual(contradicts_edge.target_record_id, newer_claim_id)
+        relation_profile = next(
+            profile for profile in result.profiles if profile.profile_kind == SEMANTIC_RELATION_PROFILE_KIND
+        )
+        self.assertFalse(relation_profile.is_active)
 
     def test_same_session_legacy_backfill_runs_once(self):
         planner = EvidenceInvalidationPlanner(

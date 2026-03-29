@@ -254,6 +254,7 @@ class GitHubIndexer:
         observation_operations = observation_ingestion_result.observation_plan
         evidence_operations = observation_ingestion_result.evidence_plan
         profiles = observation_ingestion_result.profiles
+        profile_deactivations = observation_ingestion_result.profile_deactivations
         operations = merge_mutation_plans(
             structural_operations,
             observation_operations,
@@ -265,8 +266,11 @@ class GitHubIndexer:
                 raise RuntimeError("GitHub structural sync execution requires a configured backend driver")
             bridge = BackendSyncBridge(self.backend_driver)
             operations_applied = bridge.apply(operations).operations_applied
-            if profiles:
-                self.observation_ingestion_service.persist_profiles(profiles)
+            if profiles or profile_deactivations:
+                self.observation_ingestion_service.persist_profiles(
+                    profiles,
+                    deactivations=profile_deactivations,
+                )
         counts: dict[str, int] = {}
         pull_requests: set[int] = set()
         issues: set[int] = set()
@@ -326,8 +330,8 @@ class GitHubIndexer:
             },
         )
 
-    def _persist_profiles(self, profiles: Sequence[Any]) -> None:
-        self.observation_ingestion_service.persist_profiles(profiles)
+    def _persist_profiles(self, profiles: Sequence[Any], deactivations: Sequence[Any] = ()) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles, deactivations=deactivations)
 
     def _build_bundle(
         self,

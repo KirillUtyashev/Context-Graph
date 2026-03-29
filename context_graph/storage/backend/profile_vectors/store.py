@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import logging
 import math
 from typing import Any, Sequence
 
 from context_graph.profiles import ProfileDeactivation
 
 from .types import ProfileKeyRecord, ProfileVectorHit
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProfileVectorStore(ABC):
@@ -145,7 +149,14 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
     def __init__(self, connection: Any, *, embedding_dim: int = 1024) -> None:
         self.connection = connection
         self.embedding_dim = embedding_dim
-        self.placeholder = "%s"
+        self._needs_resync = False
+
+    @property
+    def needs_resync(self) -> bool:
+        return self._needs_resync
+
+    def mark_resynced(self) -> None:
+        self._needs_resync = False
 
     @classmethod
     def from_metadata_store(
@@ -162,52 +173,66 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
 
     def bootstrap(self) -> None:
         cursor = self.connection.cursor()
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        cursor.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS cg_profile_keys (
-                profile_key_id TEXT PRIMARY KEY,
-                profile_id TEXT NOT NULL,
-                repo_id TEXT NOT NULL,
-                profile_kind TEXT NOT NULL,
-                relation_type TEXT,
-                source_node_id TEXT,
-                target_node_id TEXT,
-                key_text TEXT NOT NULL,
-                key_origin TEXT NOT NULL DEFAULT 'legacy_keyword',
-                embedding vector({self.embedding_dim}) NOT NULL,
-                is_active BOOLEAN NOT NULL,
-                valid_from_revision TEXT,
-                valid_to_revision TEXT,
-                updated_at TEXT NOT NULL
+        try:
+            current_dim = _current_vector_dimension(cursor, "cg_profile_keys", "embedding")
+            if current_dim is not None and current_dim != self.embedding_dim:
+                logger.warning(
+                    "Rebuilding cg_profile_keys because embedding dimension changed from %s to %s",
+                    current_dim,
+                    self.embedding_dim,
+                )
+                cursor.execute("DROP TABLE IF EXISTS cg_profile_keys")
+                self.connection.commit()
+                self._needs_resync = True
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS cg_profile_keys (
+                    profile_key_id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    repo_id TEXT NOT NULL,
+                    profile_kind TEXT NOT NULL,
+                    relation_type TEXT,
+                    source_node_id TEXT,
+                    target_node_id TEXT,
+                    key_text TEXT NOT NULL,
+                    key_origin TEXT NOT NULL DEFAULT 'legacy_keyword',
+                    embedding vector({self.embedding_dim}) NOT NULL,
+                    is_active BOOLEAN NOT NULL,
+                    valid_from_revision TEXT,
+                    valid_to_revision TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        cursor.execute(
-            """
-            ALTER TABLE cg_profile_keys
-            ADD COLUMN IF NOT EXISTS key_origin TEXT NOT NULL DEFAULT 'legacy_keyword'
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS cg_profile_keys_repo_active_idx
-            ON cg_profile_keys (repo_id, is_active)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS cg_profile_keys_profile_idx
-            ON cg_profile_keys (profile_id)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS cg_profile_keys_embedding_hnsw_idx
-            ON cg_profile_keys USING hnsw (embedding vector_cosine_ops)
-            """
-        )
-        self.connection.commit()
+            cursor.execute(
+                """
+                ALTER TABLE cg_profile_keys
+                ADD COLUMN IF NOT EXISTS key_origin TEXT NOT NULL DEFAULT 'legacy_keyword'
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS cg_profile_keys_repo_active_idx
+                ON cg_profile_keys (repo_id, is_active)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS cg_profile_keys_profile_idx
+                ON cg_profile_keys (profile_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS cg_profile_keys_embedding_hnsw_idx
+                ON cg_profile_keys USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            self.connection.commit()
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
 
     def upsert_profile_keys(self, records: Sequence[ProfileKeyRecord]) -> None:
         if not records:
@@ -215,65 +240,69 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
         self.bootstrap()
         profile_ids = tuple(sorted({record.profile_id for record in records}))
         cursor = self.connection.cursor()
-        if profile_ids:
-            cursor.execute(
-                "DELETE FROM cg_profile_keys WHERE profile_id = ANY(%s)",
-                (list(profile_ids),),
-            )
-        sql = """
-            INSERT INTO cg_profile_keys (
-                profile_key_id,
-                profile_id,
-                repo_id,
-                profile_kind,
-                relation_type,
-                source_node_id,
-                target_node_id,
-                key_text,
-                key_origin,
-                embedding,
-                is_active,
-                valid_from_revision,
-                valid_to_revision,
-                updated_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS vector), %s, %s, %s, %s)
-            ON CONFLICT (profile_key_id) DO UPDATE SET
-                profile_id = excluded.profile_id,
-                repo_id = excluded.repo_id,
-                profile_kind = excluded.profile_kind,
-                relation_type = excluded.relation_type,
-                source_node_id = excluded.source_node_id,
-                target_node_id = excluded.target_node_id,
-                key_text = excluded.key_text,
-                key_origin = excluded.key_origin,
-                embedding = excluded.embedding,
-                is_active = excluded.is_active,
-                valid_from_revision = excluded.valid_from_revision,
-                valid_to_revision = excluded.valid_to_revision,
-                updated_at = excluded.updated_at
-        """
-        rows = [
-            (
-                record.profile_key_id,
-                record.profile_id,
-                record.repo_id,
-                record.profile_kind,
-                record.relation_type,
-                record.source_node_id,
-                record.target_node_id,
-                record.key_text,
-                record.key_origin,
-                _vector_literal(record.embedding),
-                record.is_active,
-                record.valid_from_revision,
-                record.valid_to_revision,
-                record.updated_at,
-            )
-            for record in records
-        ]
-        cursor.executemany(sql, rows)
-        self.connection.commit()
+        try:
+            if profile_ids:
+                cursor.execute(
+                    "DELETE FROM cg_profile_keys WHERE profile_id = ANY(%s)",
+                    (list(profile_ids),),
+                )
+            sql = """
+                INSERT INTO cg_profile_keys (
+                    profile_key_id,
+                    profile_id,
+                    repo_id,
+                    profile_kind,
+                    relation_type,
+                    source_node_id,
+                    target_node_id,
+                    key_text,
+                    key_origin,
+                    embedding,
+                    is_active,
+                    valid_from_revision,
+                    valid_to_revision,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS vector), %s, %s, %s, %s)
+                ON CONFLICT (profile_key_id) DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    repo_id = excluded.repo_id,
+                    profile_kind = excluded.profile_kind,
+                    relation_type = excluded.relation_type,
+                    source_node_id = excluded.source_node_id,
+                    target_node_id = excluded.target_node_id,
+                    key_text = excluded.key_text,
+                    key_origin = excluded.key_origin,
+                    embedding = excluded.embedding,
+                    is_active = excluded.is_active,
+                    valid_from_revision = excluded.valid_from_revision,
+                    valid_to_revision = excluded.valid_to_revision,
+                    updated_at = excluded.updated_at
+            """
+            rows = [
+                (
+                    record.profile_key_id,
+                    record.profile_id,
+                    record.repo_id,
+                    record.profile_kind,
+                    record.relation_type,
+                    record.source_node_id,
+                    record.target_node_id,
+                    record.key_text,
+                    record.key_origin,
+                    _vector_literal(record.embedding),
+                    record.is_active,
+                    record.valid_from_revision,
+                    record.valid_to_revision,
+                    record.updated_at,
+                )
+                for record in records
+            ]
+            cursor.executemany(sql, rows)
+            self.connection.commit()
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
 
     def deactivate_profile_keys(self, deactivations: Sequence[ProfileDeactivation]) -> None:
         if not deactivations:
@@ -308,8 +337,12 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
             for deactivation in deactivations
         ]
         cursor = self.connection.cursor()
-        cursor.executemany(sql, rows)
-        self.connection.commit()
+        try:
+            cursor.executemany(sql, rows)
+            self.connection.commit()
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
 
     def search_profile_keys(
         self,
@@ -339,19 +372,23 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
         """
         kinds = list(profile_kinds) if profile_kinds else None
         cursor = self.connection.cursor()
-        cursor.execute(
-            sql,
-            (
-                _vector_literal(embedding),
-                repo_id,
-                not active_only,
-                kinds,
-                kinds,
-                _vector_literal(embedding),
-                limit,
-            ),
-        )
-        rows = cursor.fetchall()
+        try:
+            cursor.execute(
+                sql,
+                (
+                    _vector_literal(embedding),
+                    repo_id,
+                    not active_only,
+                    kinds,
+                    kinds,
+                    _vector_literal(embedding),
+                    limit,
+                ),
+            )
+            rows = cursor.fetchall()
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
         return tuple(
             ProfileVectorHit(
                 profile_id=str(row[0]),
@@ -368,10 +405,14 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
     def reset_repo_context(self, repo_id: str) -> int:
         self.bootstrap()
         cursor = self.connection.cursor()
-        cursor.execute("SELECT COUNT(*) FROM cg_profile_keys WHERE repo_id = %s", (repo_id,))
-        count = int(cursor.fetchone()[0])
-        cursor.execute("DELETE FROM cg_profile_keys WHERE repo_id = %s", (repo_id,))
-        self.connection.commit()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM cg_profile_keys WHERE repo_id = %s", (repo_id,))
+            count = int(cursor.fetchone()[0])
+            cursor.execute("DELETE FROM cg_profile_keys WHERE repo_id = %s", (repo_id,))
+            self.connection.commit()
+        except Exception:
+            _rollback_connection(self.connection)
+            raise
         return count
 
 
@@ -381,6 +422,33 @@ class AuroraProfileVectorStore(PgVectorProfileVectorStore):
 
 def _vector_literal(values: Sequence[float]) -> str:
     return "[" + ",".join(f"{float(value):.12g}" for value in values) + "]"
+
+
+def _rollback_connection(connection: Any) -> None:
+    rollback = getattr(connection, "rollback", None)
+    if callable(rollback):
+        rollback()
+
+
+def _current_vector_dimension(cursor: Any, table_name: str, column_name: str) -> int | None:
+    cursor.execute("SELECT to_regclass(%s)", (table_name,))
+    table_ref = cursor.fetchone()
+    if not table_ref or not isinstance(table_ref[0], str) or not table_ref[0]:
+        return None
+    cursor.execute(
+        """
+        SELECT atttypmod
+        FROM pg_attribute
+        WHERE attrelid = to_regclass(%s)
+          AND attname = %s
+        """,
+        (table_name, column_name),
+    )
+    row = cursor.fetchone()
+    if row is None or row[0] is None:
+        return None
+    value = int(row[0])
+    return value if value > 0 else None
 
 
 def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:

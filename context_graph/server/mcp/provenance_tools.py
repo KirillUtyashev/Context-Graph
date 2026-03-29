@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -9,28 +10,25 @@ from typing import Any, Callable, Mapping, Sequence
 from context_graph.profiles import (
     SEMANTIC_CLAIM_PROFILE_KIND,
     SEMANTIC_OBSERVATION_PROFILE_KIND,
-)
-from context_graph.provenance import (
-    ClaimCandidate,
-    ClaimResolutionService,
-    EvidenceCandidate,
-    ResearchArtifactSynthesisService,
+    SEMANTIC_RELATION_PROFILE_KIND,
 )
 from context_graph.server.mcp import code_graph as code_graph_queries
 from context_graph.server.mcp.response_types import (
     CodeContextResponse,
     CodeContextSnippet,
     CodeGraphNodeRef,
+    NeighborhoodEdge,
+    NeighborhoodNode,
     NodeNeighborhoodResponse,
     RecordAgentObservationResponse,
-    ResolveClaimResponse,
     SearchContextResponse,
-    SynthesizeArtifactResponse,
+    TimelineEvent,
     TimelineResponse,
 )
 from context_graph.server.mcp.queue import ObservationWriteResult
 from context_graph.storage.backend import (
     BackendDriver,
+    BackendProvider,
     GraphRecordRef,
     RecordKind,
     SearchMode,
@@ -40,10 +38,11 @@ from context_graph.storage.backend import (
 IMPLEMENTED_STATUS = "implemented"
 SCAFFOLD_STATUS = "scaffold"
 
-SEARCH_CONTEXT_SOURCES = ("claims", "observations", "artifacts", "code")
+SEARCH_CONTEXT_SOURCES = ("claims", "observations", "relations", "artifacts", "code")
 SOURCE_RECORD_TYPES: dict[str, tuple[str, ...]] = {
     "claims": ("claim",),
     "observations": ("observation", "evidence_record"),
+    "relations": ("claim_relation",),
     "artifacts": (
         "github_pull_request",
         "github_issue",
@@ -61,48 +60,20 @@ TIMELINE_CAPABILITY = "context_graph.backend.timeline"
 TIMELINE_TODO = "TODO(context_graph.backend.timeline)"
 OBSERVATION_WRITE_CAPABILITY = "context_graph.backend.ingestion.observation_write"
 OBSERVATION_WRITE_TODO = "TODO(context_graph.backend.ingestion.observation_write)"
-ARTIFACT_PERSISTENCE_TODO = "TODO(context_graph.backend.artifacts.persistence)"
 
 LEXICAL_CHANNEL = "lexical"
 SEMANTIC_CLAIM_CHANNEL = "semantic_claim"
 SEMANTIC_OBSERVATION_CHANNEL = "semantic_observation"
+SEMANTIC_RELATION_CHANNEL = "semantic_relation"
 HYBRID_RRF_K = 60
 HYBRID_CHANNEL_WEIGHTS = {
     LEXICAL_CHANNEL: 1.0,
     SEMANTIC_CLAIM_CHANNEL: 0.9,
     SEMANTIC_OBSERVATION_CHANNEL: 0.75,
+    SEMANTIC_RELATION_CHANNEL: 0.75,
 }
 
 SemanticSearchFn = Callable[..., list[dict[str, Any]]]
-
-ALLOWED_CLAIM_SUBKINDS = {
-    "bug_or_regression",
-    "fix_or_mitigation",
-    "invariant_or_constraint",
-    "desired_behavior_or_requirement",
-    "reviewer_objection_or_requested_change",
-    "approval_or_acceptance",
-    "workaround_or_temporary_mitigation",
-    "test_result_or_validation",
-    "rollout_migration_or_dependency",
-    "ownership_or_impact_scope",
-}
-ALLOWED_ASSERTION_STATUSES = {
-    "reported",
-    "proposed",
-    "requested",
-    "observed",
-    "confirmed",
-    "rejected",
-}
-ALLOWED_CLAIM_FRAMES = {
-    "author_statement",
-    "reviewer_feedback",
-    "user_requirement",
-    "reported_observation",
-    "observed_result",
-}
-ALLOWED_RESOLUTION_TYPES = {"same_as", "refines", "contradicts", "supersedes", "unrelated"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +88,28 @@ class HybridContextEntry:
     matched_profile_key_text: str | None = None
     matched_profile_key_origin: str | None = None
     semantic_profile_kind: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RelationContextEntry:
+    """One relation-profile retrieval result."""
+
+    record_id: str
+    relation_type: str | None
+    score: float
+    is_active: bool
+    lexical_score: float | None = None
+    semantic_score: float | None = None
+    retrieval_channels: tuple[str, ...] = ()
+    value_text: str = ""
+    matched_profile_key_text: str | None = None
+    matched_profile_key_origin: str | None = None
+    semantic_profile_kind: str | None = None
+    source_record_id: str | None = None
+    source_record_type: str | None = None
+    target_record_id: str | None = None
+    target_record_type: str | None = None
+    observed_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -151,39 +144,74 @@ class HybridContextSearchService:
         group_id: str | None,
         sources: Sequence[str],
         limit: int,
+        active_only: bool = True,
+    ) -> tuple[HybridContextEntry, ...]:
+        return _run_async(
+            self.search_async(
+                repo_id=repo_id,
+                query=query,
+                group_id=group_id,
+                sources=sources,
+                limit=limit,
+                active_only=active_only,
+            )
+        )
+
+    async def search_async(
+        self,
+        *,
+        repo_id: str,
+        query: str,
+        group_id: str | None,
+        sources: Sequence[str],
+        limit: int,
+        active_only: bool = True,
     ) -> tuple[HybridContextEntry, ...]:
         normalized_sources = _normalize_sources(list(sources))
         overfetch_limit = max(limit * 4, limit)
-        lexical_records = _search_records(
+        lexical_records = await _search_records_async(
             driver=self.driver,
             repo_id=repo_id,
             query=query,
             group_id=group_id,
+            record_kinds=(RecordKind.NODE,),
             record_types=_record_types_for_sources(normalized_sources),
             limit=overfetch_limit,
         )
-        lexical_records = self._surface_lexical_records(
+        lexical_records = await self._surface_lexical_records_async(
             repo_id=repo_id,
             group_id=group_id,
             records=lexical_records,
         )
 
-        semantic_claim_hits = self._search_semantic_profiles(
-            repo_id=repo_id,
-            query=query,
-            limit=overfetch_limit,
-            profile_kinds=(SEMANTIC_CLAIM_PROFILE_KIND,),
-            llm_enabled=True,
-            query_texts=None,
-        ) if "claims" in normalized_sources else ()
-        semantic_observation_hits = self._search_semantic_profiles(
-            repo_id=repo_id,
-            query=query,
-            limit=overfetch_limit,
-            profile_kinds=(SEMANTIC_OBSERVATION_PROFILE_KIND,),
-            llm_enabled=False,
-            query_texts=(query,),
-        ) if "observations" in normalized_sources else ()
+        semantic_claim_hits = (
+            await _invoke_semantic_search_async(
+                semantic_search=self.semantic_search,
+                query=query,
+                repo_id=repo_id,
+                limit=overfetch_limit,
+                active_only=active_only,
+                profile_kinds=(SEMANTIC_CLAIM_PROFILE_KIND,),
+                llm_enabled=True,
+                query_texts=None,
+            )
+            if "claims" in normalized_sources
+            else ()
+        )
+        semantic_observation_hits = (
+            await _invoke_semantic_search_async(
+                semantic_search=self.semantic_search,
+                query=query,
+                repo_id=repo_id,
+                limit=overfetch_limit,
+                active_only=active_only,
+                profile_kinds=(SEMANTIC_OBSERVATION_PROFILE_KIND,),
+                llm_enabled=False,
+                query_texts=(query,),
+            )
+            if "observations" in normalized_sources
+            else ()
+        )
 
         aggregates: dict[tuple[str, str], _HybridContextAggregate] = {}
 
@@ -202,7 +230,7 @@ class HybridContextSearchService:
             (SEMANTIC_OBSERVATION_CHANNEL, semantic_observation_hits),
         ):
             for rank, hit in enumerate(hits, start=1):
-                record = self._semantic_profile_record(
+                record = await self._semantic_profile_record_async(
                     repo_id=repo_id,
                     group_id=group_id,
                     profile_hit=hit,
@@ -277,33 +305,22 @@ class HybridContextSearchService:
         if channel not in entry.retrieval_channels:
             entry.retrieval_channels.append(channel)
 
-    def _search_semantic_profiles(
+    def _surface_lexical_records(
         self,
         *,
         repo_id: str,
-        query: str,
-        limit: int,
-        profile_kinds: tuple[str, ...],
-        llm_enabled: bool,
-        query_texts: tuple[str, ...] | None,
-    ) -> tuple[dict[str, Any], ...]:
-        if self.semantic_search is None:
-            return ()
-        try:
-            hits = self.semantic_search(
-                query=query,
+        group_id: str | None,
+        records: Sequence[tuple[float, dict[str, Any]]],
+    ) -> tuple[tuple[float, dict[str, Any]], ...]:
+        return _run_async(
+            self._surface_lexical_records_async(
                 repo_id=repo_id,
-                limit=limit,
-                active_only=True,
-                profile_kinds=profile_kinds,
-                llm_enabled=llm_enabled,
-                query_texts=query_texts,
+                group_id=group_id,
+                records=records,
             )
-        except Exception:
-            return ()
-        return tuple(hit for hit in hits if isinstance(hit, Mapping))
+        )
 
-    def _surface_lexical_records(
+    async def _surface_lexical_records_async(
         self,
         *,
         repo_id: str,
@@ -328,7 +345,7 @@ class HybridContextSearchService:
                     group_id=group_id,
                 )
             )
-        observation_records = self._fetch_records(observation_refs)
+        observation_records = await self._fetch_records_async(observation_refs)
         surfaced: list[tuple[float, dict[str, Any]]] = []
         for raw_score, record in records:
             observation_id = _record_observation_id(record)
@@ -343,6 +360,21 @@ class HybridContextSearchService:
         group_id: str | None,
         profile_hit: Mapping[str, Any],
     ) -> dict[str, Any]:
+        return _run_async(
+            self._semantic_profile_record_async(
+                repo_id=repo_id,
+                group_id=group_id,
+                profile_hit=profile_hit,
+            )
+        )
+
+    async def _semantic_profile_record_async(
+        self,
+        *,
+        repo_id: str,
+        group_id: str | None,
+        profile_hit: Mapping[str, Any],
+    ) -> dict[str, Any]:
         profile_kind = _normalize_text(profile_hit.get("profile_kind"))
         target_id = _normalize_text(profile_hit.get("profile_target_id"))
         if profile_kind == SEMANTIC_CLAIM_PROFILE_KIND:
@@ -350,9 +382,9 @@ class HybridContextSearchService:
         elif profile_kind == SEMANTIC_OBSERVATION_PROFILE_KIND:
             record_type = "observation"
         else:
-            record_type = _normalize_text(profile_hit.get("profile_target_kind")).lower()
+            record_type = (_normalize_text(profile_hit.get("profile_target_kind")) or "").lower()
         if target_id:
-            records = self._fetch_records(
+            records = await self._fetch_records_async(
                 [
                     GraphRecordRef(
                         record_kind=RecordKind.NODE,
@@ -368,10 +400,13 @@ class HybridContextSearchService:
         return _fallback_record_from_profile_hit(profile_hit)
 
     def _fetch_records(self, refs: Sequence[GraphRecordRef]) -> dict[str, dict[str, Any]]:
+        return _run_async(self._fetch_records_async(refs))
+
+    async def _fetch_records_async(self, refs: Sequence[GraphRecordRef]) -> dict[str, dict[str, Any]]:
         if not refs:
             return {}
         try:
-            records = _run_async(self.driver.search.fetch(list(refs)))
+            records = await self.driver.search.fetch(list(refs))
         except Exception:
             return {}
         return {
@@ -381,33 +416,386 @@ class HybridContextSearchService:
         }
 
 
+class RelationContextSearchService:
+    """Search relation edges through lexical and semantic channels."""
+
+    def __init__(
+        self,
+        *,
+        driver: BackendDriver,
+        semantic_search: SemanticSearchFn | None = None,
+    ) -> None:
+        self.driver = driver
+        self.semantic_search = semantic_search
+
+    def search(
+        self,
+        *,
+        repo_id: str,
+        group_id: str | None,
+        query: str,
+        limit: int,
+        active_only: bool,
+    ) -> tuple[RelationContextEntry, ...]:
+        return _run_async(
+            self.search_async(
+                repo_id=repo_id,
+                group_id=group_id,
+                query=query,
+                limit=limit,
+                active_only=active_only,
+            )
+        )
+
+    async def search_async(
+        self,
+        *,
+        repo_id: str,
+        group_id: str | None,
+        query: str,
+        limit: int,
+        active_only: bool,
+    ) -> tuple[RelationContextEntry, ...]:
+        overfetch_limit = max(limit * 4, limit)
+        lexical_records = await _search_records_async(
+            driver=self.driver,
+            repo_id=repo_id,
+            query=query,
+            group_id=group_id,
+            record_kinds=(RecordKind.EDGE,),
+            record_types=("claim_relation",),
+            limit=overfetch_limit,
+            filters={"is_active": True} if active_only else None,
+        )
+        aggregates: dict[str, dict[str, Any]] = {}
+        for rank, (raw_score, record) in enumerate(lexical_records, start=1):
+            record_id = _normalize_text(record.get("record_id"))
+            if not record_id:
+                continue
+            aggregate = aggregates.setdefault(
+                record_id,
+                {
+                    "record_id": record_id,
+                    "relation_type": _relation_type_from_record(record),
+                    "value_text": _relation_text_from_record(record),
+                    "score": 0.0,
+                    "is_active": _relation_record_is_active(record),
+                    "lexical_score": None,
+                    "semantic_score": None,
+                    "retrieval_channels": [],
+                    "matched_profile_key_text": None,
+                    "matched_profile_key_origin": None,
+                    "semantic_profile_kind": None,
+                    "source_record_id": _normalize_text(record.get("source_record_id")),
+                    "source_record_type": "claim",
+                    "target_record_id": _normalize_text(record.get("target_record_id")),
+                    "target_record_type": "claim",
+                    "observed_at": _relation_observed_at_from_record(record),
+                },
+            )
+            aggregate["score"] += HYBRID_CHANNEL_WEIGHTS[LEXICAL_CHANNEL] / (HYBRID_RRF_K + rank)
+            aggregate["lexical_score"] = (
+                raw_score
+                if aggregate["lexical_score"] is None
+                else max(aggregate["lexical_score"], raw_score)
+            )
+            if LEXICAL_CHANNEL not in aggregate["retrieval_channels"]:
+                aggregate["retrieval_channels"].append(LEXICAL_CHANNEL)
+
+        if self.semantic_search is None and not lexical_records:
+            return ()
+        hits = []
+        if self.semantic_search is not None:
+            hits = await _invoke_semantic_search_async(
+                semantic_search=self.semantic_search,
+                query=query,
+                repo_id=repo_id,
+                limit=overfetch_limit,
+                active_only=active_only,
+                profile_kinds=(SEMANTIC_RELATION_PROFILE_KIND,),
+                llm_enabled=False,
+                query_texts=(query,),
+            )
+        for rank, hit in enumerate(hits, start=1):
+            if not isinstance(hit, Mapping):
+                continue
+            record_id = _normalize_text(hit.get("profile_target_id"))
+            if not record_id:
+                continue
+            aggregate = aggregates.setdefault(
+                record_id,
+                {
+                    "record_id": record_id,
+                    "relation_type": _normalize_text(hit.get("relation_type")),
+                    "value_text": _normalize_text(hit.get("value_text")) or "",
+                    "score": 0.0,
+                    "is_active": _coerce_bool(hit.get("is_active"), default=True),
+                    "lexical_score": None,
+                    "semantic_score": None,
+                    "retrieval_channels": [],
+                    "matched_profile_key_text": None,
+                    "matched_profile_key_origin": None,
+                    "semantic_profile_kind": _normalize_text(hit.get("profile_kind")),
+                    "source_record_id": _normalize_text(hit.get("source_node_id")),
+                    "source_record_type": _normalize_text(dict(hit.get("metadata") or {}).get("source_record_type")),
+                    "target_record_id": _normalize_text(hit.get("target_node_id")),
+                    "target_record_type": _normalize_text(dict(hit.get("metadata") or {}).get("target_record_type")),
+                    "observed_at": _first_text(
+                        dict(hit.get("metadata") or {}).get("observed_at"),
+                        dict(hit.get("metadata") or {}).get("updated_at"),
+                    ),
+                },
+            )
+            aggregate["score"] += HYBRID_CHANNEL_WEIGHTS[SEMANTIC_RELATION_CHANNEL] / (HYBRID_RRF_K + rank)
+            aggregate["semantic_score"] = (
+                float(hit.get("score") or 0.0)
+                if aggregate["semantic_score"] is None
+                else max(aggregate["semantic_score"], float(hit.get("score") or 0.0))
+            )
+            aggregate["matched_profile_key_text"] = _normalize_text(hit.get("matched_key_text"))
+            aggregate["matched_profile_key_origin"] = _normalize_text(hit.get("matched_key_origin"))
+            aggregate["semantic_profile_kind"] = _normalize_text(hit.get("profile_kind"))
+            aggregate["relation_type"] = aggregate["relation_type"] or _normalize_text(hit.get("relation_type"))
+            aggregate["value_text"] = aggregate["value_text"] or (_normalize_text(hit.get("value_text")) or "")
+            aggregate["source_record_id"] = aggregate["source_record_id"] or _normalize_text(hit.get("source_node_id"))
+            aggregate["target_record_id"] = aggregate["target_record_id"] or _normalize_text(hit.get("target_node_id"))
+            aggregate["source_record_type"] = aggregate["source_record_type"] or _normalize_text(dict(hit.get("metadata") or {}).get("source_record_type"))
+            aggregate["target_record_type"] = aggregate["target_record_type"] or _normalize_text(dict(hit.get("metadata") or {}).get("target_record_type"))
+            aggregate["observed_at"] = aggregate["observed_at"] or _first_text(
+                dict(hit.get("metadata") or {}).get("observed_at"),
+                dict(hit.get("metadata") or {}).get("updated_at"),
+            )
+            if SEMANTIC_RELATION_CHANNEL not in aggregate["retrieval_channels"]:
+                aggregate["retrieval_channels"].append(SEMANTIC_RELATION_CHANNEL)
+        ordered = sorted(
+            (
+                RelationContextEntry(
+                    record_id=aggregate["record_id"],
+                    relation_type=aggregate["relation_type"],
+                    score=aggregate["score"],
+                    is_active=aggregate["is_active"],
+                    lexical_score=aggregate["lexical_score"],
+                    semantic_score=aggregate["semantic_score"],
+                    retrieval_channels=tuple(aggregate["retrieval_channels"]),
+                    value_text=aggregate["value_text"],
+                    matched_profile_key_text=aggregate["matched_profile_key_text"],
+                    matched_profile_key_origin=aggregate["matched_profile_key_origin"],
+                    semantic_profile_kind=aggregate["semantic_profile_kind"],
+                    source_record_id=aggregate["source_record_id"],
+                    source_record_type=aggregate["source_record_type"],
+                    target_record_id=aggregate["target_record_id"],
+                    target_record_type=aggregate["target_record_type"],
+                    observed_at=aggregate["observed_at"],
+                )
+                for aggregate in aggregates.values()
+            ),
+            key=lambda entry: (
+                not entry.is_active,
+                -entry.score,
+                entry.record_id,
+            ),
+        )
+        return tuple(ordered[:limit])
+
+
 class NeighborhoodQueryService:
-    """Scaffolded neighborhood query boundary."""
+    """Exact-node neighborhood expansion boundary."""
+
+    def __init__(
+        self,
+        *,
+        driver: BackendDriver | None = None,
+        snapshot: Any | None = None,
+    ) -> None:
+        self.driver = driver
+        self.snapshot = snapshot
 
     def get_node_neighborhood(
         self,
         *,
         repo_id: str | None,
         node_id: str | None,
-        concept: str | None,
+        hops: int = 2,
+        edge_types: Sequence[str] | None = None,
     ) -> NodeNeighborhoodResponse:
+        return _run_async(
+            self.get_node_neighborhood_async(
+                repo_id=repo_id,
+                node_id=node_id,
+                hops=hops,
+                edge_types=edge_types,
+            )
+        )
+
+    async def get_node_neighborhood_async(
+        self,
+        *,
+        repo_id: str | None,
+        node_id: str | None,
+        hops: int = 2,
+        edge_types: Sequence[str] | None = None,
+    ) -> NodeNeighborhoodResponse:
+        if not node_id:
+            raise ValueError("get_node_neighborhood requires an exact node_id")
+        if hops <= 0:
+            raise ValueError("hops must be a positive integer")
+        if self.driver is None:
+            raise RuntimeError("backend driver is required for neighborhood queries")
+
+        if self._is_snapshot_code_node(node_id):
+            if self.snapshot is None:
+                raise ValueError(
+                    "repo_id with an indexed snapshot is required for file/project/symbol neighborhood queries"
+                )
+            return self._get_snapshot_neighborhood(
+                repo_id=repo_id or self.snapshot.repo_id,
+                node_id=node_id,
+                hops=hops,
+                edge_types=edge_types,
+            )
+
+        if self.driver.provider is not BackendProvider.NEO4J:
+            return _unsupported_tool_response(
+                response_type=NodeNeighborhoodResponse,
+                message="get_node_neighborhood currently requires the Neo4j backend for provenance nodes.",
+                capability=NEIGHBORHOOD_CAPABILITY,
+                todo=NEIGHBORHOOD_TODO,
+                repo_id=repo_id,
+                center_record_id=node_id,
+                concept=None,
+                nodes=[],
+                edges=[],
+            )
+
+        center_record, node_records, edge_records = await _neo4j_raw_neighborhood_async(
+            driver=self.driver,
+            node_id=node_id,
+            hops=hops,
+            edge_types=edge_types,
+        )
+        nodes = tuple(
+            sorted(
+                (
+                    _neighborhood_node_payload(record)
+                    for record in (center_record, *node_records)
+                ),
+                key=lambda item: (item["record_id"] != node_id, item["record_type"], item["record_id"]),
+            )
+        )
+        edges = tuple(
+            sorted(
+                (_neighborhood_edge_payload(record) for record in edge_records),
+                key=lambda item: (
+                    item["edge_type"],
+                    item["source_record_id"],
+                    item["target_record_id"],
+                ),
+            )
+        )
         return NodeNeighborhoodResponse(
-            status=SCAFFOLD_STATUS,
-            message=(
-                "get_node_neighborhood is scaffolded until backend traversal support is implemented."
-            ),
-            capability=NEIGHBORHOOD_CAPABILITY,
-            todo=NEIGHBORHOOD_TODO,
+            status=IMPLEMENTED_STATUS,
+            message="Expanded the exact node neighborhood from the indexed graph.",
             repo_id=repo_id,
             center_record_id=node_id,
-            concept=concept,
-            nodes=[],
-            edges=[],
+            concept=None,
+            nodes=list(nodes),
+            edges=list(edges),
+        )
+
+    def _is_snapshot_code_node(self, node_id: str) -> bool:
+        return node_id.startswith(("project:", "file:", "symbol:"))
+
+    def _get_snapshot_neighborhood(
+        self,
+        *,
+        repo_id: str,
+        node_id: str,
+        hops: int,
+        edge_types: Sequence[str] | None,
+    ) -> NodeNeighborhoodResponse:
+        if self.snapshot is None:
+            raise ValueError("snapshot is required for deterministic code neighborhood queries")
+
+        node_map = self.snapshot.node_map()
+        center = node_map.get(node_id)
+        if center is None:
+            raise ValueError(f"No indexed code node found for node_id={node_id}")
+
+        normalized_edge_types = {
+            _normalize_text(edge_type).upper()
+            for edge_type in edge_types or ()
+            if _normalize_text(edge_type)
+        }
+        adjacency: dict[str, list[Any]] = {}
+        for edge in self.snapshot.edges:
+            if normalized_edge_types and edge.edge_type.upper() not in normalized_edge_types:
+                continue
+            adjacency.setdefault(edge.source_id, []).append(edge)
+            adjacency.setdefault(edge.target_id, []).append(edge)
+
+        distances: dict[str, int] = {center.node_id: 0}
+        queue: list[str] = [center.node_id]
+        collected_edges: dict[str, Any] = {}
+        while queue:
+            current = queue.pop(0)
+            current_distance = distances[current]
+            if current_distance >= hops:
+                continue
+            for edge in adjacency.get(current, ()):
+                collected_edges[edge.edge_id] = edge
+                neighbor_id = edge.target_id if edge.source_id == current else edge.source_id
+                if neighbor_id not in distances:
+                    distances[neighbor_id] = current_distance + 1
+                    queue.append(neighbor_id)
+
+        nodes = sorted(
+            (
+                NeighborhoodNode(
+                    record_id=node.node_id,
+                    record_type=node.kind,
+                    display_name=node.qualified_name or node.name,
+                    summary=node.file_path or None,
+                    observed_at=None,
+                )
+                for node_id_key, distance in distances.items()
+                if (node := node_map.get(node_id_key)) is not None and distance <= hops
+            ),
+            key=lambda item: (item["record_id"] != center.node_id, item["record_type"], item["record_id"]),
+        )
+        edges = sorted(
+            (
+                NeighborhoodEdge(
+                    edge_type=edge.edge_type,
+                    source_record_id=edge.source_id,
+                    target_record_id=edge.target_id,
+                    observed_at=None,
+                )
+                for edge in collected_edges.values()
+            ),
+            key=lambda item: (item["edge_type"], item["source_record_id"], item["target_record_id"]),
+        )
+        return NodeNeighborhoodResponse(
+            status=IMPLEMENTED_STATUS,
+            message="Expanded the exact code-node neighborhood from the indexed snapshot.",
+            repo_id=repo_id,
+            center_record_id=center.node_id,
+            concept=None,
+            nodes=list(nodes),
+            edges=list(edges),
         )
 
 
 class TimelineQueryService:
-    """Scaffolded timeline query boundary."""
+    """Historical provenance timeline assembly boundary."""
+
+    def __init__(
+        self,
+        *,
+        driver: BackendDriver | None = None,
+        snapshot: Any | None = None,
+    ) -> None:
+        self.driver = driver
+        self.snapshot = snapshot
 
     def get_timeline(
         self,
@@ -415,16 +803,73 @@ class TimelineQueryService:
         repo_id: str | None,
         target_kind: str,
         target_id: str,
+        limit: int = 50,
     ) -> TimelineResponse:
+        return _run_async(
+            self.get_timeline_async(
+                repo_id=repo_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                limit=limit,
+            )
+        )
+
+    async def get_timeline_async(
+        self,
+        *,
+        repo_id: str | None,
+        target_kind: str,
+        target_id: str,
+        limit: int = 50,
+    ) -> TimelineResponse:
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if self.driver is None:
+            raise RuntimeError("backend driver is required for timeline queries")
+        if self.driver.provider is not BackendProvider.NEO4J:
+            return _unsupported_tool_response(
+                response_type=TimelineResponse,
+                message="get_timeline currently requires the Neo4j backend.",
+                capability=TIMELINE_CAPABILITY,
+                todo=TIMELINE_TODO,
+                repo_id=repo_id,
+                target_kind=target_kind,
+                target_id=target_id,
+                events=[],
+            )
+
+        anchor_id = target_id
+        if target_kind in {"file", "symbol"}:
+            if self.snapshot is None:
+                raise ValueError(
+                    f"repo_id with an indexed snapshot is required for {target_kind} timelines"
+                )
+            primary = _resolve_primary_node(
+                self.snapshot,
+                target=target_id,
+                target_kind=target_kind,
+            )
+            anchor_id = primary.node_id
+
+        center_record, node_records, edge_records = await _neo4j_raw_neighborhood_async(
+            driver=self.driver,
+            node_id=anchor_id,
+            hops=2,
+            edge_types=None,
+        )
+        events = _timeline_events_from_records(
+            center_record=center_record,
+            node_records=node_records,
+            edge_records=edge_records,
+            limit=limit,
+        )
         return TimelineResponse(
-            status=SCAFFOLD_STATUS,
-            message="get_timeline is scaffolded until temporal backend queries are implemented.",
-            capability=TIMELINE_CAPABILITY,
-            todo=TIMELINE_TODO,
+            status=IMPLEMENTED_STATUS,
+            message="Built a historical provenance timeline around the exact target.",
             repo_id=repo_id,
             target_kind=target_kind,
             target_id=target_id,
-            events=[],
+            events=events,
         )
 
 
@@ -436,10 +881,38 @@ def search_context(
     group_id: str | None,
     sources: list[str],
     limit: int,
+    include_historical: bool = False,
+    semantic_search: SemanticSearchFn | None = None,
+) -> SearchContextResponse:
+    return _run_async(
+        search_context_async(
+            driver=driver,
+            repo_id=repo_id,
+            query=query,
+            group_id=group_id,
+            sources=sources,
+            limit=limit,
+            include_historical=include_historical,
+            semantic_search=semantic_search,
+        )
+    )
+
+
+async def search_context_async(
+    *,
+    driver: BackendDriver,
+    repo_id: str,
+    query: str,
+    group_id: str | None,
+    sources: list[str],
+    limit: int,
+    include_historical: bool = False,
     semantic_search: SemanticSearchFn | None = None,
 ) -> SearchContextResponse:
     normalized_sources = _normalize_sources(sources)
-    if not _record_types_for_sources(normalized_sources):
+    node_sources = [source for source in normalized_sources if source != "relations"]
+    relation_requested = "relations" in normalized_sources
+    if not _record_types_for_sources(node_sources) and not relation_requested:
         return SearchContextResponse(
             status=IMPLEMENTED_STATUS,
             message="No indexed record families are mapped to the requested sources.",
@@ -450,44 +923,63 @@ def search_context(
             hits=[],
         )
 
-    entries = HybridContextSearchService(
-        driver=driver,
-        semantic_search=semantic_search,
-    ).search(
-        repo_id=repo_id,
-        query=query,
-        group_id=group_id,
-        sources=normalized_sources,
-        limit=limit,
-    )
+    node_entries: tuple[HybridContextEntry, ...] = ()
+    if _record_types_for_sources(node_sources):
+        node_entries = await HybridContextSearchService(
+            driver=driver,
+            semantic_search=semantic_search,
+        ).search_async(
+            repo_id=repo_id,
+            query=query,
+            group_id=group_id,
+            sources=node_sources,
+            limit=limit,
+            active_only=not include_historical,
+        )
+        if include_historical:
+            node_entries = tuple(
+                sorted(
+                    node_entries,
+                    key=lambda entry: (
+                        not _record_is_active(entry.record),
+                        -entry.score,
+                        _normalize_text(entry.record.get("record_id")),
+                    ),
+                )
+            )
+
+    relation_entries: tuple[RelationContextEntry, ...] = ()
+    if relation_requested:
+        relation_entries = await RelationContextSearchService(
+            driver=driver,
+            semantic_search=semantic_search,
+        ).search_async(
+            repo_id=repo_id,
+            group_id=group_id,
+            query=query,
+            limit=limit,
+            active_only=not include_historical,
+        )
+
     hits = [
-        {
-            "record_id": _normalize_text(entry.record.get("record_id")),
-            "record_type": _normalize_text(entry.record.get("record_type")),
-            "title": _record_title(entry.record),
-            "summary": _record_summary(entry.record),
-            "score": entry.score,
-            "lexical_score": entry.lexical_score,
-            "semantic_score": entry.semantic_score,
-            "observed_at": _record_observed_at(entry.record),
-            "source": _source_for_record_type(_normalize_text(entry.record.get("record_type"))),
-            "file_path": _record_file_path(entry.record),
-            "retrieval_channels": list(entry.retrieval_channels),
-            "matched_profile_key_text": entry.matched_profile_key_text,
-            "matched_profile_key_origin": entry.matched_profile_key_origin,
-            "semantic_profile_kind": entry.semantic_profile_kind,
-        }
-        for entry in entries
+        _node_hit_payload(entry)
+        for entry in node_entries
     ]
+    hits.extend(_relation_hit_payload(entry) for entry in relation_entries)
+    hits = hits[:limit]
     if semantic_search is None:
         message = (
             "Completed lexical backend retrieval for the requested context sources. "
-            "Semantic profile search is unavailable for this runtime."
+            "Semantic node and relation profile search is unavailable for this runtime."
+        )
+    elif include_historical:
+        message = (
+            "Completed provenance retrieval with separate node and relation search pipelines, "
+            "including inactive semantic profiles for historical inspection."
         )
     else:
         message = (
-            "Completed hybrid provenance retrieval by fusing backend lexical search "
-            "with semantic claim and observation profiles."
+            "Completed provenance retrieval with separate node and relation search pipelines."
         )
     return SearchContextResponse(
         status=IMPLEMENTED_STATUS,
@@ -505,12 +997,30 @@ def get_node_neighborhood(
     service: NeighborhoodQueryService,
     repo_id: str | None,
     node_id: str | None,
-    concept: str | None,
+    hops: int,
+    edge_types: Sequence[str] | None,
 ) -> NodeNeighborhoodResponse:
     return service.get_node_neighborhood(
         repo_id=repo_id,
         node_id=node_id,
-        concept=concept,
+        hops=hops,
+        edge_types=edge_types,
+    )
+
+
+async def get_node_neighborhood_async(
+    *,
+    service: NeighborhoodQueryService,
+    repo_id: str | None,
+    node_id: str | None,
+    hops: int,
+    edge_types: Sequence[str] | None,
+) -> NodeNeighborhoodResponse:
+    return await service.get_node_neighborhood_async(
+        repo_id=repo_id,
+        node_id=node_id,
+        hops=hops,
+        edge_types=edge_types,
     )
 
 
@@ -520,242 +1030,29 @@ def get_timeline(
     repo_id: str | None,
     target_kind: str,
     target_id: str,
+    limit: int,
 ) -> TimelineResponse:
     return service.get_timeline(
         repo_id=repo_id,
         target_kind=target_kind,
         target_id=target_id,
+        limit=limit,
     )
 
 
-def resolve_claim(
+async def get_timeline_async(
     *,
-    driver: BackendDriver,
-    claim_resolution_service: ClaimResolutionService | None,
-    repo_id: str,
-    group_id: str | None,
-    claim_text: str,
-    claim_kind: str | None,
-    claim_subkind: str | None,
-    candidate_limit: int,
-    semantic_search: SemanticSearchFn | None = None,
-) -> ResolveClaimResponse:
-    if claim_resolution_service is None or claim_resolution_service.llm_client is None:
-        raise RuntimeError("resolve_claim requires a configured llm provider")
-
-    candidate_entries = HybridContextSearchService(
-        driver=driver,
-        semantic_search=semantic_search,
-    ).search(
+    service: TimelineQueryService,
+    repo_id: str | None,
+    target_kind: str,
+    target_id: str,
+    limit: int,
+) -> TimelineResponse:
+    return await service.get_timeline_async(
         repo_id=repo_id,
-        query=claim_text,
-        group_id=group_id,
-        sources=["claims"],
-        limit=candidate_limit,
-    )
-    candidates: list[dict[str, Any]] = []
-    candidate_text_by_id: dict[str, str] = {}
-    for entry in candidate_entries:
-        record = entry.record
-        properties = dict(record.get("properties") or {})
-        candidate_claim_id = str(properties.get("claim_id") or record["record_id"])
-        candidate_claim_text = _normalize_text(properties.get("claim_text"))
-        if not candidate_claim_text:
-            continue
-        candidate = {
-            "candidate_claim_id": candidate_claim_id,
-            "claim_id": candidate_claim_id,
-            "claim_text": candidate_claim_text,
-            "claim_kind": _normalize_text(properties.get("claim_kind")),
-            "claim_subkind": _safe_claim_subkind(properties.get("claim_subkind")),
-        }
-        candidates.append(candidate)
-        candidate_text_by_id[candidate_claim_id] = candidate_claim_text
-
-    if not candidates:
-        return ResolveClaimResponse(
-            status=IMPLEMENTED_STATUS,
-            message="No nearby indexed claims were found for resolution.",
-            repo_id=repo_id,
-            candidate_claim_text=claim_text,
-            claim_kind=claim_kind,
-            claim_subkind=claim_subkind,
-            matches=[],
-        )
-
-    resolution_response = claim_resolution_service.resolve(
-        repo_id=repo_id,
-        new_claim={
-            "claim_text": claim_text,
-            "claim_kind": claim_kind,
-            "claim_subkind": claim_subkind,
-        },
-        candidates=candidates,
-    )
-    matches = []
-    for relation in resolution_response.relations:
-        normalized_relation = (
-            relation.resolution_type
-            if relation.resolution_type in ALLOWED_RESOLUTION_TYPES
-            else "unrelated"
-        )
-        matches.append(
-            {
-                "candidate_claim_id": relation.candidate_claim_id,
-                "candidate_claim_text": candidate_text_by_id.get(relation.candidate_claim_id),
-                "relation": normalized_relation,
-                "confidence": relation.confidence,
-                "rationale": relation.rationale,
-            }
-        )
-
-    return ResolveClaimResponse(
-        status=IMPLEMENTED_STATUS,
-        message="Resolved the candidate claim against hybrid-retrieved claim records.",
-        repo_id=repo_id,
-        candidate_claim_text=claim_text,
-        claim_kind=claim_kind,
-        claim_subkind=claim_subkind,
-        matches=matches,
-    )
-
-
-def synthesize_artifact(
-    *,
-    driver: BackendDriver,
-    artifact_synthesis_service: ResearchArtifactSynthesisService | None,
-    snapshot: Any | None,
-    repo_id: str,
-    group_id: str | None,
-    subject_kind: str,
-    subject_id: str,
-    artifact_kind: str,
-    include_code_context: bool,
-) -> SynthesizeArtifactResponse:
-    if artifact_synthesis_service is None or artifact_synthesis_service.llm_client is None:
-        raise RuntimeError("synthesize_artifact requires a configured llm provider")
-
-    code_context_payload: dict[str, Any] = {}
-    if include_code_context and snapshot is not None:
-        try:
-            code_context = get_code_context(
-                snapshot=snapshot,
-                repo_id=repo_id,
-                target=subject_id,
-                target_kind=subject_kind,
-                include_neighbors=True,
-                include_references=True,
-                max_related_symbols=5,
-            )
-            code_context_payload = {
-                "primary_symbol": code_context.get("primary_symbol"),
-                "related_symbols": code_context.get("related_symbols"),
-                "snippets": code_context.get("snippets"),
-            }
-        except Exception:
-            code_context_payload = {}
-
-    claim_records = _search_records(
-        driver=driver,
-        repo_id=repo_id,
-        query=subject_id,
-        group_id=group_id,
-        record_types=("claim",),
-        limit=5,
-    )
-    evidence_records = _search_records(
-        driver=driver,
-        repo_id=repo_id,
-        query=subject_id,
-        group_id=group_id,
-        record_types=("evidence_record", "observation"),
-        limit=5,
-    )
-
-    claims = [_claim_candidate_from_record(record) for _, record in claim_records]
-    evidence = [_evidence_candidate_from_record(record) for _, record in evidence_records]
-    claims = [candidate for candidate in claims if candidate is not None]
-    evidence = [candidate for candidate in evidence if candidate is not None]
-
-    synthesis = artifact_synthesis_service.synthesize(
-        repo_id=repo_id,
-        repo_region={
-            "repo_id": repo_id,
-            "subject_kind": subject_kind,
-            "subject_id": subject_id,
-        },
-        code_context=code_context_payload,
-        evidence=evidence,
-        claims=claims,
-    )
-    if not synthesis.artifacts:
-        return SynthesizeArtifactResponse(
-            status=IMPLEMENTED_STATUS,
-            message=(
-                "Artifact synthesis completed without emitting a grounded artifact. "
-                f"Persistence remains deferred via {ARTIFACT_PERSISTENCE_TODO}."
-            ),
-            repo_id=repo_id,
-            subject_kind=subject_kind,
-            subject_id=subject_id,
-            artifact_kind=artifact_kind,
-            artifact_id=None,
-            title=None,
-            summary=None,
-            sections=[],
-            supporting_claim_ids=[
-                _record_claim_id(record)
-                for _, record in claim_records
-                if _record_claim_id(record) is not None
-            ],
-            supporting_observation_ids=[
-                _record_observation_id(record)
-                for _, record in evidence_records
-                if _record_observation_id(record) is not None
-            ],
-        )
-
-    artifact = synthesis.artifacts[0]
-    sections = [
-        {
-            "section_id": f"key_point_{index + 1}",
-            "title": f"Key Point {index + 1}",
-            "summary": key_point,
-        }
-        for index, key_point in enumerate(artifact.key_points)
-    ]
-    if not sections and artifact.summary:
-        sections.append(
-            {
-                "section_id": "summary",
-                "title": "Summary",
-                "summary": artifact.summary,
-            }
-        )
-    return SynthesizeArtifactResponse(
-        status=IMPLEMENTED_STATUS,
-        message=(
-            "Synthesized a read-only research artifact from indexed code and provenance context. "
-            f"Persistence remains deferred via {ARTIFACT_PERSISTENCE_TODO}."
-        ),
-        repo_id=repo_id,
-        subject_kind=subject_kind,
-        subject_id=subject_id,
-        artifact_kind=artifact.artifact_kind or artifact_kind,
-        artifact_id=None,
-        title=artifact.title,
-        summary=artifact.summary,
-        sections=sections,
-        supporting_claim_ids=[
-            _record_claim_id(record)
-            for _, record in claim_records
-            if _record_claim_id(record) is not None
-        ],
-        supporting_observation_ids=[
-            _record_observation_id(record)
-            for _, record in evidence_records
-            if _record_observation_id(record) is not None
-        ],
+        target_kind=target_kind,
+        target_id=target_id,
+        limit=limit,
     )
 
 
@@ -815,34 +1112,145 @@ def record_agent_observation(
     return response
 
 
+def _node_hit_payload(entry: HybridContextEntry) -> dict[str, Any]:
+    record_type = _normalize_text(entry.record.get("record_type"))
+    return {
+        "hit_kind": "node",
+        "record_id": _normalize_text(entry.record.get("record_id")),
+        "record_type": record_type,
+        "title": _record_title(entry.record),
+        "summary": _record_summary(entry.record),
+        "score": entry.score,
+        "lexical_score": entry.lexical_score,
+        "semantic_score": entry.semantic_score,
+        "is_active": _record_is_active(entry.record),
+        "observed_at": _record_observed_at(entry.record),
+        "source": _source_for_record_type(record_type),
+        "file_path": _record_file_path(entry.record),
+        "relation_type": None,
+        "source_record_id": None,
+        "source_record_type": None,
+        "target_record_id": None,
+        "target_record_type": None,
+        "retrieval_channels": list(entry.retrieval_channels),
+        "matched_profile_key_text": entry.matched_profile_key_text,
+        "matched_profile_key_origin": entry.matched_profile_key_origin,
+        "semantic_profile_kind": entry.semantic_profile_kind,
+    }
+
+
+def _relation_type_from_record(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    return _first_text(
+        properties.get("resolution_type"),
+        record.get("relationship_type"),
+        record.get("record_type"),
+    )
+
+
+def _relation_text_from_record(record: Mapping[str, Any]) -> str:
+    properties = dict(record.get("properties") or {})
+    return _first_text(
+        properties.get("resolution_rationale"),
+        properties.get("summary_text"),
+        properties.get("text"),
+        "",
+    ) or ""
+
+
+def _relation_observed_at_from_record(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    return _first_text(
+        properties.get("observed_at"),
+        properties.get("deactivated_at"),
+        properties.get("updated_at"),
+        properties.get("created_at"),
+    )
+
+
+def _relation_record_is_active(record: Mapping[str, Any]) -> bool:
+    properties = dict(record.get("properties") or {})
+    return _coerce_bool(properties.get("is_active"), default=True)
+
+
+def _relation_hit_payload(entry: RelationContextEntry) -> dict[str, Any]:
+    return {
+        "hit_kind": "relation",
+        "record_id": entry.record_id,
+        "record_type": "relation",
+        "title": _normalize_text(entry.relation_type),
+        "summary": _truncate(entry.value_text, limit=240),
+        "score": entry.score,
+        "lexical_score": entry.lexical_score,
+        "semantic_score": entry.semantic_score,
+        "is_active": bool(entry.is_active),
+        "observed_at": entry.observed_at,
+        "source": "relations",
+        "file_path": None,
+        "relation_type": entry.relation_type,
+        "source_record_id": entry.source_record_id,
+        "source_record_type": entry.source_record_type,
+        "target_record_id": entry.target_record_id,
+        "target_record_type": entry.target_record_type,
+        "retrieval_channels": list(entry.retrieval_channels),
+        "matched_profile_key_text": entry.matched_profile_key_text,
+        "matched_profile_key_origin": entry.matched_profile_key_origin,
+        "semantic_profile_kind": entry.semantic_profile_kind,
+    }
+
+
 def _search_records(
     *,
     driver: BackendDriver,
     repo_id: str,
     query: str,
     group_id: str | None,
+    record_kinds: tuple[RecordKind, ...],
     record_types: tuple[str, ...],
     limit: int,
     filters: Mapping[str, object] | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    search_hits = _run_async(
-        driver.search.search(
-            SearchQuery(
-                mode=SearchMode.LEXICAL,
-                text=query,
-                record_kinds=(RecordKind.NODE,),
-                record_types=record_types,
-                repo_ids=(repo_id,),
-                group_ids=(group_id,) if group_id else None,
-                limit=limit,
-                filters=dict(filters or {}),
-            )
+    return _run_async(
+        _search_records_async(
+            driver=driver,
+            repo_id=repo_id,
+            query=query,
+            group_id=group_id,
+            record_kinds=record_kinds,
+            record_types=record_types,
+            limit=limit,
+            filters=filters,
+        )
+    )
+
+
+async def _search_records_async(
+    *,
+    driver: BackendDriver,
+    repo_id: str,
+    query: str,
+    group_id: str | None,
+    record_kinds: tuple[RecordKind, ...],
+    record_types: tuple[str, ...],
+    limit: int,
+    filters: Mapping[str, object] | None = None,
+) -> list[tuple[float, dict[str, Any]]]:
+    search_hits = await driver.search.search(
+        SearchQuery(
+            mode=SearchMode.LEXICAL,
+            text=query,
+            record_kinds=record_kinds,
+            record_types=record_types,
+            repo_ids=(repo_id,),
+            group_ids=(group_id,) if group_id else None,
+            limit=limit,
+            filters=dict(filters or {}),
         )
     )
     if not search_hits:
         return []
 
-    records = _run_async(driver.search.fetch([hit.ref for hit in search_hits]))
+    records = await driver.search.fetch([hit.ref for hit in search_hits])
     records_by_id = {
         str(record.get("record_id")): dict(record)
         for record in records
@@ -853,6 +1261,104 @@ def _search_records(
         if record is not None:
             ordered.append((hit.score, record))
     return ordered
+
+
+async def _fetch_exact_node_record_async(
+    *,
+    driver: BackendDriver,
+    node_id: str,
+    repo_id: str | None,
+) -> dict[str, Any]:
+    records = await driver.search.fetch(
+        [
+            GraphRecordRef(
+                record_kind=RecordKind.NODE,
+                record_id=node_id,
+                record_type="",
+                repo_id=repo_id,
+            )
+        ]
+    )
+    if not records:
+        raise ValueError(f"No indexed node found for node_id={node_id}")
+    return dict(records[0])
+
+
+async def _neo4j_raw_neighborhood_async(
+    *,
+    driver: BackendDriver,
+    node_id: str,
+    hops: int,
+    edge_types: Sequence[str] | None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    center_record = await _fetch_exact_node_record_async(driver=driver, node_id=node_id, repo_id=None)
+    query = """
+MATCH (origin:BackendRecord {record_id: $node_id})
+CALL {
+  WITH origin
+  OPTIONAL MATCH path=(origin)-[rels*1..$max_depth]-(neighbor:BackendRecord)
+  WHERE path IS NULL
+     OR size($edge_types) = 0
+     OR all(rel IN rels WHERE type(rel) IN $edge_types OR coalesce(rel.record_type, '') IN $edge_types)
+  WITH collect(path) AS paths
+  UNWIND paths AS path
+  UNWIND CASE WHEN path IS NULL THEN [] ELSE nodes(path) END AS node
+  RETURN collect(DISTINCT {
+    record_id: node.record_id,
+    record_type: coalesce(node.record_type, head(labels(node))),
+    properties: properties(node)
+  }) AS nodes
+}
+CALL {
+  WITH origin
+  OPTIONAL MATCH path=(origin)-[rels*1..$max_depth]-(neighbor:BackendRecord)
+  WHERE path IS NULL
+     OR size($edge_types) = 0
+     OR all(rel IN rels WHERE type(rel) IN $edge_types OR coalesce(rel.record_type, '') IN $edge_types)
+  WITH collect(path) AS paths
+  UNWIND paths AS path
+  UNWIND CASE WHEN path IS NULL THEN [] ELSE relationships(path) END AS rel
+  WITH DISTINCT rel
+  MATCH (source:BackendRecord)-[rel]->(target:BackendRecord)
+  RETURN collect({
+    record_id: rel.record_id,
+    record_type: coalesce(rel.record_type, type(rel)),
+    relationship_type: type(rel),
+    source_record_id: source.record_id,
+    target_record_id: target.record_id,
+    properties: properties(rel)
+  }) AS edges
+}
+RETURN nodes, edges
+"""
+    records = await driver.execute_query(
+        query,
+        node_id=node_id,
+        max_depth=hops,
+        edge_types=[
+            normalized
+            for normalized in (
+                _normalize_text(edge_type)
+                for edge_type in (edge_types or ())
+            )
+            if normalized
+        ],
+    )
+    if not records:
+        return center_record, (), ()
+
+    row = dict(records[0])
+    node_records = tuple(
+        dict(record)
+        for record in row.get("nodes") or ()
+        if isinstance(record, Mapping) and _normalize_text(record.get("record_id")) not in {None, node_id}
+    )
+    edge_records = tuple(
+        dict(record)
+        for record in row.get("edges") or ()
+        if isinstance(record, Mapping) and _normalize_text(record.get("record_id"))
+    )
+    return center_record, node_records, edge_records
 
 
 def _normalize_sources(sources: list[str]) -> list[str]:
@@ -890,6 +1396,15 @@ def _source_for_record_type(record_type: str) -> str:
         if record_type in record_types:
             return source
     return "unknown"
+
+
+def _record_is_active(record: Mapping[str, Any]) -> bool:
+    properties = dict(record.get("properties") or {})
+    if "is_current" in properties:
+        return _coerce_bool(properties.get("is_current"), default=True)
+    if "is_active" in properties:
+        return _coerce_bool(properties.get("is_active"), default=True)
+    return True
 
 
 def _record_title(record: dict[str, Any]) -> str | None:
@@ -977,6 +1492,7 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
             "latest_observed_at": metadata.get("valid_to") or metadata.get("valid_from"),
             "context_kind": metadata.get("context_kind"),
             "context_id": metadata.get("context_id"),
+            "is_current": metadata.get("is_current", True),
         }
     else:
         record_type = "observation"
@@ -991,6 +1507,7 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
             "context_id": metadata.get("context_id"),
             "thread_kind": metadata.get("thread_kind"),
             "thread_id": metadata.get("thread_id"),
+            "is_current": True,
         }
     return {
         "record_id": target_id,
@@ -998,40 +1515,170 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
         "properties": properties,
     }
 
-
-def _claim_candidate_from_record(record: dict[str, Any]) -> ClaimCandidate | None:
-    properties = dict(record.get("properties") or {})
-    claim_text = _normalize_text(properties.get("claim_text"))
-    claim_kind = _normalize_text(properties.get("claim_kind"))
-    if not claim_text or not claim_kind:
-        return None
-    return ClaimCandidate(
-        claim_text=claim_text,
-        claim_kind=claim_kind,
-        claim_subkind=_safe_claim_subkind(properties.get("claim_subkind")),
-        assertion_status=_safe_assertion_status(properties.get("assertion_status")),
-        claim_frame=_safe_claim_frame(properties.get("claim_frame")),
-        about_hints=[],
-        supported_evidence_ids=[],
-        derivation_kind="retrieved_context",
+def _unsupported_tool_response(*, response_type: Any, message: str, capability: str, todo: str, **payload: Any) -> Any:
+    return response_type(
+        status="unsupported",
+        message=message,
+        capability=capability,
+        todo=todo,
+        **payload,
     )
 
 
-def _evidence_candidate_from_record(record: dict[str, Any]) -> EvidenceCandidate | None:
-    properties = dict(record.get("properties") or {})
-    quote_text = _first_text(properties.get("quote_text"), properties.get("text"))
-    support_kind = _normalize_text(properties.get("support_kind")) or "provides_context"
-    if not quote_text:
-        return None
-    return EvidenceCandidate(
-        evidence_kind=_normalize_text(properties.get("evidence_kind")) or record["record_type"],
-        quote_text=quote_text,
-        summary_text=_normalize_text(properties.get("summary_text")),
-        span_start=_int_or_none(properties.get("span_start")),
-        span_end=_int_or_none(properties.get("span_end")),
-        about_hints=[],
-        support_kind=support_kind,
+def _fetch_exact_node_record(
+    *,
+    driver: BackendDriver,
+    node_id: str,
+    repo_id: str | None,
+) -> dict[str, Any]:
+    return _run_async(
+        _fetch_exact_node_record_async(
+            driver=driver,
+            node_id=node_id,
+            repo_id=repo_id,
+        )
     )
+
+
+def _neo4j_raw_neighborhood(
+    *,
+    driver: BackendDriver,
+    node_id: str,
+    hops: int,
+    edge_types: Sequence[str] | None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    return _run_async(
+        _neo4j_raw_neighborhood_async(
+            driver=driver,
+            node_id=node_id,
+            hops=hops,
+            edge_types=edge_types,
+        )
+    )
+
+
+def _neighborhood_node_payload(record: Mapping[str, Any]) -> NeighborhoodNode:
+    return NeighborhoodNode(
+        record_id=_normalize_text(record.get("record_id")) or "",
+        record_type=_normalize_text(record.get("record_type")) or "unknown",
+        display_name=_record_title(dict(record)),
+        summary=_record_summary(dict(record)),
+        observed_at=_record_observed_at(dict(record)),
+    )
+
+
+def _neighborhood_edge_payload(record: Mapping[str, Any]) -> NeighborhoodEdge:
+    return NeighborhoodEdge(
+        edge_type=_relation_type_from_record(record) or _normalize_text(record.get("record_type")) or "related_to",
+        source_record_id=_normalize_text(record.get("source_record_id")) or "",
+        target_record_id=_normalize_text(record.get("target_record_id")) or "",
+        observed_at=_relation_observed_at_from_record(record),
+    )
+
+
+def _timeline_events_from_records(
+    *,
+    center_record: Mapping[str, Any],
+    node_records: Sequence[Mapping[str, Any]],
+    edge_records: Sequence[Mapping[str, Any]],
+    limit: int,
+) -> list[TimelineEvent]:
+    events: list[TimelineEvent] = []
+    seen_event_ids: set[str] = set()
+
+    def add_event(event: TimelineEvent) -> None:
+        if event["event_id"] in seen_event_ids:
+            return
+        seen_event_ids.add(event["event_id"])
+        events.append(event)
+
+    for record in (center_record, *node_records):
+        record_type = _normalize_text(record.get("record_type"))
+        if record_type not in {"claim", "observation", "evidence_record", "github_pull_request", "github_issue"}:
+            continue
+        record_id = _normalize_text(record.get("record_id"))
+        observed_at = _record_observed_at(dict(record))
+        add_event(
+            TimelineEvent(
+                event_id=f"{record_id}:observed",
+                event_type=record_type or "record",
+                title=_record_title(dict(record)),
+                summary=_record_summary(dict(record)),
+                observed_at=observed_at,
+                record_id=record_id,
+            )
+        )
+        properties = dict(record.get("properties") or {})
+        inactive_at = _first_text(properties.get("deactivated_at"), properties.get("valid_to"))
+        if inactive_at and not _record_is_active(record):
+            add_event(
+                TimelineEvent(
+                    event_id=f"{record_id}:inactive",
+                    event_type=f"{record_type}_inactive",
+                    title=_record_title(dict(record)),
+                    summary="Marked inactive in provenance history.",
+                    observed_at=inactive_at,
+                    record_id=record_id,
+                )
+            )
+
+    for record in edge_records:
+        if _normalize_text(record.get("record_type")) != "claim_relation":
+            continue
+        record_id = _normalize_text(record.get("record_id"))
+        relation_type = _relation_type_from_record(record) or "relation"
+        observed_at = _relation_observed_at_from_record(record)
+        summary = _relation_text_from_record(record) or (
+            f"{relation_type} between "
+            f"{_normalize_text(record.get('source_record_id'))} and {_normalize_text(record.get('target_record_id'))}."
+        )
+        add_event(
+            TimelineEvent(
+                event_id=f"{record_id}:observed",
+                event_type=f"relation:{relation_type}",
+                title=relation_type,
+                summary=summary,
+                observed_at=observed_at,
+                record_id=record_id,
+            )
+        )
+        properties = dict(record.get("properties") or {})
+        inactive_at = _first_text(properties.get("deactivated_at"), properties.get("valid_to"))
+        if inactive_at and not _relation_record_is_active(record):
+            add_event(
+                TimelineEvent(
+                    event_id=f"{record_id}:inactive",
+                    event_type="relation:inactive",
+                    title=relation_type,
+                    summary="Relation became inactive in provenance history.",
+                    observed_at=inactive_at,
+                    record_id=record_id,
+                )
+            )
+
+    events.sort(
+        key=lambda event: (
+            event["observed_at"] is None,
+            event["observed_at"] or "",
+            event["event_id"],
+        )
+    )
+    return events[:limit]
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = _normalize_text(value).lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    return default
 
 
 def _resolve_primary_node(snapshot: Any, *, target: str, target_kind: str | None) -> Any:
@@ -1187,38 +1834,6 @@ def _node_ref(node: Any) -> CodeGraphNodeRef:
     )
 
 
-def _safe_claim_subkind(value: object) -> str | None:
-    normalized = _normalize_text(value)
-    if normalized in ALLOWED_CLAIM_SUBKINDS:
-        return normalized
-    return None
-
-
-def _safe_assertion_status(value: object) -> str | None:
-    normalized = _normalize_text(value)
-    if normalized in ALLOWED_ASSERTION_STATUSES:
-        return normalized
-    return None
-
-
-def _safe_claim_frame(value: object) -> str | None:
-    normalized = _normalize_text(value)
-    if normalized in ALLOWED_CLAIM_FRAMES:
-        return normalized
-    return None
-
-
-def _int_or_none(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
 def _first_text(*values: object) -> str | None:
     for value in values:
         normalized = _normalize_text(value)
@@ -1240,15 +1855,41 @@ def _truncate(value: str | None, *, limit: int) -> str | None:
     return value[: limit - 3].rstrip() + "..."
 
 
-def _run_async(coro: Any) -> Any:
-    import asyncio
+async def _invoke_semantic_search_async(
+    *,
+    semantic_search: SemanticSearchFn | None,
+    query: str,
+    repo_id: str,
+    limit: int,
+    active_only: bool,
+    profile_kinds: tuple[str, ...],
+    llm_enabled: bool,
+    query_texts: tuple[str, ...] | None,
+) -> tuple[dict[str, Any], ...]:
+    if semantic_search is None:
+        return ()
+    try:
+        hits = await asyncio.to_thread(
+            semantic_search,
+            query=query,
+            repo_id=repo_id,
+            limit=limit,
+            active_only=active_only,
+            profile_kinds=profile_kinds,
+            llm_enabled=llm_enabled,
+            query_texts=query_texts,
+        )
+    except Exception:
+        return ()
+    return tuple(hit for hit in hits if isinstance(hit, Mapping))
 
+
+def _run_async(coro: Any) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
 
-    future = asyncio.ensure_future(coro)
     raise RuntimeError(
         "provenance_tools._run_async was called while an event loop was already running; "
         "callers should await backend operations before invoking synchronous helpers"

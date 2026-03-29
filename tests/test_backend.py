@@ -361,6 +361,40 @@ class RecordingConnection:
         self.rollbacks += 1
 
 
+class FailingCursor:
+    def __init__(self, connection, *, fail_on: str) -> None:
+        self.connection = connection
+        self.fail_on = fail_on
+
+    def execute(self, sql, params=()):
+        self.connection.executed.append((sql, params))
+        if self.fail_on == "execute":
+            raise RuntimeError("boom")
+        return self
+
+    def executemany(self, sql, rows):
+        materialized = list(rows)
+        self.connection.executed.append((sql, materialized))
+        if self.fail_on == "executemany":
+            raise RuntimeError("boom")
+        return self
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class FailingConnection(RecordingConnection):
+    def __init__(self, *, fail_on: str) -> None:
+        super().__init__()
+        self.fail_on = fail_on
+
+    def cursor(self):
+        return FailingCursor(self, fail_on=self.fail_on)
+
+
 class FakeEmbeddingProvider:
     def embed_texts(self, texts):
         vectors = []
@@ -2102,6 +2136,15 @@ class MetadataBackendTests(unittest.TestCase):
         self.assertIn("SELECT pg_advisory_lock(%s)", sql_text)
         self.assertIn("SELECT pg_advisory_unlock(%s)", sql_text)
 
+    def test_postgres_metadata_store_rolls_back_after_failed_query(self):
+        connection = FailingConnection(fail_on="execute")
+        store = PostgresMetadataStore(connection)
+
+        with self.assertRaises(RuntimeError):
+            store.load_profiles("demo")
+
+        self.assertEqual(connection.rollbacks, 1)
+
 
 class ProfileVectorBackendTests(unittest.TestCase):
     def test_create_profile_vector_store_returns_in_memory_store(self):
@@ -2192,7 +2235,7 @@ class ProfileVectorBackendTests(unittest.TestCase):
         store.bootstrap()
         store.upsert_profile_keys((record,))
         store.deactivate_profile_keys((deactivation,))
-        connection.fetchone_values = [(2,)]
+        connection.fetchone_values = [("cg_profile_keys",), (1536,), (2,)]
         deleted = store.reset_repo_context("demo")
 
         sql_text = "\n".join(sql for sql, _ in connection.executed if isinstance(sql, str))
@@ -2203,6 +2246,34 @@ class ProfileVectorBackendTests(unittest.TestCase):
         self.assertIn("UPDATE cg_profile_keys", sql_text)
         self.assertIn("DELETE FROM cg_profile_keys", sql_text)
         self.assertEqual(deleted, 2)
+
+    def test_pgvector_store_rolls_back_after_failed_search(self):
+        connection = FailingConnection(fail_on="execute")
+        store = PgVectorProfileVectorStore(connection, embedding_dim=1536)
+
+        with self.assertRaises(RuntimeError):
+            store.search_profile_keys(
+                repo_id="demo",
+                embedding=(1.0, 0.0, 0.0),
+                limit=5,
+            )
+
+        self.assertGreaterEqual(connection.rollbacks, 1)
+
+    def test_pgvector_store_rebuilds_table_when_embedding_dimension_changes(self):
+        connection = RecordingConnection()
+        connection.fetchone_values = [
+            ("cg_profile_keys",),
+            (1024,),
+        ]
+        store = PgVectorProfileVectorStore(connection, embedding_dim=1536)
+
+        store.bootstrap()
+
+        sql_text = "\n".join(sql for sql, _ in connection.executed if isinstance(sql, str))
+        self.assertIn("DROP TABLE IF EXISTS cg_profile_keys", sql_text)
+        self.assertIn("CREATE TABLE IF NOT EXISTS cg_profile_keys", sql_text)
+        self.assertTrue(store.needs_resync)
 
 
 class CompatibilityWrapperTests(unittest.TestCase):

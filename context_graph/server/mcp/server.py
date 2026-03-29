@@ -34,11 +34,9 @@ from context_graph.server.mcp.response_types import (
     ErrorResponse,
     NodeNeighborhoodResponse,
     RecordAgentObservationResponse,
-    ResolveClaimResponse,
     SearchCodeGraphResponse,
     SearchCodeResponse,
     SearchContextResponse,
-    SynthesizeArtifactResponse,
     TimelineResponse,
     TraceCallPathResponse,
 )
@@ -88,8 +86,6 @@ logger = logging.getLogger(__name__)
 config: MCPServerConfig
 backend_runtime: MCPBackendRuntime | None = None
 metadata_snapshot_service: MetadataSnapshotService | None = None
-neighborhood_query_service = provenance_tools.NeighborhoodQueryService()
-timeline_query_service = provenance_tools.TimelineQueryService()
 
 
 CONTEXT_GRAPH_MCP_INSTRUCTIONS = """
@@ -105,17 +101,14 @@ Implemented deterministic code tools:
 
 Implemented backend-native provenance tools:
 7. search_context
-8. resolve_claim
-9. synthesize_artifact
-
-Scaffolded provenance tools:
-10. get_node_neighborhood
-11. get_timeline
-12. record_agent_observation
+8. get_node_neighborhood
+9. get_timeline
+10. record_agent_observation
 
 Code tools operate on the latest stored GraphSnapshot for a repo_id.
-search_context fuses backend lexical search with semantic provenance profiles when available.
-Scaffolded tools return structured status, capability, and TODO metadata.
+search_context runs separate node and relation provenance retrieval pipelines, with optional historical semantic retrieval.
+get_node_neighborhood requires an exact node_id and uses deterministic snapshot expansion for code nodes.
+get_timeline is implemented on Neo4j first and returns a typed unsupported response on Neptune.
 """
 
 mcp = FastMCP(
@@ -498,8 +491,9 @@ async def search_context(
     group_id: str | None = None,
     sources: list[str] | None = None,
     limit: int = 10,
+    include_historical: bool = False,
 ) -> SearchContextResponse | ErrorResponse:
-    """Search indexed provenance and code records using hybrid lexical and semantic retrieval."""
+    """Search indexed provenance and code records using node and relation retrieval pipelines."""
 
     try:
         if limit <= 0:
@@ -514,8 +508,7 @@ async def search_context(
             if metadata_snapshot_service is not None
             else None
         )
-        return await asyncio.to_thread(
-            provenance_tools.search_context,
+        return await provenance_tools.search_context_async(
             driver=driver,
             semantic_search=semantic_search,
             repo_id=repo_id,
@@ -523,6 +516,7 @@ async def search_context(
             group_id=effective_group_id,
             sources=requested_sources,
             limit=limit,
+            include_historical=include_historical,
         )
     except ValueError as exc:
         return ErrorResponse(error=str(exc))
@@ -539,21 +533,38 @@ async def get_node_neighborhood(
     hops: int = 2,
     edge_types: list[str] | None = None,
 ) -> NodeNeighborhoodResponse | ErrorResponse:
-    """Return scaffold metadata for future graph-neighborhood expansion."""
+    """Return the exact neighborhood around one indexed node."""
 
     try:
-        if not node_id and not concept:
-            return ErrorResponse(error="either node_id or concept must be provided")
-        if node_id and concept:
-            return ErrorResponse(error="provide either node_id or concept, not both")
+        if not node_id:
+            return ErrorResponse(
+                error="get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
+            )
+        if concept is not None:
+            return ErrorResponse(
+                error="get_node_neighborhood requires an exact node_id; concept anchoring is not supported"
+            )
         if hops <= 0:
             return ErrorResponse(error="hops must be a positive integer")
 
-        return provenance_tools.get_node_neighborhood(
-            service=neighborhood_query_service,
+        runtime = await _get_backend_runtime()
+        driver = await runtime.get_driver()
+        snapshot = None
+        if repo_id and node_id.startswith(("project:", "file:", "symbol:")):
+            try:
+                snapshot = await _get_metadata_snapshot(repo_id)
+            except code_graph_queries.CodeGraphQueryError:
+                snapshot = None
+
+        return await provenance_tools.get_node_neighborhood_async(
+            service=provenance_tools.NeighborhoodQueryService(
+                driver=driver,
+                snapshot=snapshot,
+            ),
             repo_id=repo_id,
             node_id=node_id,
-            concept=concept,
+            hops=hops,
+            edge_types=edge_types,
         )
     except Exception as exc:
         logger.error("Error in get_node_neighborhood: %s", exc)
@@ -567,7 +578,7 @@ async def get_timeline(
     repo_id: str | None = None,
     limit: int = 50,
 ) -> TimelineResponse | ErrorResponse:
-    """Return scaffold metadata for future temporal repository queries."""
+    """Return a historical provenance timeline around one exact target."""
 
     try:
         allowed_target_kinds = {
@@ -588,99 +599,29 @@ async def get_timeline(
         if limit <= 0:
             return ErrorResponse(error="limit must be a positive integer")
 
-        return provenance_tools.get_timeline(
-            service=timeline_query_service,
+        snapshot = None
+        if target_kind in {"file", "symbol"}:
+            if repo_id is None:
+                return ErrorResponse(
+                    error=f"repo_id is required for exact {target_kind} timelines"
+                )
+            snapshot = await _get_metadata_snapshot(repo_id)
+
+        runtime = await _get_backend_runtime()
+        driver = await runtime.get_driver()
+        return await provenance_tools.get_timeline_async(
+            service=provenance_tools.TimelineQueryService(
+                driver=driver,
+                snapshot=snapshot,
+            ),
             repo_id=repo_id,
             target_kind=target_kind,
             target_id=target_id,
+            limit=limit,
         )
     except Exception as exc:
         logger.error("Error in get_timeline: %s", exc)
         return ErrorResponse(error=f"Error in get_timeline: {exc}")
-
-
-@mcp.tool()
-async def resolve_claim(
-    repo_id: str,
-    claim_text: str,
-    claim_kind: str | None = None,
-    claim_subkind: str | None = None,
-    candidate_limit: int = 5,
-) -> ResolveClaimResponse | ErrorResponse:
-    """Resolve one candidate claim against nearby indexed claim records."""
-
-    try:
-        if candidate_limit <= 0:
-            return ErrorResponse(error="candidate_limit must be a positive integer")
-
-        runtime = await _get_backend_runtime()
-        if runtime.claim_resolution_service is None or runtime.llm_client is None:
-            return ErrorResponse(error="resolve_claim requires a configured llm provider")
-
-        driver = await runtime.get_driver()
-        semantic_search = (
-            metadata_snapshot_service.search_profiles_sync
-            if metadata_snapshot_service is not None
-            else None
-        )
-        return await asyncio.to_thread(
-            provenance_tools.resolve_claim,
-            driver=driver,
-            semantic_search=semantic_search,
-            claim_resolution_service=runtime.claim_resolution_service,
-            repo_id=repo_id,
-            group_id=config.namespace.group_id,
-            claim_text=claim_text,
-            claim_kind=claim_kind,
-            claim_subkind=claim_subkind,
-            candidate_limit=candidate_limit,
-        )
-    except Exception as exc:
-        logger.error("Error in resolve_claim: %s", exc)
-        return ErrorResponse(error=f"Error in resolve_claim: {exc}")
-
-
-@mcp.tool()
-async def synthesize_artifact(
-    repo_id: str,
-    subject_kind: str,
-    subject_id: str,
-    artifact_kind: str = "research_note",
-    include_code_context: bool = True,
-) -> SynthesizeArtifactResponse | ErrorResponse:
-    """Synthesize a read-only research artifact from indexed provenance and code context."""
-
-    try:
-        runtime = await _get_backend_runtime()
-        if (
-            runtime.research_artifact_synthesis_service is None
-            or runtime.llm_client is None
-        ):
-            return ErrorResponse(error="synthesize_artifact requires a configured llm provider")
-
-        snapshot = None
-        if include_code_context:
-            try:
-                snapshot = await _get_metadata_snapshot(repo_id)
-            except code_graph_queries.CodeGraphQueryError:
-                snapshot = None
-
-        driver = await runtime.get_driver()
-        return await asyncio.to_thread(
-            provenance_tools.synthesize_artifact,
-            driver=driver,
-            artifact_synthesis_service=runtime.research_artifact_synthesis_service,
-            snapshot=snapshot,
-            repo_id=repo_id,
-            group_id=config.namespace.group_id,
-            subject_kind=subject_kind,
-            subject_id=subject_id,
-            artifact_kind=artifact_kind,
-            include_code_context=include_code_context,
-        )
-    except Exception as exc:
-        logger.error("Error in synthesize_artifact: %s", exc)
-        return ErrorResponse(error=f"Error in synthesize_artifact: {exc}")
 
 
 @mcp.tool()
