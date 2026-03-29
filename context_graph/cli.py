@@ -443,6 +443,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Include inactive historical profiles in the result set",
     )
     search_profiles_parser.add_argument(
+        "--profile-kind",
+        action="append",
+        dest="profile_kinds",
+        help=(
+            "Restrict search to specific profile kind(s). Repeat to pass multiple kinds. "
+            "When omitted, searches claim and observation semantic profiles only."
+        ),
+    )
+    search_profiles_parser.add_argument(
         "--metadata-backend",
         choices=("sqlite", "postgres"),
         default="postgres",
@@ -1223,19 +1232,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             embedding_provider=embedding_provider,
             query_parser=QueryParser(llm_client=llm_client),
         )
-        fused_search = SemanticProvenanceSearchService(
-            profile_search_service=profile_search,
-        )
-        result = fused_search.search(
-            repo_id=args.repo_id,
-            query=args.query,
-            limit=args.limit,
-            active_only=not args.include_inactive,
-        )
+        requested_profile_kinds = tuple(dict.fromkeys(args.profile_kinds or ()))
+        if requested_profile_kinds:
+            result = profile_search.search(
+                repo_id=args.repo_id,
+                query=args.query,
+                limit=args.limit,
+                active_only=not args.include_inactive,
+                profile_kinds=requested_profile_kinds,
+            )
+        else:
+            fused_search = SemanticProvenanceSearchService(
+                profile_search_service=profile_search,
+            )
+            result = fused_search.search(
+                repo_id=args.repo_id,
+                query=args.query,
+                limit=args.limit,
+                active_only=not args.include_inactive,
+            )
         return _emit_json(
             {
                 "repo_id": args.repo_id,
                 "query": args.query,
+                "requested_profile_kinds": list(requested_profile_kinds),
                 "anchors": [
                     {"kind": anchor.kind, "value": anchor.value}
                     for anchor in result.parse_result.anchors

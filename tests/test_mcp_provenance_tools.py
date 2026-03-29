@@ -487,6 +487,63 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["queue_position"], 1)
         self.assertIn("todo", response)
 
+    async def test_record_agent_observation_wrapper_passes_extended_fields_to_persist_helper(self) -> None:
+        runtime = FakeRuntime(queue_service=None, observation_write_service=None)
+        config = SimpleNamespace(namespace=SimpleNamespace(group_id="main"))
+
+        async def fake_persist(request):
+            self.assertEqual(request.repo_id, "demo")
+            self.assertEqual(request.observation_kind, "agent_note")
+            self.assertEqual(request.title, "Auth regression")
+            self.assertEqual(request.source_kind, "agent")
+            self.assertEqual(request.source_id, "session-7")
+            self.assertEqual(request.context_kind, "agent_task")
+            self.assertEqual(request.context_id, "task-9")
+            self.assertEqual(request.observed_at, "2026-03-29T00:00:00Z")
+            self.assertEqual(request.metadata["severity"], "high")
+            return {
+                "status": "implemented",
+                "message": "Persisted the observation and indexed it for provenance retrieval.",
+                "repo_id": "demo",
+                "observation_id": "observation:agent_note:demo:1",
+                "task_id": "task-9",
+                "accepted": True,
+                "persisted": True,
+            }
+
+        with patch.object(server_module, "backend_runtime", runtime), patch.object(
+            server_module,
+            "metadata_snapshot_service",
+            object(),
+            create=True,
+        ), patch.object(
+            server_module,
+            "config",
+            config,
+            create=True,
+        ), patch.object(
+            server_module,
+            "_persist_agent_observation_request",
+            fake_persist,
+        ):
+            response = await server_module.record_agent_observation(
+                "demo",
+                "Investigated auth regression symptoms.",
+                observation_kind="agent_note",
+                title="Auth regression",
+                source_kind="agent",
+                source_id="session-7",
+                context_kind="agent_task",
+                context_id="task-9",
+                observed_at="2026-03-29T00:00:00Z",
+                task_id="task-9",
+                metadata={"severity": "high"},
+            )
+
+        self.assertEqual(response["status"], "implemented")
+        self.assertTrue(response["persisted"])
+        self.assertEqual(response["observation_id"], "observation:agent_note:demo:1")
+
 
 if __name__ == "__main__":
     unittest.main()

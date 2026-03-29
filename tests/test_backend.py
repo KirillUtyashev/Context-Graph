@@ -5,6 +5,7 @@ import io
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import context_graph.cli as cli_module
 
 from context_graph.ingestion.commit_indexing import CommitIndexingService, normalize_snapshot_for_commit
 from context_graph.ingestion.deterministic_planner import DeterministicMutationPlanner
@@ -38,7 +39,11 @@ from context_graph.profiles import (
     ProfileDeactivation,
     ProfileKeyDefinition,
     ProfileRecord,
+    RelationProfileSpec,
+    SEMANTIC_RELATION_PROFILE_KIND,
+    semantic_relation_profile_from_spec,
 )
+from context_graph.query_parser import QueryParseResult
 from context_graph.storage.backend import (
     BackendFeatureNotImplementedError,
     EdgeRecord,
@@ -2013,6 +2018,31 @@ class MetadataBackendTests(unittest.TestCase):
         self.assertEqual(store.load_repo_index_state("demo").latest_commit_sha, "abc123")
         self.assertEqual(store.load_profiles("demo", active_only=True)[0].profile_id, profile.profile_id)
 
+    def test_in_memory_metadata_round_trips_relation_profiles(self):
+        store = InMemoryMetadataStore()
+        profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:1:claim:2:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:1",
+                source_record_type="claim",
+                target_record_id="claim:2",
+                target_record_type="claim",
+                value_text="Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                metadata={"resolution_confidence": "high"},
+                updated_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+
+        assert profile is not None
+        store.upsert_profiles((profile,))
+
+        stored = store.load_profiles("demo", active_only=True)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].profile_kind, SEMANTIC_RELATION_PROFILE_KIND)
+        self.assertEqual(stored[0].metadata["source_record_type"], "claim")
+
     def test_sqlite_metadata_bootstrap_and_reset_match_existing_behavior(self):
         store = SQLiteMetadataStore(":memory:")
         snapshot = make_snapshot()
@@ -2233,3 +2263,152 @@ class CompatibilityWrapperTests(unittest.TestCase):
         self.assertGreater(indexed, 0)
         self.assertEqual(len(result.hits), 1)
         self.assertEqual(result.profiles[0].profile_id, profile.profile_id)
+
+    def test_profile_services_can_filter_to_relation_profiles(self):
+        metadata = LegacyInMemoryMetadataStore()
+        profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:1:claim:2:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:1",
+                source_record_type="claim",
+                target_record_id="claim:2",
+                target_record_type="claim",
+                value_text="Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                updated_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+
+        assert profile is not None
+        metadata.upsert_profiles((profile,))
+
+        vector_store = LegacyInMemoryProfileVectorStore()
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        indexer.sync_repo(repo_id="demo", metadata_store=metadata)
+
+        service = ProfileSearchService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+            query_parser=FakeQueryParser(("MAX_RETRIES contradicts",)),
+        )
+        result = service.search(
+            repo_id="demo",
+            query="Which contradiction mentioned MAX_RETRIES?",
+            limit=5,
+            profile_kinds=(SEMANTIC_RELATION_PROFILE_KIND,),
+        )
+
+        self.assertEqual(len(result.profiles), 1)
+        self.assertEqual(result.profiles[0].profile_kind, SEMANTIC_RELATION_PROFILE_KIND)
+        self.assertEqual(result.hits[0].key_origin, PROFILE_KEY_ORIGIN_RAW_TEXT)
+
+
+class CLISearchProfilesCommandTests(unittest.TestCase):
+    def test_search_profiles_defaults_to_fused_claim_and_observation_search(self):
+        base_service = object()
+        fused_service = SimpleNamespace(
+            search=lambda **kwargs: SimpleNamespace(
+                parse_result=QueryParseResult(
+                    raw_query=kwargs["query"],
+                    anchors=(),
+                    high_level_keywords=(),
+                    intent_tags=(),
+                ),
+                hits=(),
+                profiles=(),
+            )
+        )
+        vector_store = SimpleNamespace(bootstrap=lambda: None)
+
+        with patch.object(cli_module, "_make_metadata_store", return_value=InMemoryMetadataStore()), patch.object(
+            cli_module, "_make_embedding_provider", return_value=object()
+        ), patch.object(
+            cli_module, "_make_profile_vector_store", return_value=vector_store
+        ), patch.object(
+            cli_module, "load_episode_llm_settings", return_value=None
+        ), patch.object(
+            cli_module, "make_episode_llm_client", return_value=None
+        ), patch.object(
+            cli_module, "ProfileSearchService", return_value=base_service
+        ), patch.object(
+            cli_module, "SemanticProvenanceSearchService", return_value=fused_service
+        ) as fused_ctor, patch.object(
+            cli_module, "_emit_json", side_effect=lambda payload: payload
+        ):
+            payload = cli_module.main(
+                ["search-profiles", "--repo-id", "demo", "--query", "auth migration"]
+            )
+
+        self.assertEqual(payload["requested_profile_kinds"], [])
+        self.assertEqual(payload["profiles"], [])
+        fused_ctor.assert_called_once_with(profile_search_service=base_service)
+
+    def test_search_profiles_uses_generic_profile_search_when_filter_is_present(self):
+        relation_profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:1:claim:2:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:1",
+                source_record_type="claim",
+                target_record_id="claim:2",
+                target_record_type="claim",
+                value_text="Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                updated_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+        assert relation_profile is not None
+        relation_hit = SimpleNamespace(
+            score=0.91,
+            key_text=relation_profile.value_text,
+            key_origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+        )
+        base_search_service = SimpleNamespace(
+            search=lambda **kwargs: SimpleNamespace(
+                parse_result=QueryParseResult(
+                    raw_query=kwargs["query"],
+                    anchors=(),
+                    high_level_keywords=(),
+                    intent_tags=(),
+                ),
+                hits=(relation_hit,),
+                profiles=(relation_profile,),
+            )
+        )
+        vector_store = SimpleNamespace(bootstrap=lambda: None)
+
+        with patch.object(cli_module, "_make_metadata_store", return_value=InMemoryMetadataStore()), patch.object(
+            cli_module, "_make_embedding_provider", return_value=object()
+        ), patch.object(
+            cli_module, "_make_profile_vector_store", return_value=vector_store
+        ), patch.object(
+            cli_module, "load_episode_llm_settings", return_value=None
+        ), patch.object(
+            cli_module, "make_episode_llm_client", return_value=None
+        ), patch.object(
+            cli_module, "ProfileSearchService", return_value=base_search_service
+        ), patch.object(
+            cli_module, "SemanticProvenanceSearchService"
+        ) as fused_ctor, patch.object(
+            cli_module, "_emit_json", side_effect=lambda payload: payload
+        ):
+            payload = cli_module.main(
+                [
+                    "search-profiles",
+                    "--repo-id",
+                    "demo",
+                    "--query",
+                    "MAX_RETRIES contradiction",
+                    "--profile-kind",
+                    SEMANTIC_RELATION_PROFILE_KIND,
+                ]
+            )
+
+        self.assertEqual(payload["requested_profile_kinds"], [SEMANTIC_RELATION_PROFILE_KIND])
+        self.assertEqual(payload["profiles"][0]["profile_kind"], SEMANTIC_RELATION_PROFILE_KIND)
+        fused_ctor.assert_not_called()

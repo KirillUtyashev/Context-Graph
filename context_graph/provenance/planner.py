@@ -25,6 +25,7 @@ from .models import (
     ObservationKind,
     ObservationLink,
     ObservationSourceRef,
+    general_observation_id,
     git_commit_message_observation_id,
     github_issue_body_observation_id,
     github_issue_closed_observation_id,
@@ -32,7 +33,9 @@ from .models import (
     github_pr_body_observation_id,
     github_pr_review_comment_observation_id,
     github_pr_review_observation_id,
+    observation_kind_value,
 )
+from .schema_registry import DEFAULT_PROVENANCE_SCHEMA_REGISTRY
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +50,83 @@ class PlannedObservation:
 class ObservationMutationPlanner:
     """Translate provenance observations into backend mutation records."""
 
+    def build_observation(
+        self,
+        *,
+        observation_id: str | None,
+        repo_id: str,
+        observation_kind: str,
+        source_kind: str,
+        source_id: str,
+        source_record_type: str,
+        text: str,
+        observed_at: str | None = None,
+        author: str | None = None,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        context_kind: str | None = None,
+        context_id: str | None = None,
+        thread_kind: str | None = None,
+        thread_id: str | None = None,
+        about_links: tuple[ObservationLink, ...] = (),
+        display_name: str | None = None,
+        ensure_source_node: bool = False,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> PlannedObservation | None:
+        body = _normalized_text(text)
+        if not body:
+            return None
+        policy = DEFAULT_PROVENANCE_SCHEMA_REGISTRY.observation_policy(
+            observation_kind,
+            source_kind=source_kind,
+        )
+        resolved_context_kind = (
+            _string_or_none(context_kind)
+            or (policy.default_context_kind if policy is not None else None)
+            or _string_or_none(thread_kind)
+        )
+        resolved_context_id = _string_or_none(context_id) or _string_or_none(thread_id)
+        observation = Observation(
+            observation_id=observation_id
+            or general_observation_id(
+                repo_id=repo_id,
+                observation_kind=observation_kind,
+                source_id=source_id,
+                context_id=resolved_context_id,
+                observed_at=observed_at,
+                title=title,
+                text=body,
+            ),
+            repo_id=repo_id,
+            observation_kind=observation_kind,
+            source_kind=source_kind,
+            source_id=source_id,
+            observed_at=observed_at,
+            author=_string_or_none(author),
+            title=_string_or_none(title),
+            text=body,
+            metadata=dict(metadata or {}),
+            ingested_at=_current_timestamp(),
+            context_kind=resolved_context_kind,
+            context_id=resolved_context_id,
+            thread_kind=thread_kind,
+            thread_id=thread_id,
+        )
+        source = ObservationSourceRef(
+            source_kind=source_kind,
+            source_id=source_id,
+            source_record_type=source_record_type,
+            repo_id=repo_id,
+            display_name=display_name or _string_or_none(title) or source_id,
+            ensure_source_node=ensure_source_node,
+            source_metadata=dict(source_metadata or {}),
+        )
+        return PlannedObservation(
+            observation=observation,
+            source=source,
+            about_links=about_links,
+        )
+
     def build_commit_message_observation(
         self,
         *,
@@ -56,12 +136,13 @@ class ObservationMutationPlanner:
         full_text = _full_commit_message(commit.subject, commit.body)
         if not full_text:
             return None
-        observation = Observation(
+        return self.build_observation(
             observation_id=git_commit_message_observation_id(repo_id, commit.sha),
             repo_id=repo_id,
-            observation_kind=ObservationKind.GIT_COMMIT_MESSAGE,
+            observation_kind=ObservationKind.GIT_COMMIT_MESSAGE.value,
             source_kind="commit",
             source_id=f"commit:{repo_id}:{commit.sha}",
+            source_record_type="commit",
             observed_at=commit.committed_at or commit.authored_at,
             author=commit.author_name or None,
             title=commit.subject or None,
@@ -73,18 +154,12 @@ class ObservationMutationPlanner:
                 "parent_shas": list(commit.parent_shas),
                 "changed_files": list(commit.changed_files),
             },
-            ingested_at=_current_timestamp(),
+            context_kind="commit",
+            context_id=commit.sha,
             thread_kind="commit",
             thread_id=commit.sha,
-        )
-        source = ObservationSourceRef(
-            source_kind="commit",
-            source_id=observation.source_id,
-            source_record_type="commit",
-            repo_id=repo_id,
             display_name=commit.sha,
         )
-        return PlannedObservation(observation=observation, source=source)
 
     def plan_commit_message_observation(
         self,
@@ -100,17 +175,17 @@ class ObservationMutationPlanner:
 
     def build_github_observations(self, *, bundle: Any) -> tuple[PlannedObservation, ...]:
         observations: list[PlannedObservation] = []
-        ingested_at = _current_timestamp()
         for source in getattr(bundle, "observation_sources", ()):
             body = _normalized_text(getattr(source, "text", None))
             if not body:
                 continue
-            raw_observation_kind = getattr(source, "observation_kind")
-            if isinstance(raw_observation_kind, ObservationKind):
-                observation_kind = raw_observation_kind
-            else:
-                observation_kind = ObservationKind(str(raw_observation_kind))
-            observation = Observation(
+            observation_kind = observation_kind_value(getattr(source, "observation_kind"))
+            thread_kind = _observation_thread_kind(
+                source_kind=str(source.source_kind),
+                observation_kind=observation_kind,
+            )
+            thread_id = _observation_thread_id(source=source)
+            planned = self.build_observation(
                 observation_id=_github_observation_id(
                     bundle.repo_id,
                     observation_kind,
@@ -121,31 +196,20 @@ class ObservationMutationPlanner:
                 observation_kind=observation_kind,
                 source_kind=str(source.source_kind),
                 source_id=str(source.source_id),
+                source_record_type=str(source.source_record_type),
                 observed_at=getattr(source, "updated_at", None) or getattr(source, "created_at", None),
                 author=getattr(source, "author_login", None),
                 title=getattr(source, "title", None),
                 text=body,
                 metadata=dict(getattr(source, "metadata", {}) or {}),
-                ingested_at=ingested_at,
-                thread_kind=_observation_thread_kind(
-                    source_kind=str(source.source_kind),
-                    observation_kind=observation_kind,
-                ),
-                thread_id=_observation_thread_id(source=source),
-            )
-            source_ref = ObservationSourceRef(
-                source_kind=str(source.source_kind),
-                source_id=str(source.source_id),
-                source_record_type=str(source.source_record_type),
-                repo_id=bundle.repo_id,
+                context_kind=thread_kind,
+                context_id=thread_id,
+                thread_kind=thread_kind,
+                thread_id=thread_id,
                 display_name=getattr(source, "title", None) or str(source.source_id),
             )
-            observations.append(
-                PlannedObservation(
-                    observation=observation,
-                    source=source_ref,
-                )
-            )
+            if planned is not None:
+                observations.append(planned)
         return tuple(observations)
 
     def plan_github_observations(
@@ -172,12 +236,15 @@ class ObservationMutationPlanner:
         snapshot: GraphSnapshot | None = None,
     ) -> MutationPlan:
         return merge_mutation_plans(
-            *(self.plan_observation(
-                observation=item.observation,
-                source=item.source,
-                about_links=item.about_links,
-                snapshot=snapshot,
-            ) for item in planned_observations)
+            *(
+                self.plan_observation(
+                    observation=item.observation,
+                    source=item.source,
+                    about_links=item.about_links,
+                    snapshot=snapshot,
+                )
+                for item in planned_observations
+            )
         )
 
     def plan_observation(
@@ -188,6 +255,28 @@ class ObservationMutationPlanner:
         about_links: tuple[ObservationLink, ...] = (),
         snapshot: GraphSnapshot | None = None,
     ) -> MutationPlan:
+        source_nodes = ()
+        if source.ensure_source_node:
+            source_nodes = (
+                NodeRecord(
+                    record_id=source.source_id,
+                    record_type=source.source_record_type,
+                    repo_id=observation.repo_id,
+                    group_id=observation.repo_id,
+                    labels=("BackendRecord", "ObservationSource"),
+                    properties={
+                        "repo_id": observation.repo_id,
+                        "source_kind": source.source_kind,
+                        "source_id": source.source_id,
+                        "display_name": source.display_name,
+                        "metadata_json": json.dumps(
+                            source.source_metadata,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                ),
+            )
         node = NodeRecord(
             record_id=observation.observation_id,
             record_type="observation",
@@ -196,7 +285,7 @@ class ObservationMutationPlanner:
             labels=("BackendRecord", "Observation"),
             properties={
                 "observation_id": observation.observation_id,
-                "observation_kind": observation.observation_kind.value,
+                "observation_kind": observation.observation_kind,
                 "source_kind": observation.source_kind,
                 "source_id": observation.source_id,
                 "observed_at": observation.observed_at,
@@ -204,24 +293,28 @@ class ObservationMutationPlanner:
                 "author": observation.author,
                 "title": observation.title,
                 "text": observation.text,
+                "context_kind": observation.context_kind,
+                "context_id": observation.context_id,
                 "thread_kind": observation.thread_kind,
                 "thread_id": observation.thread_id,
                 "metadata_json": json.dumps(observation.metadata, sort_keys=True, separators=(",", ":")),
             },
         )
-        source_edge = EdgeRecord(
-            record_id=f"from_source:{observation.observation_id}:{source.source_id}",
-            record_type="from_source",
-            repo_id=observation.repo_id,
-            group_id=observation.repo_id,
-            relationship_type="FROM_SOURCE",
-            source_record_id=observation.observation_id,
-            target_record_id=source.source_id,
-            properties={
-                "source_kind": source.source_kind,
-                "source_record_type": source.source_record_type,
-            },
-        )
+        source_edges = (
+            EdgeRecord(
+                record_id=f"from_source:{observation.observation_id}:{source.source_id}",
+                record_type="from_source",
+                repo_id=observation.repo_id,
+                group_id=observation.repo_id,
+                relationship_type="FROM_SOURCE",
+                source_record_id=observation.observation_id,
+                target_record_id=source.source_id,
+                properties={
+                    "source_kind": source.source_kind,
+                    "source_record_type": source.source_record_type,
+                },
+            ),
+        ) if source.source_id else ()
         about_edges = tuple(
             EdgeRecord(
                 record_id=f"about:{observation.observation_id}:{link.target_record_id}",
@@ -259,10 +352,12 @@ class ObservationMutationPlanner:
             group_id=observation.repo_id,
             search_text=_observation_search_text(observation),
             properties={
-                "observation_kind": observation.observation_kind.value,
+                "observation_kind": observation.observation_kind,
                 "source_kind": observation.source_kind,
                 "source_id": observation.source_id,
                 "author": observation.author,
+                "context_kind": observation.context_kind,
+                "context_id": observation.context_id,
                 "thread_kind": observation.thread_kind,
                 "thread_id": observation.thread_id,
                 "observed_at": observation.observed_at,
@@ -270,8 +365,8 @@ class ObservationMutationPlanner:
             },
         )
         return MutationPlan(
-            upsert_nodes=(node,),
-            upsert_edges=(source_edge, *about_edges, *mention_edges),
+            upsert_nodes=(*source_nodes, node),
+            upsert_edges=(*source_edges, *about_edges, *mention_edges),
             upsert_search_documents=(search_document,),
         )
 
@@ -317,8 +412,16 @@ def _current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _observation_thread_kind(*, source_kind: str, observation_kind: ObservationKind) -> str | None:
-    if observation_kind == ObservationKind.GIT_COMMIT_MESSAGE:
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _observation_thread_kind(*, source_kind: str, observation_kind: str | ObservationKind) -> str | None:
+    normalized_kind = observation_kind_value(observation_kind)
+    if normalized_kind == ObservationKind.GIT_COMMIT_MESSAGE.value:
         return "commit"
     if source_kind == "pull_request":
         return "pull_request"
@@ -338,26 +441,27 @@ def _observation_thread_id(*, source: Any) -> str | None:
 
 def _github_observation_id(
     repo_id: str,
-    observation_kind: ObservationKind,
+    observation_kind: str | ObservationKind,
     external_id: str,
     number: int | None,
 ) -> str:
-    if observation_kind == ObservationKind.GITHUB_PR_BODY:
+    normalized_kind = observation_kind_value(observation_kind)
+    if normalized_kind == ObservationKind.GITHUB_PR_BODY.value:
         if number is None:
             raise ValueError("github_pr_body observations require a pull request number")
         return github_pr_body_observation_id(repo_id, number)
-    if observation_kind == ObservationKind.GITHUB_ISSUE_BODY:
+    if normalized_kind == ObservationKind.GITHUB_ISSUE_BODY.value:
         if number is None:
             raise ValueError("github_issue_body observations require an issue number")
         return github_issue_body_observation_id(repo_id, number)
-    if observation_kind == ObservationKind.GITHUB_ISSUE_CLOSED:
+    if normalized_kind == ObservationKind.GITHUB_ISSUE_CLOSED.value:
         if number is None:
             raise ValueError("github_issue_closed observations require an issue number")
         return github_issue_closed_observation_id(repo_id, number)
-    if observation_kind == ObservationKind.GITHUB_PR_REVIEW:
+    if normalized_kind == ObservationKind.GITHUB_PR_REVIEW.value:
         return github_pr_review_observation_id(repo_id, external_id)
-    if observation_kind == ObservationKind.GITHUB_PR_REVIEW_COMMENT:
+    if normalized_kind == ObservationKind.GITHUB_PR_REVIEW_COMMENT.value:
         return github_pr_review_comment_observation_id(repo_id, external_id)
-    if observation_kind == ObservationKind.GITHUB_ISSUE_COMMENT:
+    if normalized_kind == ObservationKind.GITHUB_ISSUE_COMMENT.value:
         return github_issue_comment_observation_id(repo_id, external_id)
-    raise ValueError(f"unsupported GitHub observation kind: {observation_kind.value}")
+    raise ValueError(f"unsupported GitHub observation kind: {normalized_kind}")

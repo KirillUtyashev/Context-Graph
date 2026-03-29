@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -29,6 +31,7 @@ from context_graph.provenance import (
     ClaimResolutionService,
     ClaimSemanticRetrievalService,
     CurrentEvidenceReader,
+    DEFAULT_PROVENANCE_SCHEMA_REGISTRY,
     ClaimRelationResponse,
     ClaimRelationService,
     EvidenceCandidate,
@@ -38,7 +41,10 @@ from context_graph.provenance import (
     EvidenceInvalidationPlanner,
     EvidenceMutationPlanner,
     FactConflictResolutionService,
+    MarkdownObservationAdapter,
     Observation,
+    ObservationIngestionItem,
+    ObservationIngestionService,
     ObservationKind,
     ObservationMutationPlanner,
     ResearchArtifactSynthesisResponse,
@@ -67,10 +73,13 @@ from context_graph.profiles import (
     PROFILE_KEY_ORIGIN_RAW_TEXT,
     ProfileKeyDefinition,
     ProfileRecord,
+    RelationProfileSpec,
     SEMANTIC_CLAIM_PROFILE_KIND,
     SEMANTIC_OBSERVATION_PROFILE_KIND,
+    SEMANTIC_RELATION_PROFILE_KIND,
     semantic_claim_profile_from_claim,
     semantic_observation_profile_from_observation,
+    semantic_relation_profile_from_spec,
 )
 from context_graph.query_parser import QueryParseResult
 from context_graph.storage.backend import GraphRecordRef, RecordKind, SearchHit
@@ -1245,6 +1254,137 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertEqual(node.properties["thread_kind"], "issue")
         self.assertEqual(node.properties["thread_id"], "42")
         self.assertTrue(node.properties["ingested_at"])
+
+
+class ObservationGeneralizationTests(unittest.TestCase):
+    def test_registry_exposes_markdown_and_agent_trace_policies(self):
+        markdown_policy = DEFAULT_PROVENANCE_SCHEMA_REGISTRY.observation_policy(
+            ObservationKind.MARKDOWN_DOCUMENT.value,
+            source_kind="document",
+        )
+        trace_policy = DEFAULT_PROVENANCE_SCHEMA_REGISTRY.observation_policy(
+            ObservationKind.AGENT_TRACE.value,
+            source_kind="agent",
+        )
+
+        self.assertIsNotNone(markdown_policy)
+        self.assertEqual(markdown_policy.extraction_mode, "generic_claims")
+        self.assertEqual(markdown_policy.prompt_profile, "generic_observation")
+        self.assertEqual(markdown_policy.default_context_kind, "document")
+        self.assertIsNotNone(trace_policy)
+        self.assertEqual(trace_policy.extraction_mode, "observation_only")
+        self.assertIsNone(trace_policy.prompt_profile)
+
+    def test_markdown_observation_uses_generic_prompt_profile(self):
+        observation = Observation(
+            observation_id="observation:markdown_document:demo:1",
+            repo_id="demo",
+            observation_kind=ObservationKind.MARKDOWN_DOCUMENT.value,
+            source_kind="document",
+            source_id="file:demo:docs.readme.__file__",
+            observed_at="2026-03-29T00:00:00Z",
+            author=None,
+            title="Authentication Overview",
+            text="# Authentication Overview\n\nAuth rotates tokens after refresh.",
+            metadata={"document_path": "docs/README.md"},
+            context_kind="document",
+            context_id="docs/README.md",
+        )
+
+        request = ClaimEvidenceExtractionService().build_request(observation)
+
+        self.assertEqual(
+            request.prompt_name,
+            "provenance.extract_claims_and_evidence.from_generic_observation.v1",
+        )
+
+    def test_markdown_adapter_builds_document_observation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docs_dir = Path(temp_dir) / "docs"
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            markdown_path = docs_dir / "README.md"
+            markdown_path.write_text(
+                "# Authentication Notes\n\nAuth rotates refresh tokens daily.\n",
+                encoding="utf-8",
+            )
+            snapshot = GraphSnapshot(
+                repo_id="demo",
+                revision_id="rev-1",
+                root_path=temp_dir,
+                generated_at="2026-03-29T00:00:00Z",
+                nodes=(
+                    CanonicalNode(
+                        "file:demo:docs.readme.__file__",
+                        "demo",
+                        "File",
+                        "README.md",
+                        qualified_name="demo.docs.readme.__file__",
+                        file_path="docs/README.md",
+                    ),
+                ),
+                edges=(),
+                metadata={},
+            )
+
+            planned = MarkdownObservationAdapter().build_observations(
+                planner=ObservationMutationPlanner(),
+                snapshot=snapshot,
+                checkout_root=temp_dir,
+            )
+
+        self.assertEqual(len(planned), 1)
+        observation = planned[0].observation
+        self.assertEqual(observation.observation_kind, "markdown_document")
+        self.assertEqual(observation.source_kind, "document")
+        self.assertEqual(observation.context_kind, "document")
+        self.assertEqual(observation.context_id, "docs/README.md")
+        self.assertEqual(planned[0].about_links[0].target_record_id, "file:demo:docs.readme.__file__")
+
+    def test_observation_ingestion_service_skips_claim_extraction_for_stack_trace(self):
+        class RecordingExtractionService:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def extract(self, *args, **kwargs):
+                self.calls += 1
+                raise AssertionError("stack traces should not trigger extraction")
+
+        class GuardedInvalidationPlanner:
+            def begin_claim_session(self, *, repo_id: str):
+                return object()
+
+            def plan_validated_claims(self, **kwargs):
+                raise AssertionError("stack traces should not produce claim mutations")
+
+        planned = ObservationMutationPlanner().build_observation(
+            observation_id="observation:stack_trace:demo:1",
+            repo_id="demo",
+            observation_kind=ObservationKind.STACK_TRACE.value,
+            source_kind="agent",
+            source_id="observation_source:agent:demo:task-1",
+            source_record_type="observation_source",
+            title="Null pointer in auth flow",
+            text="Traceback ... AuthService.login ... NullPointerException",
+            context_kind="agent_task",
+            context_id="task-1",
+            ensure_source_node=True,
+        )
+        extraction_service = RecordingExtractionService()
+        result = ObservationIngestionService(
+            metadata_store=InMemoryMetadataStore(),
+            observation_planner=ObservationMutationPlanner(),
+            claim_extraction_service=extraction_service,
+            evidence_invalidation_planner=GuardedInvalidationPlanner(),
+        ).plan_ingestion(
+            items=(ObservationIngestionItem(planned_observation=planned),),
+            snapshot=None,
+        )
+
+        self.assertEqual(extraction_service.calls, 0)
+        self.assertFalse(result.observation_plan.is_empty())
+        self.assertTrue(result.evidence_plan.is_empty())
+        self.assertEqual(len(result.profiles), 1)
+        self.assertEqual(result.profiles[0].profile_kind, SEMANTIC_OBSERVATION_PROFILE_KIND)
 
 
 class CodeIdentityTests(unittest.TestCase):
@@ -2614,6 +2754,19 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         )
         self.assertEqual(contradicts_edge.source_record_id, left_claim.record_id)
         self.assertEqual(contradicts_edge.target_record_id, increased_claim.record_id)
+        relation_profile = next(
+            profile for profile in result.profiles if profile.profile_kind == SEMANTIC_RELATION_PROFILE_KIND
+        )
+        self.assertEqual(relation_profile.profile_target_id, contradicts_edge.record_id)
+        self.assertEqual(relation_profile.relation_type, "contradicts")
+        self.assertEqual(
+            relation_profile.value_text,
+            "Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+        )
+        self.assertEqual(
+            relation_profile.metadata["resolution_confidence"],
+            "high",
+        )
 
     def test_same_run_same_as_reuses_pending_claim(self):
         observation = make_observation(
@@ -2729,6 +2882,9 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         ]
         self.assertEqual(len(support_edges), 2)
         self.assertTrue(all(edge.target_record_id == first_claim_id for edge in support_edges))
+        self.assertFalse(
+            any(profile.profile_kind == SEMANTIC_RELATION_PROFILE_KIND for profile in result.profiles)
+        )
 
     def test_same_session_late_arriving_older_claim_is_non_current(self):
         planner = EvidenceInvalidationPlanner(
@@ -3440,6 +3596,63 @@ class ClaimSemanticProfileTests(unittest.TestCase):
             ),
             profile.keys,
         )
+
+    def test_semantic_relation_profile_uses_raw_text_only(self):
+        profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:1:claim:2:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:1",
+                source_record_type="claim",
+                target_record_id="claim:2",
+                target_record_type="claim",
+                value_text="  Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.  ",
+                metadata={"resolution_confidence": "high"},
+                updated_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.profile_kind, SEMANTIC_RELATION_PROFILE_KIND)
+        self.assertEqual(profile.profile_target_kind, "Relation")
+        self.assertEqual(profile.relation_type, "contradicts")
+        self.assertEqual(profile.source_node_id, "claim:1")
+        self.assertEqual(profile.source_node_kind, "claim")
+        self.assertEqual(profile.target_node_id, "claim:2")
+        self.assertEqual(profile.target_node_kind, "claim")
+        self.assertEqual(
+            profile.keys,
+            (
+                ProfileKeyDefinition(
+                    text="Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                    origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+                ),
+            ),
+        )
+        self.assertEqual(
+            profile.metadata["relation_record_id"],
+            "claim_relation:claim:1:claim:2:contradicts",
+        )
+        self.assertEqual(profile.metadata["text_field"], "value_text")
+
+    def test_semantic_relation_profile_returns_none_for_blank_text(self):
+        profile = semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id="demo",
+                profile_target_id="claim_relation:claim:1:claim:2:contradicts",
+                relation_type="contradicts",
+                source_record_id="claim:1",
+                source_record_type="claim",
+                target_record_id="claim:2",
+                target_record_type="claim",
+                value_text="   ",
+                updated_at="2026-03-26T00:00:00+00:00",
+            )
+        )
+
+        self.assertIsNone(profile)
 
     def test_claim_semantic_retrieval_service_filters_to_claim_profiles(self):
         metadata = InMemoryMetadataStore()

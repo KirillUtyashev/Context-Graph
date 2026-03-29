@@ -799,18 +799,20 @@ def record_agent_observation(
     result: ObservationWriteResult,
     task_id: str | None,
 ) -> RecordAgentObservationResponse:
-    return RecordAgentObservationResponse(
-        status=SCAFFOLD_STATUS,
-        message=result.message,
-        capability=result.capability,
-        todo=result.todo,
-        repo_id=result.repo_id,
-        observation_id=result.observation_id,
-        task_id=task_id,
-        accepted=result.accepted,
-        persisted=result.persisted,
-        queue_position=result.queue_position,
-    )
+    response: RecordAgentObservationResponse = {
+        "status": IMPLEMENTED_STATUS if result.persisted else SCAFFOLD_STATUS,
+        "message": result.message,
+        "capability": result.capability,
+        "repo_id": result.repo_id,
+        "observation_id": result.observation_id,
+        "task_id": task_id,
+        "accepted": result.accepted,
+        "persisted": result.persisted,
+        "queue_position": result.queue_position,
+    }
+    if result.todo:
+        response["todo"] = result.todo
+    return response
 
 
 def _search_records(
@@ -973,6 +975,8 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
             "claim_kind": metadata.get("claim_kind"),
             "claim_subkind": metadata.get("claim_subkind"),
             "latest_observed_at": metadata.get("valid_to") or metadata.get("valid_from"),
+            "context_kind": metadata.get("context_kind"),
+            "context_id": metadata.get("context_id"),
         }
     else:
         record_type = "observation"
@@ -983,6 +987,8 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
             "observed_at": metadata.get("observed_at"),
             "source_kind": metadata.get("source_kind"),
             "source_id": metadata.get("source_id"),
+            "context_kind": metadata.get("context_kind"),
+            "context_id": metadata.get("context_id"),
             "thread_kind": metadata.get("thread_kind"),
             "thread_id": metadata.get("thread_id"),
         }

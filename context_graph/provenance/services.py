@@ -30,7 +30,6 @@ from .models import (
     EvidenceCandidate,
     FactConflictResolutionResponse,
     Observation,
-    ObservationKind,
     ResearchArtifactCandidate,
     ResearchArtifactSynthesisResponse,
 )
@@ -43,6 +42,7 @@ from .prompts import (
     resolve_fact_conflicts,
     synthesize_research_artifact,
 )
+from .schema_registry import DEFAULT_PROVENANCE_SCHEMA_REGISTRY
 
 
 class ClaimEvidenceExtractionService:
@@ -65,27 +65,13 @@ class ClaimEvidenceExtractionService:
             code_context=code_context,
             source_context=source_context,
         )
-        if observation.observation_kind == ObservationKind.GIT_COMMIT_MESSAGE:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_COMMIT_MESSAGE
-            messages = extract_claims_and_evidence.from_commit_message(context)
-        elif observation.observation_kind == ObservationKind.GITHUB_PR_BODY:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_BODY
-            messages = extract_claims_and_evidence.from_github_pr_body(context)
-        elif observation.observation_kind == ObservationKind.GITHUB_ISSUE_BODY:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_ISSUE_BODY
-            messages = extract_claims_and_evidence.from_github_issue_body(context)
-        elif observation.observation_kind == ObservationKind.GITHUB_PR_REVIEW:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_REVIEW
-            messages = extract_claims_and_evidence.from_github_pr_review(context)
-        elif observation.observation_kind == ObservationKind.GITHUB_PR_REVIEW_COMMENT:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_REVIEW_COMMENT
-            messages = extract_claims_and_evidence.from_github_pr_review_comment(context)
-        elif observation.observation_kind == ObservationKind.GITHUB_ISSUE_COMMENT:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_ISSUE_COMMENT
-            messages = extract_claims_and_evidence.from_github_issue_comment(context)
-        else:
-            metadata = extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GENERIC_OBSERVATION
-            messages = extract_claims_and_evidence.from_generic_observation(context)
+        policy = DEFAULT_PROVENANCE_SCHEMA_REGISTRY.observation_policy(
+            observation.observation_kind,
+            source_kind=observation.source_kind,
+        )
+        prompt_profile = policy.prompt_profile if policy is not None else "generic_observation"
+        metadata, builder = _claim_evidence_prompt_builder(prompt_profile)
+        messages = builder(context)
         return ProvenancePromptRequest(
             metadata=metadata,
             messages=tuple(messages),
@@ -114,7 +100,7 @@ class ClaimEvidenceExtractionService:
             prompt_name=request.prompt_name,
             debug_metadata={
                 "observation_id": observation.observation_id,
-                "observation_kind": observation.observation_kind.value,
+                "observation_kind": observation.observation_kind,
                 "repo_id": observation.repo_id,
                 "source_kind": observation.source_kind,
                 "source_id": observation.source_id,
@@ -123,6 +109,46 @@ class ClaimEvidenceExtractionService:
 
 
 EvidenceExtractionService = ClaimEvidenceExtractionService
+
+
+def _claim_evidence_prompt_builder(prompt_profile: str | None):
+    builders = {
+        "commit_message": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_COMMIT_MESSAGE,
+            extract_claims_and_evidence.from_commit_message,
+        ),
+        "github_pr_body": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_BODY,
+            extract_claims_and_evidence.from_github_pr_body,
+        ),
+        "github_issue_body": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_ISSUE_BODY,
+            extract_claims_and_evidence.from_github_issue_body,
+        ),
+        "github_pr_review": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_REVIEW,
+            extract_claims_and_evidence.from_github_pr_review,
+        ),
+        "github_pr_review_comment": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_REVIEW_COMMENT,
+            extract_claims_and_evidence.from_github_pr_review_comment,
+        ),
+        "github_issue_comment": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_ISSUE_COMMENT,
+            extract_claims_and_evidence.from_github_issue_comment,
+        ),
+        "generic_observation": (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GENERIC_OBSERVATION,
+            extract_claims_and_evidence.from_generic_observation,
+        ),
+    }
+    return builders.get(
+        prompt_profile or "generic_observation",
+        (
+            extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GENERIC_OBSERVATION,
+            extract_claims_and_evidence.from_generic_observation,
+        ),
+    )
 
 
 class ClaimProfileKeyGenerationResponse(BaseModel):

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
 from context_graph.profile_vectors import ProfileVectorIndexer
-from context_graph.profiles import ProfileRecord, semantic_observation_profile_from_observation
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
@@ -20,7 +19,14 @@ from context_graph.provenance import (
     FactConflictResolutionService,
     ObservationMutationPlanner,
 )
-from context_graph.provenance.prompt_context import build_deterministic_code_context
+from context_graph.provenance.observation_ingestion import (
+    ObservationIngestionItem,
+    ObservationIngestionService,
+)
+from context_graph.provenance.source_adapters import (
+    MarkdownObservationAdapter,
+    build_commit_observation,
+)
 from context_graph.query_parser import QueryParser
 from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
@@ -119,6 +125,8 @@ class CommitIndexingService:
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
         claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
         profile_indexer: ProfileVectorIndexer | None = None,
+        observation_ingestion_service: ObservationIngestionService | None = None,
+        markdown_observation_adapter: MarkdownObservationAdapter | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -165,6 +173,16 @@ class CommitIndexingService:
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
         self.profile_indexer = profile_indexer
+        self.observation_ingestion_service = observation_ingestion_service or ObservationIngestionService(
+            metadata_store=metadata_store,
+            backend_driver=backend_driver,
+            observation_planner=self.observation_planner,
+            claim_extraction_service=self.claim_extraction_service,
+            claim_validator=self.claim_validator,
+            evidence_invalidation_planner=self.evidence_invalidation_planner,
+            profile_indexer=profile_indexer,
+        )
+        self.markdown_observation_adapter = markdown_observation_adapter or MarkdownObservationAdapter()
         self.writer = writer or TemporalGraphWriter(
             metadata_store=metadata_store,
             backend_driver=backend_driver,
@@ -409,6 +427,7 @@ class CommitIndexingService:
             target_commit=commit,
         )
 
+        markdown_planned_observations = ()
         with self.git_metadata.temporary_worktree(resolved_repo_path, commit.sha) as worktree_path:
             snapshot = self.snapshot_producer.build_snapshot(
                 worktree_path,
@@ -416,12 +435,16 @@ class CommitIndexingService:
                 revision_id=commit.sha,
                 limit=limit,
             )
-
-        normalized_snapshot = normalize_snapshot_for_commit(
-            snapshot,
-            repo_path=resolved_repo_path,
-            commit=commit,
-        )
+            normalized_snapshot = normalize_snapshot_for_commit(
+                snapshot,
+                repo_path=resolved_repo_path,
+                commit=commit,
+            )
+            markdown_planned_observations = self.markdown_observation_adapter.build_observations(
+                planner=self.observation_planner,
+                snapshot=normalized_snapshot,
+                checkout_root=worktree_path,
+            )
         structural_plan = self.writer.plan_snapshot(normalized_snapshot)
         commit_plan = self.planner.plan_commit_provenance(
             snapshot=structural_plan.snapshot,
@@ -429,29 +452,37 @@ class CommitIndexingService:
             commit=commit,
             planning_state=structural_plan.state,
         )
-        planned_observation = self.observation_planner.build_commit_message_observation(
+        planned_observation = build_commit_observation(
+            planner=self.observation_planner,
             repo_id=structural_plan.snapshot.repo_id,
             commit=commit,
         )
-        observation_plan = (
-            self.observation_planner.plan_observations(
-                planned_observation,
-                snapshot=structural_plan.snapshot,
+        observation_items = [
+            ObservationIngestionItem(
+                planned_observation=planned_observation,
+                source_context={
+                    "commit_sha": commit.sha,
+                    "changed_files": list(commit.changed_files),
+                },
             )
-            if planned_observation is not None
-            else MutationPlan()
+            for planned_observation in ((planned_observation,) if planned_observation is not None else ())
+        ]
+        observation_items.extend(
+            ObservationIngestionItem(
+                planned_observation=planned,
+                source_context={
+                    "document_path": planned.observation.metadata.get("document_path"),
+                },
+            )
+            for planned in markdown_planned_observations
         )
-        evidence_plan, claim_counts = self._plan_commit_evidence(
-            planned_observation=planned_observation,
+        observation_ingestion_result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(observation_items),
             snapshot=structural_plan.snapshot,
-            commit=commit,
         )
-        profiles = _dedupe_profiles(
-            (
-                *((semantic_observation_profile_from_observation(planned_observation.observation),) if planned_observation is not None else ()),
-                *tuple(claim_counts.get("profiles", ()) or ()),
-            )
-        )
+        observation_plan = observation_ingestion_result.observation_plan
+        evidence_plan = observation_ingestion_result.evidence_plan
+        profiles = observation_ingestion_result.profiles
         all_operation_plans = [structural_plan.plan]
         if not commit_plan.is_empty():
             all_operation_plans.append(commit_plan)
@@ -467,7 +498,7 @@ class CommitIndexingService:
             execute=execute,
         )
         if execute and profiles:
-            self._persist_profiles(profiles)
+            self.observation_ingestion_service.persist_profiles(profiles)
         self.metadata_store.save_repo_index_state(
             RepoIndexState(
                 repo_id=structural_plan.snapshot.repo_id,
@@ -494,11 +525,11 @@ class CommitIndexingService:
             applied_commit_shas=(commit.sha,),
             observation_operations=observation_plan,
             evidence_operations=evidence_plan,
-            claim_candidates_extracted=claim_counts["extracted"],
-            claim_candidates_validated=claim_counts["validated"],
-            claim_candidates_rejected=claim_counts["rejected"],
-            claim_rejection_reasons=dict(claim_counts["reasons"]),
-            evidence_invalidated=claim_counts["invalidated"],
+            claim_candidates_extracted=observation_ingestion_result.claim_candidates_extracted,
+            claim_candidates_validated=observation_ingestion_result.claim_candidates_validated,
+            claim_candidates_rejected=observation_ingestion_result.claim_candidates_rejected,
+            claim_rejection_reasons=dict(observation_ingestion_result.claim_rejection_reasons),
+            evidence_invalidated=observation_ingestion_result.evidence_invalidated,
         )
 
     def _ensure_supported_lineage(
@@ -597,60 +628,41 @@ class CommitIndexingService:
         snapshot: GraphSnapshot,
         commit: CommitInfo,
     ) -> tuple[MutationPlan, dict[str, object]]:
-        zero_counts: dict[str, object] = {
-            "extracted": 0,
-            "validated": 0,
-            "rejected": 0,
-            "reasons": {},
-            "invalidated": 0,
-            "profiles": (),
-        }
-        if planned_observation is None or self.claim_extraction_service is None:
-            return MutationPlan(), zero_counts
-        try:
-            extraction = self.claim_extraction_service.extract(
-                planned_observation.observation,
-                code_context=build_deterministic_code_context(
-                    planned_observation.observation,
-                    snapshot=snapshot,
+        if planned_observation is None:
+            return MutationPlan(), {
+                "extracted": 0,
+                "validated": 0,
+                "rejected": 0,
+                "reasons": {},
+                "invalidated": 0,
+                "profiles": (),
+            }
+        result = self.observation_ingestion_service.plan_ingestion(
+            items=(
+                ObservationIngestionItem(
+                    planned_observation=planned_observation,
+                    source_context={
+                        "commit_sha": commit.sha,
+                        "changed_files": list(commit.changed_files),
+                    },
                 ),
-                source_context={
-                    "commit_sha": commit.sha,
-                    "changed_files": list(commit.changed_files),
-                },
-            )
-        except Exception:
-            return MutationPlan(), zero_counts
-        validation = self.claim_validator.validate(
-            observation=planned_observation.observation,
-            extraction=extraction,
-            snapshot=snapshot,
-        )
-        invalidation_result = self.evidence_invalidation_planner.plan_validated_claims(
-            observation=planned_observation.observation,
-            validation=validation,
+            ),
             snapshot=snapshot,
         )
         return (
-            invalidation_result.plan,
+            result.evidence_plan,
             {
-                "extracted": validation.extracted_count,
-                "validated": validation.validated_count,
-                "rejected": validation.rejected_count,
-                "reasons": validation.rejection_reason_counts,
-                "invalidated": invalidation_result.invalidated_count,
-                "profiles": invalidation_result.profiles,
+                "extracted": result.claim_candidates_extracted,
+                "validated": result.claim_candidates_validated,
+                "rejected": result.claim_candidates_rejected,
+                "reasons": result.claim_rejection_reasons,
+                "invalidated": result.evidence_invalidated,
+                "profiles": result.profiles,
             },
         )
 
-    def _persist_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
-        deduped = _dedupe_profiles(profiles)
-        if not deduped:
-            return
-        self.metadata_store.upsert_profiles(deduped)
-        if self.profile_indexer is not None:
-            self.profile_indexer.apply_profile_updates(profiles=deduped)
-
+    def _persist_profiles(self, profiles: Sequence[Any]) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles)
 
 def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
     counts: dict[str, int] = {}
@@ -658,10 +670,3 @@ def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
         for key, value in reason_map.items():
             counts[key] = counts.get(key, 0) + value
     return counts
-
-
-def _dedupe_profiles(profiles: Sequence[ProfileRecord]) -> tuple[ProfileRecord, ...]:
-    deduped: dict[str, ProfileRecord] = {}
-    for profile in profiles:
-        deduped[profile.profile_id] = profile
-    return tuple(deduped[profile_id] for profile_id in sorted(deduped))

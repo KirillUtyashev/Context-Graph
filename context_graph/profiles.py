@@ -25,9 +25,11 @@ else:  # pragma: no cover - runtime uses duck typing for these richer graph obje
 SEMANTIC_FACT_PROFILE_KIND = "semantic_fact_profile"
 SEMANTIC_CLAIM_PROFILE_KIND = "semantic_claim_profile"
 SEMANTIC_OBSERVATION_PROFILE_KIND = "semantic_observation_profile"
+SEMANTIC_RELATION_PROFILE_KIND = "semantic_relation_profile"
 FACT_EDGE_TARGET_KIND = "FactEdge"
 CLAIM_TARGET_KIND = "Claim"
 OBSERVATION_TARGET_KIND = "Observation"
+RELATION_TARGET_KIND = "Relation"
 PROFILE_KEY_ORIGIN_RAW_TEXT = "raw_text"
 PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC = "generated_semantic"
 PROFILE_KEY_ORIGIN_LEGACY_KEYWORD = "legacy_keyword"
@@ -85,8 +87,16 @@ class ProfileRecord:
     updated_at: str = ""
 
     def keys_json(self) -> str:
+        serialized_keys: list[dict[str, str]] = []
+        for key in self.keys:
+            if isinstance(key, ProfileKeyDefinition):
+                serialized_keys.append(key.as_dict())
+                continue
+            normalized = ProfileKeyDefinition.from_json_value(key)
+            if normalized is not None:
+                serialized_keys.append(normalized.as_dict())
         return json.dumps(
-            [key.as_dict() for key in self.keys],
+            serialized_keys,
             sort_keys=False,
             separators=(",", ":"),
         )
@@ -105,6 +115,22 @@ class ProfileDeactivation:
     observed_at: str
     valid_to_revision: str | None = None
     replacement_profile_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RelationProfileSpec:
+    repo_id: str
+    profile_target_id: str
+    profile_target_kind: str = RELATION_TARGET_KIND
+    relation_type: str | None = None
+    source_record_id: str | None = None
+    source_record_type: str | None = None
+    target_record_id: str | None = None
+    target_record_type: str | None = None
+    value_text: str = ""
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    is_active: bool = True
+    updated_at: str = ""
 
 
 def semantic_fact_profile_from_fact(
@@ -184,6 +210,8 @@ def semantic_claim_profile_from_claim(
         "canonical_key": claim.canonical_key,
         "claim_kind": claim.claim_kind,
         "claim_subkind": claim.claim_subkind,
+        "context_kind": claim.context_kind,
+        "context_id": claim.context_id,
         "thread_kind": claim.thread_kind,
         "thread_id": claim.thread_id,
         "about_record_ids": list(about_ids),
@@ -217,15 +245,60 @@ def semantic_claim_profile_from_claim(
     )
 
 
+def semantic_relation_profile_from_spec(
+    spec: RelationProfileSpec,
+) -> ProfileRecord | None:
+    normalized_text = _normalize_text(spec.value_text)
+    if not normalized_text:
+        return None
+    metadata = {
+        **dict(spec.metadata),
+        "relation_record_id": spec.profile_target_id,
+        "relation_type": _string_or_none(spec.relation_type),
+        "text_field": "value_text",
+        "source_record_id": _string_or_none(spec.source_record_id),
+        "source_record_type": _string_or_none(spec.source_record_type),
+        "target_record_id": _string_or_none(spec.target_record_id),
+        "target_record_type": _string_or_none(spec.target_record_type),
+    }
+    return ProfileRecord(
+        profile_id=f"profile:{spec.repo_id}:{SEMANTIC_RELATION_PROFILE_KIND}:{spec.profile_target_id}",
+        repo_id=spec.repo_id,
+        profile_kind=SEMANTIC_RELATION_PROFILE_KIND,
+        profile_target_kind=spec.profile_target_kind,
+        profile_target_id=spec.profile_target_id,
+        relation_type=_string_or_none(spec.relation_type),
+        source_node_id=_string_or_none(spec.source_record_id),
+        source_node_kind=_string_or_none(spec.source_record_type),
+        target_node_id=_string_or_none(spec.target_record_id),
+        target_node_kind=_string_or_none(spec.target_record_type),
+        target_revision_id=None,
+        value_text=normalized_text,
+        keys=(
+            ProfileKeyDefinition(
+                text=normalized_text,
+                origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+            ),
+        ),
+        metadata=metadata,
+        is_active=bool(spec.is_active),
+        valid_from_revision=None,
+        valid_to_revision=None,
+        updated_at=spec.updated_at,
+    )
+
+
 def semantic_observation_profile_from_observation(
     observation: Observation,
 ) -> ProfileRecord:
     value_text = observation_profile_text(observation)
     metadata = {
         "observation_id": observation.observation_id,
-        "observation_kind": observation.observation_kind.value,
+        "observation_kind": observation.observation_kind,
         "source_kind": observation.source_kind,
         "source_id": observation.source_id,
+        "context_kind": observation.context_kind,
+        "context_id": observation.context_id,
         "thread_kind": observation.thread_kind,
         "thread_id": observation.thread_id,
         "observed_at": observation.observed_at,

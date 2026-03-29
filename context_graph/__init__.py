@@ -61,6 +61,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "SEMANTIC_CLAIM_PROFILE_KIND": (".profiles", "SEMANTIC_CLAIM_PROFILE_KIND"),
     "SEMANTIC_FACT_PROFILE_KIND": (".profiles", "SEMANTIC_FACT_PROFILE_KIND"),
     "SEMANTIC_OBSERVATION_PROFILE_KIND": (".profiles", "SEMANTIC_OBSERVATION_PROFILE_KIND"),
+    "SEMANTIC_RELATION_PROFILE_KIND": (".profiles", "SEMANTIC_RELATION_PROFILE_KIND"),
     "SemanticProvenanceSearchService": (".profile_vectors", "SemanticProvenanceSearchService"),
     "SQLiteMetadataStore": (".metadata", "SQLiteMetadataStore"),
     "SnapshotApplyResult": (".models", "SnapshotApplyResult"),

@@ -279,7 +279,7 @@ class EvidenceMutationPlanner:
             relationship_type="DERIVED_FROM",
             source_record_id=evidence.evidence_id,
             target_record_id=observation.observation_id,
-            properties={"observation_kind": observation.observation_kind.value},
+            properties={"observation_kind": observation.observation_kind},
         )
         support_edge = (
             EdgeRecord(
@@ -310,7 +310,7 @@ class EvidenceMutationPlanner:
                 derived_from_edge,
                 *((support_edge,) if support_edge is not None else ()),
             ),
-            upsert_search_documents=(self._search_document(evidence, observation_kind=observation.observation_kind.value),),
+            upsert_search_documents=(self._search_document(evidence, observation_kind=observation.observation_kind),),
         )
 
     def _node_record(self, evidence: EvidenceRecord) -> NodeRecord:

@@ -22,6 +22,12 @@ class ObservationWriteRequest:
     group_id: str
     observation_text: str
     observation_kind: str
+    title: str | None = None
+    source_kind: str = "agent"
+    source_id: str | None = None
+    context_kind: str | None = None
+    context_id: str | None = None
+    observed_at: str | None = None
     task_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -38,7 +44,7 @@ class ObservationWriteResult:
     queue_position: int
     message: str
     capability: str = OBSERVATION_WRITE_CAPABILITY
-    todo: str = OBSERVATION_WRITE_TODO
+    todo: str | None = OBSERVATION_WRITE_TODO
 
 
 class ObservationWriteService:

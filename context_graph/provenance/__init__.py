@@ -32,7 +32,10 @@ from .models import (
     SupportingEvidenceCandidate,
     claim_record_id,
     evidence_record_id,
+    general_observation_id,
     git_commit_message_observation_id,
+    markdown_document_observation_id,
+    observation_kind_value,
     github_issue_body_observation_id,
     github_issue_closed_observation_id,
     github_issue_comment_observation_id,
@@ -47,10 +50,27 @@ from .claim_planner import (
 )
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner, PreparedEvidenceRecord
 from .invalidation import CurrentEvidenceReader, EvidenceInvalidationPlanner, FactInvalidationPlanResult
-from .schema_registry import DEFAULT_PROVENANCE_SCHEMA_REGISTRY, ProvenanceSchemaRegistry
+from .schema_registry import (
+    DEFAULT_PROVENANCE_SCHEMA_REGISTRY,
+    ObservationSourcePolicy,
+    ProvenanceSchemaRegistry,
+)
 from .validation import ClaimBundleValidator, ClaimValidationResult, RejectedClaimBundle, ValidatedClaimBundle
 from .planner import ObservationMutationPlanner
 from .claim_retrieval import ClaimSemanticRetrievalService
+from .observation_ingestion import (
+    ObservationApplyResult,
+    ObservationIngestionItem,
+    ObservationIngestionResult,
+    ObservationIngestionService,
+)
+from .source_adapters import (
+    AgentObservationAdapter,
+    AgentObservationPayload,
+    MarkdownObservationAdapter,
+    build_commit_observation,
+    build_github_observations,
+)
 from .services import (
     ClaimEvidenceExtractionService,
     ClaimCanonicalizationService,
@@ -106,10 +126,18 @@ __all__ = [
     "FactInvalidationPlanResult",
     "CurrentEvidenceReader",
     "Observation",
+    "ObservationApplyResult",
+    "ObservationIngestionItem",
+    "ObservationIngestionResult",
+    "ObservationIngestionService",
     "ObservationKind",
     "ObservationLink",
     "ObservationMutationPlanner",
     "ObservationSourceRef",
+    "ObservationSourcePolicy",
+    "MarkdownObservationAdapter",
+    "AgentObservationAdapter",
+    "AgentObservationPayload",
     "PersistedEvidenceFact",
     "PersistedEvidenceRecord",
     "PersistedClaimRecord",
@@ -121,9 +149,14 @@ __all__ = [
     "ResearchArtifactSynthesisService",
     "SupportingEvidenceCandidate",
     "ValidatedClaimBundle",
+    "build_commit_observation",
+    "build_github_observations",
     "claim_record_id",
     "evidence_record_id",
+    "general_observation_id",
     "git_commit_message_observation_id",
+    "markdown_document_observation_id",
+    "observation_kind_value",
     "github_issue_body_observation_id",
     "github_issue_closed_observation_id",
     "github_issue_comment_observation_id",

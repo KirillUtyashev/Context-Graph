@@ -9,7 +9,6 @@ from typing import Any
 
 from context_graph.models import GraphSnapshot
 from context_graph.profile_vectors import ProfileVectorIndexer
-from context_graph.profiles import ProfileRecord, semantic_observation_profile_from_observation
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
@@ -24,7 +23,11 @@ from context_graph.provenance import (
     ObservationKind,
     ObservationMutationPlanner,
 )
-from context_graph.provenance.prompt_context import build_deterministic_code_context
+from context_graph.provenance.observation_ingestion import (
+    ObservationIngestionItem,
+    ObservationIngestionService,
+)
+from context_graph.provenance.source_adapters import build_github_observations
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
 from context_graph.metadata import MetadataStore
 from context_graph.query_parser import QueryParser
@@ -146,6 +149,7 @@ class GitHubIndexer:
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
         claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
         profile_indexer: ProfileVectorIndexer | None = None,
+        observation_ingestion_service: ObservationIngestionService | None = None,
     ) -> None:
         self.github_api = github_api
         self.metadata_store = metadata_store
@@ -192,6 +196,15 @@ class GitHubIndexer:
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
         self.profile_indexer = profile_indexer
+        self.observation_ingestion_service = observation_ingestion_service or ObservationIngestionService(
+            metadata_store=metadata_store,
+            backend_driver=backend_driver,
+            observation_planner=self.observation_planner,
+            claim_extraction_service=self.claim_extraction_service,
+            claim_validator=self.claim_validator,
+            evidence_invalidation_planner=self.evidence_invalidation_planner,
+            profile_indexer=profile_indexer,
+        )
 
     def sync_for_commits(
         self,
@@ -221,24 +234,26 @@ class GitHubIndexer:
             commit_shas=commit_shas,
         )
         structural_operations = self.planner.plan_bundle(bundle)
-        planned_observations = self.observation_planner.build_github_observations(bundle=bundle)
-        observation_operations = self.observation_planner.plan_observations(
-            *planned_observations,
+        planned_observations = build_github_observations(
+            planner=self.observation_planner,
+            bundle=bundle,
+        )
+        observation_ingestion_result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(
+                ObservationIngestionItem(
+                    planned_observation=planned,
+                    source_context={
+                        "pull_request_number": planned.observation.metadata.get("pull_request_number"),
+                        "issue_number": planned.observation.metadata.get("issue_number"),
+                    },
+                )
+                for planned in planned_observations
+            ),
             snapshot=snapshot,
         )
-        evidence_operations, claim_counts = self._plan_evidence_operations(
-            planned_observations=planned_observations,
-            snapshot=snapshot,
-        )
-        profiles = _dedupe_profiles(
-            (
-                *(
-                    semantic_observation_profile_from_observation(planned.observation)
-                    for planned in planned_observations
-                ),
-                *tuple(claim_counts.get("profiles", ()) or ()),
-            )
-        )
+        observation_operations = observation_ingestion_result.observation_plan
+        evidence_operations = observation_ingestion_result.evidence_plan
+        profiles = observation_ingestion_result.profiles
         operations = merge_mutation_plans(
             structural_operations,
             observation_operations,
@@ -251,7 +266,7 @@ class GitHubIndexer:
             bridge = BackendSyncBridge(self.backend_driver)
             operations_applied = bridge.apply(operations).operations_applied
             if profiles:
-                self._persist_profiles(profiles)
+                self.observation_ingestion_service.persist_profiles(profiles)
         counts: dict[str, int] = {}
         pull_requests: set[int] = set()
         issues: set[int] = set()
@@ -273,11 +288,11 @@ class GitHubIndexer:
             issue_numbers=tuple(sorted(issues)),
             observation_operations=observation_operations,
             evidence_operations=evidence_operations,
-            claim_candidates_extracted=claim_counts["extracted"],
-            claim_candidates_validated=claim_counts["validated"],
-            claim_candidates_rejected=claim_counts["rejected"],
-            claim_rejection_reasons=dict(claim_counts["reasons"]),
-            evidence_invalidated=claim_counts["invalidated"],
+            claim_candidates_extracted=observation_ingestion_result.claim_candidates_extracted,
+            claim_candidates_validated=observation_ingestion_result.claim_candidates_validated,
+            claim_candidates_rejected=observation_ingestion_result.claim_candidates_rejected,
+            claim_rejection_reasons=dict(observation_ingestion_result.claim_rejection_reasons),
+            evidence_invalidated=observation_ingestion_result.evidence_invalidated,
         )
 
     def _plan_evidence_operations(
@@ -286,90 +301,33 @@ class GitHubIndexer:
         planned_observations: Sequence[Any],
         snapshot: GraphSnapshot | None,
     ) -> tuple[MutationPlan, dict[str, object]]:
-        zero_counts: dict[str, object] = {
-            "extracted": 0,
-            "validated": 0,
-            "rejected": 0,
-            "reasons": {},
-            "invalidated": 0,
-            "profiles": (),
-        }
-        if self.claim_extraction_service is None:
-            return MutationPlan(), zero_counts
-
-        plans: list[MutationPlan] = []
-        claim_profiles: list[ProfileRecord] = []
-        extracted_count = 0
-        validated_count = 0
-        rejected_count = 0
-        invalidated_count = 0
-        rejection_reasons: dict[str, int] = {}
-        claim_session = (
-            self.evidence_invalidation_planner.begin_claim_session(
-                repo_id=planned_observations[0].observation.repo_id
-            )
-            if planned_observations
-            else None
-        )
-        for planned in planned_observations:
-            if planned.observation.observation_kind == ObservationKind.GITHUB_ISSUE_CLOSED:
-                continue
-            try:
-                extraction = self.claim_extraction_service.extract(
-                    planned.observation,
-                    code_context=build_deterministic_code_context(
-                        planned.observation,
-                        snapshot=snapshot,
-                    ),
+        result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(
+                ObservationIngestionItem(
+                    planned_observation=planned,
                     source_context={
                         "pull_request_number": planned.observation.metadata.get("pull_request_number"),
                         "issue_number": planned.observation.metadata.get("issue_number"),
                     },
                 )
-            except Exception:
-                continue
-            validation = self.claim_validator.validate(
-                observation=planned.observation,
-                extraction=extraction,
-                snapshot=snapshot,
-            )
-            extracted_count += validation.extracted_count
-            validated_count += validation.validated_count
-            rejected_count += validation.rejected_count
-            rejection_reasons = _merge_reason_counts(
-                rejection_reasons,
-                validation.rejection_reason_counts,
-            )
-            invalidation_result = self.evidence_invalidation_planner.plan_validated_claims(
-                observation=planned.observation,
-                validation=validation,
-                snapshot=snapshot,
-                session=claim_session,
-            )
-            plans.append(invalidation_result.plan)
-            invalidated_count += invalidation_result.invalidated_count
-            claim_profiles.extend(invalidation_result.profiles)
+                for planned in planned_observations
+            ),
+            snapshot=snapshot,
+        )
         return (
-            merge_mutation_plans(*plans),
+            result.evidence_plan,
             {
-                "extracted": extracted_count,
-                "validated": validated_count,
-                "rejected": rejected_count,
-                "reasons": rejection_reasons,
-                "invalidated": invalidated_count,
-                "profiles": _dedupe_profiles(claim_profiles),
+                "extracted": result.claim_candidates_extracted,
+                "validated": result.claim_candidates_validated,
+                "rejected": result.claim_candidates_rejected,
+                "reasons": result.claim_rejection_reasons,
+                "invalidated": result.evidence_invalidated,
+                "profiles": result.profiles,
             },
         )
 
-    def _persist_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
-        deduped = _dedupe_profiles(profiles)
-        if not deduped:
-            return
-        if self.metadata_store is None:
-            raise RuntimeError("GitHub profile persistence requires a configured metadata store")
-        self.metadata_store.upsert_profiles(deduped)
-        if self.profile_indexer is not None:
-            self.profile_indexer.apply_profile_updates(profiles=deduped)
+    def _persist_profiles(self, profiles: Sequence[Any]) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles)
 
     def _build_bundle(
         self,
@@ -1056,7 +1014,7 @@ def _maybe_add_observation_source(
 ) -> None:
     if source is None:
         return
-    sources[f"{source.observation_kind.value}:{source.external_id}"] = source
+    sources[f"{source.observation_kind}:{source.external_id}"] = source
 
 
 def _has_text(value: object) -> bool:
@@ -1075,7 +1033,7 @@ def _observation_source_sort_key(source: GitHubObservationSource) -> tuple[bool,
     return (
         observed_at is None,
         observed_at or datetime.max,
-        source.observation_kind.value,
+        str(source.observation_kind),
         source.external_id,
     )
 
@@ -1096,10 +1054,3 @@ def _merge_reason_counts(*reason_maps: Mapping[str, int]) -> dict[str, int]:
         for key, value in reason_map.items():
             counts[key] = counts.get(key, 0) + value
     return counts
-
-
-def _dedupe_profiles(profiles: Sequence[ProfileRecord]) -> tuple[ProfileRecord, ...]:
-    deduped: dict[str, ProfileRecord] = {}
-    for profile in profiles:
-        deduped[profile.profile_id] = profile
-    return tuple(deduped[profile_id] for profile_id in sorted(deduped))

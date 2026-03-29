@@ -17,12 +17,13 @@ This package contains the internal MCP server for `context_graph`. The server us
 | `synthesize_artifact` | implemented | backend lexical search + metadata snapshot + configured LLM |
 | `get_node_neighborhood` | scaffold | `TODO(context_graph.backend.traversal.neighborhood)` |
 | `get_timeline` | scaffold | `TODO(context_graph.backend.timeline)` |
-| `record_agent_observation` | scaffold | `TODO(context_graph.backend.ingestion.observation_write)` |
+| `record_agent_observation` | implemented | backend driver + metadata store; semantic indexing when available |
 
 Notes:
 
 - `search_context` fuses backend lexical search with semantic claim and observation profiles when available.
 - `synthesize_artifact` is read-only in this pass and does not persist artifact nodes.
+- `record_agent_observation` persists agent notes/traces as provenance observations and routes extractable kinds through the same observation-ingestion service used by repository ingestion.
 - Scaffolded tools return typed `status="scaffold"` responses with `capability` and `todo` fields.
 
 ## Runtime Model
@@ -144,5 +145,4 @@ Included examples:
 - hybrid search is implemented at the provenance layer via backend lexical search and semantic profile fusion
 - `TODO(context_graph.backend.traversal.neighborhood)`
 - `TODO(context_graph.backend.timeline)`
-- `TODO(context_graph.backend.ingestion.observation_write)`
 - `TODO(context_graph.backend.artifacts.persistence)`

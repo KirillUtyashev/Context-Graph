@@ -48,6 +48,10 @@ class MetadataSnapshotService:
         return self._metadata
 
     @property
+    def profile_indexer(self) -> ProfileVectorIndexer | None:
+        return self._profile_indexer
+
+    @property
     def metadata_init_error(self) -> str | None:
         return self._metadata_init_error
 

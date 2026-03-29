@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ObservationKind(str, Enum):
-    """Closed set of deterministic observation kinds supported in v1."""
+    """Documented built-in observation kinds supported by the provenance layer."""
 
     GIT_COMMIT_MESSAGE = "git_commit_message"
     GITHUB_PR_BODY = "github_pr_body"
@@ -19,6 +19,10 @@ class ObservationKind(str, Enum):
     GITHUB_PR_REVIEW = "github_pr_review"
     GITHUB_PR_REVIEW_COMMENT = "github_pr_review_comment"
     GITHUB_ISSUE_COMMENT = "github_issue_comment"
+    MARKDOWN_DOCUMENT = "markdown_document"
+    AGENT_NOTE = "agent_note"
+    AGENT_TRACE = "agent_trace"
+    STACK_TRACE = "stack_trace"
 
 
 ClaimSubkind = Literal[
@@ -67,6 +71,12 @@ ResolutionConfidence = Literal["low", "medium", "high"]
 ThreadKind = Literal["pull_request", "issue", "commit"]
 
 
+def observation_kind_value(value: str | ObservationKind) -> str:
+    if isinstance(value, ObservationKind):
+        return value.value
+    return str(value).strip()
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationSourceRef:
     """Stable reference to the structural record an observation came from."""
@@ -76,6 +86,8 @@ class ObservationSourceRef:
     source_record_type: str
     repo_id: str
     display_name: str | None = None
+    ensure_source_node: bool = False
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +106,7 @@ class Observation:
 
     observation_id: str
     repo_id: str
-    observation_kind: ObservationKind
+    observation_kind: str
     source_kind: str
     source_id: str
     observed_at: str | None
@@ -103,8 +115,17 @@ class Observation:
     text: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
     ingested_at: str | None = None
+    context_kind: str | None = None
+    context_id: str | None = None
     thread_kind: ThreadKind | None = None
     thread_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observation_kind", observation_kind_value(self.observation_kind))
+        if self.context_kind is None and self.thread_kind is not None:
+            object.__setattr__(self, "context_kind", str(self.thread_kind))
+        if self.context_id is None and self.thread_id is not None:
+            object.__setattr__(self, "context_id", str(self.thread_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,9 +200,17 @@ class ClaimRecord:
     observation_id: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
+    context_kind: str | None = None
+    context_id: str | None = None
     thread_kind: ThreadKind | None = None
     thread_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.context_kind is None and self.thread_kind is not None:
+            object.__setattr__(self, "context_kind", str(self.thread_kind))
+        if self.context_id is None and self.thread_id is not None:
+            object.__setattr__(self, "context_id", str(self.thread_id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +249,47 @@ def github_pr_review_comment_observation_id(repo_id: str, comment_id: str | int)
 
 def github_issue_comment_observation_id(repo_id: str, comment_id: str | int) -> str:
     return f"observation:{ObservationKind.GITHUB_ISSUE_COMMENT.value}:{repo_id}:{comment_id}"
+
+
+def markdown_document_observation_id(
+    repo_id: str,
+    revision_id: str,
+    relative_path: str,
+) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(
+        "|".join((repo_id, revision_id, relative_path)).encode("utf-8")
+    ).hexdigest()
+    return f"observation:{ObservationKind.MARKDOWN_DOCUMENT.value}:{repo_id}:{digest}"
+
+
+def general_observation_id(
+    *,
+    repo_id: str,
+    observation_kind: str | ObservationKind,
+    source_id: str | None = None,
+    context_id: str | None = None,
+    observed_at: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(
+        "|".join(
+            (
+                repo_id,
+                observation_kind_value(observation_kind),
+                source_id or "",
+                context_id or "",
+                observed_at or "",
+                title or "",
+                text or "",
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"observation:{observation_kind_value(observation_kind)}:{repo_id}:{digest}"
 
 
 def evidence_record_id(

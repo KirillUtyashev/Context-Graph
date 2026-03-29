@@ -29,6 +29,12 @@ _VAGUE_MARKERS = (
     "it seems",
     "appears to",
 )
+_REVIEW_FEEDBACK_OBSERVATION_KINDS = frozenset(
+    {
+        ObservationKind.GITHUB_PR_REVIEW.value,
+        ObservationKind.GITHUB_PR_REVIEW_COMMENT.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +160,7 @@ class ClaimBundleValidator:
             "claim_validation",
             {
                 "observation_id": observation.observation_id,
-                "observation_kind": observation.observation_kind.value,
+                "observation_kind": observation.observation_kind,
                 "source_kind": observation.source_kind,
                 "repo_id": observation.repo_id,
                 "extracted_count": result.extracted_count,
@@ -343,7 +349,11 @@ class ClaimBundleValidator:
         claim_kind: str | None,
         assertion_status: str | None,
     ) -> RejectedClaimBundle | None:
-        if not self.registry.claim_kind_allowed(claim_kind or "", observation.source_kind):
+        if not self.registry.claim_kind_allowed(
+            claim_kind or "",
+            observation.source_kind,
+            observation_kind=observation.observation_kind,
+        ):
             return _rejected(
                 candidate,
                 "unsupported_source_kind",
@@ -437,10 +447,10 @@ class ClaimBundleValidator:
         observation: Observation,
         claim_kind: str | None,
     ) -> str | None:
-        if claim_kind in {"review_feedback", "approval", "concern"} or observation.observation_kind in {
-            ObservationKind.GITHUB_PR_REVIEW,
-            ObservationKind.GITHUB_PR_REVIEW_COMMENT,
-        }:
+        if (
+            claim_kind in {"review_feedback", "approval", "concern"}
+            or observation.observation_kind in _REVIEW_FEEDBACK_OBSERVATION_KINDS
+        ):
             return "reviewer_feedback"
         if claim_kind == "requirement":
             return "user_requirement"

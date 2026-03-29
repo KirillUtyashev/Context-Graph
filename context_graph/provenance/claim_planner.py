@@ -10,7 +10,12 @@ import json
 from typing import Any
 
 from context_graph.models import GraphSnapshot
-from context_graph.profiles import ProfileRecord, semantic_claim_profile_from_claim
+from context_graph.profiles import (
+    ProfileRecord,
+    RelationProfileSpec,
+    semantic_claim_profile_from_claim,
+    semantic_relation_profile_from_spec,
+)
 from context_graph.storage.backend import (
     BackendDriver,
     EdgeRecord,
@@ -81,6 +86,10 @@ _RELATION_EDGE_TYPES = {
     "depends_on": "DEPENDS_ON",
     "supports": "SUPPORTS",
 }
+
+
+def _claim_relation_record_id(*, source_claim_id: str, target_claim_id: str, edge_type: str) -> str:
+    return f"claim_relation:{source_claim_id}:{target_claim_id}:{edge_type.lower()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +252,8 @@ class CurrentClaimReader:
                 valid_to=representative.evidence.invalidated_at,
                 invalidated_at=representative.evidence.invalidated_at,
                 observation_id=representative.evidence.observation_id,
+                context_kind=None,
+                context_id=None,
                 metadata={"legacy_backfill": True},
             )
             candidates.append(
@@ -689,6 +700,8 @@ class ClaimMutationPlanner:
                 observation_id=new_claim.observation_id,
                 source_kind=new_claim.source_kind,
                 source_id=new_claim.source_id,
+                context_kind=new_claim.context_kind,
+                context_id=new_claim.context_id,
                 thread_kind=new_claim.thread_kind,
                 thread_id=new_claim.thread_id,
                 metadata=new_claim.metadata,
@@ -787,19 +800,35 @@ class ClaimMutationPlanner:
                 ),
             )
 
+        thread_hybrid_candidates = tuple(score for score in hybrid_candidates if score.same_thread)
+        global_hybrid_candidates = tuple(score for score in hybrid_candidates if not score.same_thread)
         accepted_relations, ranked_candidates = self._resolve_candidate_pass(
             observation=observation,
             new_claim=new_claim,
             about_record_ids=about_record_ids,
             support_texts=new_support_texts,
             candidates=_merge_candidate_scores(
-                hybrid_candidates,
+                thread_hybrid_candidates,
                 thread_candidates,
-                global_candidates,
             ),
-            scope_label="hybrid",
+            scope_label="same_context",
         )
         same_as_candidates = [item for item in accepted_relations if item["resolution_type"] == "same_as"]
+        if not accepted_relations or len(same_as_candidates) > 1:
+            accepted_relations, ranked_candidates = self._resolve_candidate_pass(
+                observation=observation,
+                new_claim=new_claim,
+                about_record_ids=about_record_ids,
+                support_texts=new_support_texts,
+                candidates=_merge_candidate_scores(
+                    global_hybrid_candidates,
+                    global_candidates,
+                ),
+                scope_label="global",
+            )
+            same_as_candidates = [
+                item for item in accepted_relations if item["resolution_type"] == "same_as"
+            ]
         if len(same_as_candidates) == 1:
             matched = next(
                 candidate
@@ -891,6 +920,8 @@ class ClaimMutationPlanner:
                     observation_id=new_claim.observation_id,
                     source_kind=new_claim.source_kind,
                     source_id=new_claim.source_id,
+                    context_kind=new_claim.context_kind,
+                    context_id=new_claim.context_id,
                     thread_kind=new_claim.thread_kind,
                     thread_id=new_claim.thread_id,
                     metadata=new_claim.metadata,
@@ -976,6 +1007,22 @@ class ClaimMutationPlanner:
             )
         else:
             session.discard_current_candidate(claim_to_write.claim_id)
+        relation_profiles = tuple(
+            profile
+            for relation in relation_candidates
+            for profile in (
+                self._build_claim_relation_profile(
+                    repo_id=observation.repo_id,
+                    source_claim_id=claim_to_write.claim_id,
+                    target_claim_id=relation["candidate_claim_id"],
+                    relation_type=relation["resolution_type"],
+                    rationale=relation["rationale"],
+                    confidence=relation["confidence"],
+                    updated_at=observation.observed_at or claim_to_write.latest_observed_at or "",
+                ),
+            )
+            if profile is not None
+        )
         return ClaimMutationPlanResult(
             plan=plan,
             invalidated_count=len(invalidated_claim_ids),
@@ -993,6 +1040,7 @@ class ClaimMutationPlanner:
                     )
                     for claim_id, invalidated_claim in invalidated_claims
                 ),
+                *relation_profiles,
             ),
         )
 
@@ -1034,6 +1082,8 @@ class ClaimMutationPlanner:
             observation_id=claim.observation_id,
             source_kind=claim.source_kind,
             source_id=claim.source_id,
+            context_kind=claim.context_kind,
+            context_id=claim.context_id,
             thread_kind=claim.thread_kind,
             thread_id=claim.thread_id,
             metadata=claim.metadata,
@@ -1066,6 +1116,8 @@ class ClaimMutationPlanner:
             observation_id=observation.observation_id,
             source_kind=observation.source_kind,
             source_id=observation.source_id,
+            context_kind=observation.context_kind,
+            context_id=observation.context_id,
             thread_kind=observation.thread_kind,
             thread_id=observation.thread_id,
             metadata={
@@ -1111,6 +1163,8 @@ class ClaimMutationPlanner:
                     "source_kind": claim.source_kind,
                     "source_id": claim.source_id,
                     "observation_id": claim.observation_id,
+                    "context_kind": claim.context_kind,
+                    "context_id": claim.context_id,
                     "first_observed_at": claim.first_observed_at,
                     "latest_observed_at": claim.latest_observed_at,
                     "ingested_at": claim.ingested_at,
@@ -1160,6 +1214,8 @@ class ClaimMutationPlanner:
                     "source_kind": claim.source_kind,
                     "source_id": claim.source_id,
                     "observation_id": claim.observation_id,
+                    "context_kind": claim.context_kind,
+                    "context_id": claim.context_id,
                     "first_observed_at": claim.first_observed_at,
                     "latest_observed_at": claim.latest_observed_at,
                     "ingested_at": claim.ingested_at,
@@ -1191,7 +1247,11 @@ class ClaimMutationPlanner:
         if edge_type is None:
             return MutationPlan()
         edge = EdgeRecord(
-            record_id=f"claim_relation:{source_claim_id}:{target_claim_id}:{edge_type.lower()}",
+            record_id=_claim_relation_record_id(
+                source_claim_id=source_claim_id,
+                target_claim_id=target_claim_id,
+                edge_type=edge_type,
+            ),
             record_type="claim_relation",
             repo_id=repo_id,
             group_id=repo_id,
@@ -1241,6 +1301,8 @@ class ClaimMutationPlanner:
             observation_id=claim.observation_id,
             source_kind=claim.source_kind,
             source_id=claim.source_id,
+            context_kind=claim.context_kind,
+            context_id=claim.context_id,
             thread_kind=claim.thread_kind,
             thread_id=claim.thread_id,
             metadata=claim.metadata,
@@ -1268,6 +1330,43 @@ class ClaimMutationPlanner:
             about_record_ids=about_record_ids,
             support_texts=support_texts,
             generated_keys=generated_keys,
+        )
+
+    def _build_claim_relation_profile(
+        self,
+        *,
+        repo_id: str,
+        source_claim_id: str,
+        target_claim_id: str,
+        relation_type: str,
+        rationale: str,
+        confidence: str,
+        updated_at: str,
+    ) -> ProfileRecord | None:
+        edge_type = _RELATION_EDGE_TYPES.get(relation_type)
+        if edge_type is None:
+            return None
+        return semantic_relation_profile_from_spec(
+            RelationProfileSpec(
+                repo_id=repo_id,
+                profile_target_id=_claim_relation_record_id(
+                    source_claim_id=source_claim_id,
+                    target_claim_id=target_claim_id,
+                    edge_type=edge_type,
+                ),
+                profile_target_kind="Relation",
+                relation_type=relation_type,
+                source_record_id=source_claim_id,
+                source_record_type="claim",
+                target_record_id=target_claim_id,
+                target_record_type="claim",
+                value_text=rationale,
+                metadata={
+                    "resolution_confidence": confidence,
+                },
+                is_active=True,
+                updated_at=updated_at,
+            )
         )
 
     def _plan_backfill_candidate(self, candidate: CandidateClaimState) -> MutationPlan:
@@ -1533,6 +1632,15 @@ def _parse_persisted_claim_record(row: Mapping[str, Any]) -> CandidateClaimState
         observation_id=_string_or_none(properties.get("observation_id")),
         source_kind=_string_or_none(properties.get("source_kind")),
         source_id=_string_or_none(properties.get("source_id")),
+        context_kind=_string_or_none(properties.get("context_kind"))
+        or _string_or_none(properties.get("thread_kind"))
+        or _derive_thread_kind(_string_or_none(properties.get("source_kind"))),
+        context_id=_string_or_none(properties.get("context_id"))
+        or _string_or_none(properties.get("thread_id"))
+        or _derive_thread_id(
+            source_kind=_string_or_none(properties.get("source_kind")),
+            source_id=_string_or_none(properties.get("source_id")),
+        ),
         thread_kind=_string_or_none(properties.get("thread_kind"))
         or _derive_thread_kind(_string_or_none(properties.get("source_kind"))),
         thread_id=_string_or_none(properties.get("thread_id"))
@@ -1686,16 +1794,15 @@ def _select_candidate_pass(
 
 
 def _same_thread(claim: ClaimRecord, *, observation: Observation) -> bool:
-    claim_thread_kind = claim.thread_kind or _derive_thread_kind(claim.source_kind)
-    claim_thread_id = claim.thread_id or _derive_thread_id(
-        source_kind=claim.source_kind,
-        source_id=claim.source_id,
-    )
+    claim_thread_kind = _claim_context_kind(claim)
+    claim_thread_id = _claim_context_id(claim)
+    observation_thread_kind = _observation_context_kind(observation)
+    observation_thread_id = _observation_context_id(observation)
     return (
-        bool(observation.thread_kind)
-        and bool(observation.thread_id)
-        and claim_thread_kind == observation.thread_kind
-        and claim_thread_id == observation.thread_id
+        bool(observation_thread_kind)
+        and bool(observation_thread_id)
+        and claim_thread_kind == observation_thread_kind
+        and claim_thread_id == observation_thread_id
     )
 
 
@@ -1950,6 +2057,8 @@ def _claim_with_backfill_ingested_at(claim: ClaimRecord) -> ClaimRecord:
         observation_id=claim.observation_id,
         source_kind=claim.source_kind,
         source_id=claim.source_id,
+        context_kind=claim.context_kind,
+        context_id=claim.context_id,
         thread_kind=claim.thread_kind,
         thread_id=claim.thread_id,
         metadata=claim.metadata,
@@ -1972,6 +2081,25 @@ def _derive_thread_id(*, source_kind: str | None, source_id: str | None) -> str 
     if source_kind == "commit" and source_id.startswith("commit:"):
         return source_id.rsplit(":", 1)[-1] or None
     return source_id
+
+
+def _claim_context_kind(claim: ClaimRecord) -> str | None:
+    return claim.context_kind or claim.thread_kind or _derive_thread_kind(claim.source_kind)
+
+
+def _claim_context_id(claim: ClaimRecord) -> str | None:
+    return claim.context_id or claim.thread_id or _derive_thread_id(
+        source_kind=claim.source_kind,
+        source_id=claim.source_id,
+    )
+
+
+def _observation_context_kind(observation: Observation) -> str | None:
+    return observation.context_kind or observation.thread_kind
+
+
+def _observation_context_id(observation: Observation) -> str | None:
+    return observation.context_id or observation.thread_id
 
 
 def _candidate_fact_identifier(candidate: CandidateClaimState) -> str:

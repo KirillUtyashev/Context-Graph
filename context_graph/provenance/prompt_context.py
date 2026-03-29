@@ -31,13 +31,17 @@ def build_prompt_context(
 
 def build_prompt_observation(observation: Observation) -> dict[str, Any]:
     payload = {
-        "source_type": observation.observation_kind.value,
+        "source_type": observation.observation_kind,
         "text": _normalize_text(observation.text),
     }
     if observation.title:
         payload["title"] = _normalize_text(observation.title)
     if observation.observed_at:
         payload["observed_at"] = observation.observed_at
+    if observation.context_kind:
+        payload["context_kind"] = observation.context_kind
+    if observation.context_id:
+        payload["context_id"] = observation.context_id
     return payload
 
 
@@ -49,6 +53,11 @@ def build_prompt_source_context(
     source_context = dict(source_context or {})
     metadata = dict(observation.metadata)
     payload: dict[str, Any] = {}
+    payload["source_kind"] = observation.source_kind
+    if observation.context_kind:
+        payload["context_kind"] = observation.context_kind
+    if observation.context_id:
+        payload["context_id"] = observation.context_id
 
     changed_files = _normalize_changed_files(
         source_context.get("changed_files")
@@ -75,6 +84,14 @@ def build_prompt_source_context(
         payload["issue_number"] = issue_number
         if issue_title:
             payload["issue_title"] = issue_title
+    document_path = _normalize_text(
+        source_context.get("document_path")
+        or metadata.get("document_path")
+        or metadata.get("file_path")
+        or metadata.get("path")
+    )
+    if document_path:
+        payload["document_path"] = document_path
     return payload
 
 
