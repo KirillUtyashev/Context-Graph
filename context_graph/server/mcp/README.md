@@ -12,17 +12,18 @@ This package contains the internal MCP server for `context_graph`. The server us
 | `trace_call_path` | implemented | metadata snapshot |
 | `get_code_snippet` | implemented | metadata snapshot |
 | `get_code_context` | implemented | metadata snapshot |
-| `search_context` | implemented | split node/edge provenance retrieval with optional historical semantic mode |
-| `get_node_neighborhood` | implemented on Neo4j, unsupported on Neptune | exact `node_id`; snapshot-backed for code nodes, graph-backed for provenance nodes |
-| `get_timeline` | implemented on Neo4j, unsupported on Neptune | exact target id with historical provenance assembly |
+| `search_context` | implemented | split claim/observation/code node retrieval plus relation retrieval; Neptune lexical retrieval requires AOSS |
+| `get_node_neighborhood` | implemented | exact `node_id`; snapshot-backed for code nodes, graph-backed for provenance nodes |
+| `get_timeline` | implemented | exact `target_id` with claim-only historical provenance assembly |
 | `record_agent_observation` | implemented | backend driver + metadata store; semantic indexing when available |
 
 Notes:
 
-- `search_context` runs a node pipeline over claims/observations plus a separate relation-profile pipeline, and can include inactive semantic profiles for provenance/history inspection.
+- `search_context` runs a node pipeline over claims, observations, and code plus a separate relation-profile pipeline, and can include inactive semantic profiles for provenance/history inspection.
 - `get_node_neighborhood` intentionally does not support concept anchoring in this phase; callers must pass an exact `node_id`.
+- `get_timeline` intentionally works from an exact graph `target_id` and returns claim and claim-relation events only.
 - `record_agent_observation` persists agent notes/traces as provenance observations and routes extractable kinds through the same observation-ingestion service used by repository ingestion.
-- Unsupported backend paths return typed `status="unsupported"` responses with `capability` and `todo` fields.
+- Neptune provenance retrieval uses backend traversal parity, but lexical `search_context` on Neptune still requires AOSS to be configured.
 
 ## Runtime Model
 
@@ -138,9 +139,4 @@ Included examples:
 - `NAMESPACE_USER_ID`
 - `OPENAI_API_KEY`
 
-## TODO Scaffolds
-
-- hybrid search is implemented at the provenance layer via backend lexical search and semantic profile fusion
-- `TODO(context_graph.backend.traversal.neighborhood)`
-- `TODO(context_graph.backend.timeline)`
-- `TODO(context_graph.backend.artifacts.persistence)`
+Hybrid provenance search is implemented through backend lexical retrieval plus semantic profile fusion.

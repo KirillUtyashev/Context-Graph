@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import fnmatch
 import logging
 import os
@@ -26,7 +27,7 @@ from context_graph.server.mcp.backend_runtime import (
     MetadataSnapshotService,
 )
 from context_graph.server.mcp.config import MCPServerConfig, ServerConfig
-from context_graph.server.mcp.queue import ObservationWriteRequest
+from context_graph.server.mcp.request_types import ObservationWriteRequest
 from context_graph.server.mcp.response_types import (
     CodeGraphSchemaResponse,
     CodeContextResponse,
@@ -88,6 +89,10 @@ backend_runtime: MCPBackendRuntime | None = None
 metadata_snapshot_service: MetadataSnapshotService | None = None
 
 
+def _current_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 CONTEXT_GRAPH_MCP_INSTRUCTIONS = """
 Context Graph exposes a small, opinionated MCP surface for repository analysis.
 
@@ -108,7 +113,7 @@ Implemented backend-native provenance tools:
 Code tools operate on the latest stored GraphSnapshot for a repo_id.
 search_context runs separate node and relation provenance retrieval pipelines, with optional historical semantic retrieval.
 get_node_neighborhood requires an exact node_id and uses deterministic snapshot expansion for code nodes.
-get_timeline is implemented on Neo4j first and returns a typed unsupported response on Neptune.
+get_timeline requires an exact target_id and returns claim-only historical events around that graph anchor.
 """
 
 mcp = FastMCP(
@@ -261,9 +266,9 @@ async def _persist_agent_observation_request(
         "repo_id": request.repo_id,
         "observation_id": planned_observation.observation.observation_id,
         "task_id": request.task_id,
+        "claim_ids": list(apply_result.result.claim_ids),
         "accepted": True,
         "persisted": True,
-        "queue_position": apply_result.operations_applied,
     }
 
 
@@ -573,7 +578,6 @@ async def get_node_neighborhood(
 
 @mcp.tool()
 async def get_timeline(
-    target_kind: str,
     target_id: str,
     repo_id: str | None = None,
     limit: int = 50,
@@ -581,41 +585,16 @@ async def get_timeline(
     """Return a historical provenance timeline around one exact target."""
 
     try:
-        allowed_target_kinds = {
-            "pull_request",
-            "issue",
-            "file",
-            "symbol",
-            "claim_cluster",
-            "topic",
-        }
-        if target_kind not in allowed_target_kinds:
-            return ErrorResponse(
-                error=(
-                    "target_kind must be one of: "
-                    + ", ".join(sorted(allowed_target_kinds))
-                )
-            )
         if limit <= 0:
             return ErrorResponse(error="limit must be a positive integer")
-
-        snapshot = None
-        if target_kind in {"file", "symbol"}:
-            if repo_id is None:
-                return ErrorResponse(
-                    error=f"repo_id is required for exact {target_kind} timelines"
-                )
-            snapshot = await _get_metadata_snapshot(repo_id)
 
         runtime = await _get_backend_runtime()
         driver = await runtime.get_driver()
         return await provenance_tools.get_timeline_async(
             service=provenance_tools.TimelineQueryService(
                 driver=driver,
-                snapshot=snapshot,
             ),
             repo_id=repo_id,
-            target_kind=target_kind,
             target_id=target_id,
             limit=limit,
         )
@@ -663,11 +642,6 @@ async def record_agent_observation(
     observation_text: str,
     observation_kind: str = "agent_note",
     title: str | None = None,
-    source_kind: str = "agent",
-    source_id: str | None = None,
-    context_kind: str | None = None,
-    context_id: str | None = None,
-    observed_at: str | None = None,
     task_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RecordAgentObservationResponse | ErrorResponse:
@@ -684,23 +658,14 @@ async def record_agent_observation(
             observation_text=observation_text,
             observation_kind=observation_kind,
             title=title,
-            source_kind=source_kind,
-            source_id=source_id,
-            context_kind=context_kind,
-            context_id=context_id or task_id,
-            observed_at=observed_at,
+            source_kind="agent",
+            source_id=None,
+            context_kind=None,
+            context_id=task_id,
+            observed_at=_current_timestamp(),
             task_id=task_id,
             metadata=metadata or {},
         )
-        if metadata_snapshot_service is None:
-            result = await runtime.queue_service.enqueue_observation_write(
-                request,
-                write_service=runtime.observation_write_service,
-            )
-            return provenance_tools.record_agent_observation(
-                result=result,
-                task_id=task_id,
-            )
         return await _persist_agent_observation_request(request)
     except Exception as exc:
         logger.error("Error in record_agent_observation: %s", exc)

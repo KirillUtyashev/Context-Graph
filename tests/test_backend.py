@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import io
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -54,6 +56,7 @@ from context_graph.storage.backend import (
     InMemoryProfileVectorStore,
     MetadataStore,
     MutationPlan,
+    MutationApplyResult,
     Neo4jConfig,
     NodeRecord,
     PgVectorProfileVectorStore,
@@ -65,6 +68,7 @@ from context_graph.storage.backend import (
     SearchDocumentRecord,
     SearchMode,
     SearchQuery,
+    TraversalQuery,
     SQLiteMetadataStore,
     NeptuneConfig,
     create_driver,
@@ -72,6 +76,7 @@ from context_graph.storage.backend import (
     create_profile_vector_store,
     create_profile_vector_store_from_metadata,
 )
+from context_graph.storage.backend.sync_bridge import BackendSyncBridge
 from context_graph.storage.backend.neo4j.driver import Neo4jBackendDriver
 from context_graph.storage.backend.neo4j.search import Neo4jSearchOperations
 from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver
@@ -679,6 +684,76 @@ class Neo4jBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["refs"][0]["record_id"], "artifact-1")
         await driver.close()
 
+    async def test_neo4j_traversal_expand_returns_normalized_node_and_edge_hits(self):
+        fake_client = FakeNeo4jClient(
+            responses=[
+                [
+                    {
+                        "record_kind": "node",
+                        "record_id": "claim:2",
+                        "record_type": "claim",
+                        "repo_id": "demo",
+                        "group_id": "main",
+                        "distance": 1,
+                        "relationship_type": None,
+                        "source_record_id": None,
+                        "target_record_id": None,
+                    }
+                ],
+                [
+                    {
+                        "record_kind": "edge",
+                        "record_id": "claim_relation:claim:2:claim:1:contradicts",
+                        "record_type": "claim_relation",
+                        "repo_id": "demo",
+                        "group_id": "main",
+                        "distance": 1,
+                        "relationship_type": "CONTRADICTS",
+                        "source_record_id": "claim:2",
+                        "target_record_id": "claim:1",
+                    }
+                ],
+            ]
+        )
+        with patch(
+            "context_graph.storage.backend.neo4j.driver.AsyncGraphDatabase.driver",
+            return_value=fake_client,
+        ):
+            driver = Neo4jBackendDriver(
+                Neo4jConfig(uri="bolt://localhost:7687", user="neo4j", password="pw")
+            )
+
+        hits = await driver.traversal.expand(
+            TraversalQuery(
+                origin_refs=(
+                    GraphRecordRef(
+                        record_kind=RecordKind.NODE,
+                        record_id="claim:1",
+                        record_type="claim",
+                        repo_id="demo",
+                        group_id="main",
+                    ),
+                ),
+                max_depth=2,
+                edge_types=("CLAIM_RELATION", "contradicts"),
+                direction="inbound",
+                repo_ids=("demo",),
+                group_ids=("main",),
+                limit=10,
+            )
+        )
+
+        self.assertEqual([(hit.ref.record_kind.value, hit.ref.record_id) for hit in hits], [("node", "claim:2"), ("edge", "claim_relation:claim:2:claim:1:contradicts")])
+        self.assertEqual(hits[1].path_metadata["source_record_id"], "claim:2")
+        self.assertEqual(hits[1].path_metadata["target_record_id"], "claim:1")
+        node_query, node_params, _ = fake_client.calls[0]
+        self.assertIn("MATCH path=(origin)<-[rels*1..2]-(neighbor:BackendRecord)", node_query)
+        self.assertEqual(node_params["edge_types"], ["claim_relation", "contradicts"])
+        self.assertEqual(node_params["repo_ids"], ["demo"])
+        self.assertEqual(node_params["group_ids"], ["main"])
+        self.assertFalse(node_params["edge_type_filter_disabled"])
+        await driver.close()
+
     async def test_vector_mode_is_explicitly_unimplemented(self):
         with self.assertRaises(BackendFeatureNotImplementedError):
             await Neo4jSearchOperations(driver=SimpleNamespace(execute_query=None)).search(
@@ -878,6 +953,75 @@ class NeptuneBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("MATCH (n)", payload["openCypherQuery"])
         params = json.loads(payload["parameters"])
         self.assertEqual(params["refs"][0]["record_id"], "artifact-1")
+        await driver.close()
+
+    async def test_neptune_traversal_expand_returns_normalized_node_and_edge_hits(self):
+        fake_graph_client = FakeNeptuneOpenCypherClient(
+            responses=[
+                [
+                    {
+                        "record_kind": "node",
+                        "record_id": "claim:2",
+                        "record_type": "claim",
+                        "repo_id": "demo",
+                        "group_id": "main",
+                        "distance": 1,
+                        "relationship_type": None,
+                        "source_record_id": None,
+                        "target_record_id": None,
+                    }
+                ],
+                [
+                    {
+                        "record_kind": "edge",
+                        "record_id": "claim_relation:claim:2:claim:1:contradicts",
+                        "record_type": "claim_relation",
+                        "repo_id": "demo",
+                        "group_id": "main",
+                        "distance": 1,
+                        "relationship_type": "CONTRADICTS",
+                        "source_record_id": "claim:2",
+                        "target_record_id": "claim:1",
+                    }
+                ],
+            ]
+        )
+        fake_graph = SimpleNamespace(client=fake_graph_client)
+        with (
+            patch.object(NeptuneBackendDriver, "_create_neptune_client", return_value=fake_graph),
+            patch.object(NeptuneBackendDriver, "_create_aoss_client", return_value=None),
+        ):
+            driver = NeptuneBackendDriver(NeptuneConfig(host="neptune-db://example"))
+
+        hits = await driver.traversal.expand(
+            TraversalQuery(
+                origin_refs=(
+                    GraphRecordRef(
+                        record_kind=RecordKind.NODE,
+                        record_id="claim:1",
+                        record_type="claim",
+                        repo_id="demo",
+                        group_id="main",
+                    ),
+                ),
+                max_depth=2,
+                edge_types=("CLAIM_RELATION", "contradicts"),
+                direction="outbound",
+                repo_ids=("demo",),
+                group_ids=("main",),
+                limit=10,
+            )
+        )
+
+        self.assertEqual([(hit.ref.record_kind.value, hit.ref.record_id) for hit in hits], [("node", "claim:2"), ("edge", "claim_relation:claim:2:claim:1:contradicts")])
+        self.assertEqual(hits[1].path_metadata["relationship_type"], "CONTRADICTS")
+        payload = fake_graph_client.calls[0]
+        self.assertIn("MATCH path=(origin)-[rels*1..2]->(neighbor:BackendRecord)", payload["openCypherQuery"])
+        params = json.loads(payload["parameters"])
+        self.assertEqual(params["edge_types"], ["claim_relation", "contradicts"])
+        self.assertEqual(params["repo_ids"], ["demo"])
+        self.assertEqual(params["group_ids"], ["main"])
+        self.assertFalse(params["group_filter_disabled"])
         await driver.close()
 
     async def test_neptune_vector_mode_is_explicitly_unimplemented(self):
@@ -2334,6 +2478,61 @@ class CompatibilityWrapperTests(unittest.TestCase):
         self.assertGreater(indexed, 0)
         self.assertEqual(len(result.hits), 1)
         self.assertEqual(result.profiles[0].profile_id, profile.profile_id)
+
+
+class BackendSyncBridgeTests(unittest.TestCase):
+    def test_bridge_uses_driver_owning_loop_when_present(self):
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        class LoopAwareDriver:
+            def __init__(self, owning_loop):
+                self._context_graph_loop = owning_loop
+                self.health_loop = None
+                self.build_loop = None
+                self.apply_loop = None
+                self.close_loop = None
+                self.mutations = SimpleNamespace(apply=self._apply)
+                self.maintenance = SimpleNamespace(
+                    reset_repo=self._reset_repo,
+                    reset_scope=self._reset_scope,
+                )
+
+            async def health_check(self):
+                self.health_loop = asyncio.get_running_loop()
+
+            async def build_indices(self, delete_existing: bool = False):
+                self.build_loop = asyncio.get_running_loop()
+
+            async def _apply(self, plan):
+                self.apply_loop = asyncio.get_running_loop()
+                return MutationApplyResult(0, 0, 0)
+
+            async def _reset_repo(self, repo_id):
+                return None
+
+            async def _reset_scope(self, request):
+                return None
+
+            async def close(self):
+                self.close_loop = asyncio.get_running_loop()
+
+        try:
+            driver = LoopAwareDriver(loop)
+            bridge = BackendSyncBridge(driver)
+
+            result = bridge.apply(MutationPlan())
+            bridge.close()
+
+            self.assertEqual(result.operations_applied, 0)
+            self.assertIs(driver.health_loop, loop)
+            self.assertIs(driver.build_loop, loop)
+            self.assertIs(driver.apply_loop, loop)
+            self.assertIs(driver.close_loop, loop)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=2)
 
     def test_profile_services_can_filter_to_relation_profiles(self):
         metadata = LegacyInMemoryMetadataStore()

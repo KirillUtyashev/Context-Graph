@@ -54,6 +54,7 @@ class FactInvalidationPlanResult:
     plan: MutationPlan
     invalidated_count: int = 0
     invalidated_claim_ids: tuple[str, ...] = ()
+    claim_ids: tuple[str, ...] = ()
     profiles: tuple[ProfileRecord, ...] = ()
     profile_deactivations: tuple[ProfileDeactivation, ...] = ()
 
@@ -83,7 +84,10 @@ class CurrentEvidenceReader:
             about_record_ids=list(ordered_about_record_ids),
         )
         try:
-            rows = run_backend_coroutine_sync(query_coro)
+            rows = run_backend_coroutine_sync(
+                query_coro,
+                loop=getattr(self.backend_driver, "_context_graph_loop", None),
+            )
         except Exception:
             _close_unstarted_coroutine(query_coro)
             return ()
@@ -164,6 +168,7 @@ class EvidenceInvalidationPlanner:
             plan=result.plan,
             invalidated_count=result.invalidated_count,
             invalidated_claim_ids=result.invalidated_claim_ids,
+            claim_ids=result.claim_ids,
             profiles=result.profiles,
             profile_deactivations=result.profile_deactivations,
         )

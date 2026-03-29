@@ -20,46 +20,29 @@ from context_graph.server.mcp.response_types import (
     NeighborhoodEdge,
     NeighborhoodNode,
     NodeNeighborhoodResponse,
-    RecordAgentObservationResponse,
     SearchContextResponse,
     TimelineEvent,
     TimelineResponse,
 )
-from context_graph.server.mcp.queue import ObservationWriteResult
 from context_graph.storage.backend import (
     BackendDriver,
-    BackendProvider,
     GraphRecordRef,
     RecordKind,
     SearchMode,
     SearchQuery,
+    TraversalQuery,
 )
 
 IMPLEMENTED_STATUS = "implemented"
-SCAFFOLD_STATUS = "scaffold"
 
-SEARCH_CONTEXT_SOURCES = ("claims", "observations", "relations", "artifacts", "code")
+SEARCH_CONTEXT_SOURCES = ("claims", "observations", "relations", "code")
 SOURCE_RECORD_TYPES: dict[str, tuple[str, ...]] = {
     "claims": ("claim",),
     "observations": ("observation", "evidence_record"),
     "relations": ("claim_relation",),
-    "artifacts": (
-        "github_pull_request",
-        "github_issue",
-        "github_pull_request_review",
-        "github_pull_request_review_comment",
-        "github_issue_comment",
-        "github_git_hub_timeline_event",
-    ),
     "code": ("code_node", "project", "commit"),
 }
-
-NEIGHBORHOOD_CAPABILITY = "context_graph.backend.traversal.neighborhood"
-NEIGHBORHOOD_TODO = "TODO(context_graph.backend.traversal.neighborhood)"
-TIMELINE_CAPABILITY = "context_graph.backend.timeline"
-TIMELINE_TODO = "TODO(context_graph.backend.timeline)"
-OBSERVATION_WRITE_CAPABILITY = "context_graph.backend.ingestion.observation_write"
-OBSERVATION_WRITE_TODO = "TODO(context_graph.backend.ingestion.observation_write)"
+PROVENANCE_TRAVERSAL_LIMIT = 200
 
 LEXICAL_CHANNEL = "lexical"
 SEMANTIC_CLAIM_CHANNEL = "semantic_claim"
@@ -88,6 +71,7 @@ class HybridContextEntry:
     matched_profile_key_text: str | None = None
     matched_profile_key_origin: str | None = None
     semantic_profile_kind: str | None = None
+    matched_lexical_summary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +94,7 @@ class RelationContextEntry:
     target_record_id: str | None = None
     target_record_type: str | None = None
     observed_at: str | None = None
+    inactive_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -122,6 +107,14 @@ class _HybridContextAggregate:
     matched_profile_key_text: str | None = None
     matched_profile_key_origin: str | None = None
     semantic_profile_kind: str | None = None
+    matched_lexical_summary: str | None = None
+
+
+@dataclass(slots=True)
+class _LexicalNodeCandidate:
+    record: dict[str, Any]
+    raw_score: float
+    matched_lexical_summary: str | None = None
 
 
 class HybridContextSearchService:
@@ -215,14 +208,15 @@ class HybridContextSearchService:
 
         aggregates: dict[tuple[str, str], _HybridContextAggregate] = {}
 
-        for rank, (raw_score, record) in enumerate(lexical_records, start=1):
+        for rank, lexical_hit in enumerate(lexical_records, start=1):
             self._apply_channel_contribution(
                 aggregates=aggregates,
-                identity=_record_identity(record),
-                record=record,
+                identity=_record_identity(lexical_hit.record),
+                record=lexical_hit.record,
                 channel=LEXICAL_CHANNEL,
-                raw_score=raw_score,
+                raw_score=lexical_hit.raw_score,
                 rank=rank,
+                matched_lexical_summary=lexical_hit.matched_lexical_summary,
             )
 
         for channel, hits in (
@@ -264,6 +258,7 @@ class HybridContextSearchService:
                 matched_profile_key_text=entry.matched_profile_key_text,
                 matched_profile_key_origin=entry.matched_profile_key_origin,
                 semantic_profile_kind=entry.semantic_profile_kind,
+                matched_lexical_summary=entry.matched_lexical_summary,
             )
             for entry in ordered[:limit]
         )
@@ -280,6 +275,7 @@ class HybridContextSearchService:
         matched_profile_key_text: str | None = None,
         matched_profile_key_origin: str | None = None,
         semantic_profile_kind: str | None = None,
+        matched_lexical_summary: str | None = None,
     ) -> None:
         entry = aggregates.get(identity)
         if entry is None:
@@ -291,6 +287,8 @@ class HybridContextSearchService:
         entry.score += HYBRID_CHANNEL_WEIGHTS[channel] / (HYBRID_RRF_K + rank)
         if channel == LEXICAL_CHANNEL:
             entry.lexical_score = raw_score if entry.lexical_score is None else max(entry.lexical_score, raw_score)
+            if matched_lexical_summary and entry.matched_lexical_summary is None:
+                entry.matched_lexical_summary = matched_lexical_summary
         else:
             previous_semantic_score = entry.semantic_score
             entry.semantic_score = raw_score if entry.semantic_score is None else max(entry.semantic_score, raw_score)
@@ -326,7 +324,7 @@ class HybridContextSearchService:
         repo_id: str,
         group_id: str | None,
         records: Sequence[tuple[float, dict[str, Any]]],
-    ) -> tuple[tuple[float, dict[str, Any]], ...]:
+    ) -> tuple[_LexicalNodeCandidate, ...]:
         observation_refs: list[GraphRecordRef] = []
         seen_observation_ids: set[str] = set()
         for _, record in records:
@@ -346,11 +344,32 @@ class HybridContextSearchService:
                 )
             )
         observation_records = await self._fetch_records_async(observation_refs)
-        surfaced: list[tuple[float, dict[str, Any]]] = []
+        surfaced: list[_LexicalNodeCandidate] = []
+        surfaced_by_identity: dict[tuple[str, str], _LexicalNodeCandidate] = {}
         for raw_score, record in records:
-            observation_id = _record_observation_id(record)
-            surfaced_record = observation_records.get(observation_id, record) if observation_id else record
-            surfaced.append((raw_score, surfaced_record))
+            record_type = _normalize_text(record.get("record_type"))
+            matched_lexical_summary: str | None = None
+            if record_type == "evidence_record":
+                observation_id = _record_observation_id(record)
+                surfaced_record = observation_records.get(observation_id, record) if observation_id else record
+                matched_lexical_summary = _matched_lexical_summary(record)
+            else:
+                surfaced_record = record
+            identity = _record_identity(surfaced_record)
+            existing = surfaced_by_identity.get(identity)
+            if existing is None:
+                candidate = _LexicalNodeCandidate(
+                    record=surfaced_record,
+                    raw_score=raw_score,
+                    matched_lexical_summary=matched_lexical_summary,
+                )
+                surfaced_by_identity[identity] = candidate
+                surfaced.append(candidate)
+                continue
+            if _prefer_record(candidate=surfaced_record, current=existing.record):
+                existing.record = surfaced_record
+            if existing.matched_lexical_summary is None and matched_lexical_summary:
+                existing.matched_lexical_summary = matched_lexical_summary
         return tuple(surfaced)
 
     def _semantic_profile_record(
@@ -491,6 +510,7 @@ class RelationContextSearchService:
                     "target_record_id": _normalize_text(record.get("target_record_id")),
                     "target_record_type": "claim",
                     "observed_at": _relation_observed_at_from_record(record),
+                    "inactive_at": _relation_record_inactive_at(record),
                 },
             )
             aggregate["score"] += HYBRID_CHANNEL_WEIGHTS[LEXICAL_CHANNEL] / (HYBRID_RRF_K + rank)
@@ -544,6 +564,12 @@ class RelationContextSearchService:
                         dict(hit.get("metadata") or {}).get("observed_at"),
                         dict(hit.get("metadata") or {}).get("updated_at"),
                     ),
+                    "inactive_at": _first_text(
+                        dict(hit.get("metadata") or {}).get("deactivated_at"),
+                        dict(hit.get("metadata") or {}).get("valid_to"),
+                    )
+                    if not _coerce_bool(hit.get("is_active"), default=True)
+                    else None,
                 },
             )
             aggregate["score"] += HYBRID_CHANNEL_WEIGHTS[SEMANTIC_RELATION_CHANNEL] / (HYBRID_RRF_K + rank)
@@ -564,6 +590,14 @@ class RelationContextSearchService:
             aggregate["observed_at"] = aggregate["observed_at"] or _first_text(
                 dict(hit.get("metadata") or {}).get("observed_at"),
                 dict(hit.get("metadata") or {}).get("updated_at"),
+            )
+            aggregate["inactive_at"] = aggregate["inactive_at"] or (
+                _first_text(
+                    dict(hit.get("metadata") or {}).get("deactivated_at"),
+                    dict(hit.get("metadata") or {}).get("valid_to"),
+                )
+                if not _coerce_bool(hit.get("is_active"), default=True)
+                else None
             )
             if SEMANTIC_RELATION_CHANNEL not in aggregate["retrieval_channels"]:
                 aggregate["retrieval_channels"].append(SEMANTIC_RELATION_CHANNEL)
@@ -586,6 +620,7 @@ class RelationContextSearchService:
                     target_record_id=aggregate["target_record_id"],
                     target_record_type=aggregate["target_record_type"],
                     observed_at=aggregate["observed_at"],
+                    inactive_at=aggregate["inactive_at"],
                 )
                 for aggregate in aggregates.values()
             ),
@@ -654,22 +689,10 @@ class NeighborhoodQueryService:
                 edge_types=edge_types,
             )
 
-        if self.driver.provider is not BackendProvider.NEO4J:
-            return _unsupported_tool_response(
-                response_type=NodeNeighborhoodResponse,
-                message="get_node_neighborhood currently requires the Neo4j backend for provenance nodes.",
-                capability=NEIGHBORHOOD_CAPABILITY,
-                todo=NEIGHBORHOOD_TODO,
-                repo_id=repo_id,
-                center_record_id=node_id,
-                concept=None,
-                nodes=[],
-                edges=[],
-            )
-
-        center_record, node_records, edge_records = await _neo4j_raw_neighborhood_async(
+        center_record, node_records, edge_records = await _expand_backend_neighborhood_async(
             driver=self.driver,
             node_id=node_id,
+            repo_id=repo_id,
             hops=hops,
             edge_types=edge_types,
         )
@@ -697,7 +720,6 @@ class NeighborhoodQueryService:
             message="Expanded the exact node neighborhood from the indexed graph.",
             repo_id=repo_id,
             center_record_id=node_id,
-            concept=None,
             nodes=list(nodes),
             edges=list(edges),
         )
@@ -756,6 +778,7 @@ class NeighborhoodQueryService:
                     display_name=node.qualified_name or node.name,
                     summary=node.file_path or None,
                     observed_at=None,
+                    qualified_name=node.qualified_name,
                 )
                 for node_id_key, distance in distances.items()
                 if (node := node_map.get(node_id_key)) is not None and distance <= hops
@@ -779,7 +802,6 @@ class NeighborhoodQueryService:
             message="Expanded the exact code-node neighborhood from the indexed snapshot.",
             repo_id=repo_id,
             center_record_id=center.node_id,
-            concept=None,
             nodes=list(nodes),
             edges=list(edges),
         )
@@ -801,14 +823,12 @@ class TimelineQueryService:
         self,
         *,
         repo_id: str | None,
-        target_kind: str,
         target_id: str,
         limit: int = 50,
     ) -> TimelineResponse:
         return _run_async(
             self.get_timeline_async(
                 repo_id=repo_id,
-                target_kind=target_kind,
                 target_id=target_id,
                 limit=limit,
             )
@@ -818,7 +838,6 @@ class TimelineQueryService:
         self,
         *,
         repo_id: str | None,
-        target_kind: str,
         target_id: str,
         limit: int = 50,
     ) -> TimelineResponse:
@@ -826,34 +845,10 @@ class TimelineQueryService:
             raise ValueError("limit must be a positive integer")
         if self.driver is None:
             raise RuntimeError("backend driver is required for timeline queries")
-        if self.driver.provider is not BackendProvider.NEO4J:
-            return _unsupported_tool_response(
-                response_type=TimelineResponse,
-                message="get_timeline currently requires the Neo4j backend.",
-                capability=TIMELINE_CAPABILITY,
-                todo=TIMELINE_TODO,
-                repo_id=repo_id,
-                target_kind=target_kind,
-                target_id=target_id,
-                events=[],
-            )
-
-        anchor_id = target_id
-        if target_kind in {"file", "symbol"}:
-            if self.snapshot is None:
-                raise ValueError(
-                    f"repo_id with an indexed snapshot is required for {target_kind} timelines"
-                )
-            primary = _resolve_primary_node(
-                self.snapshot,
-                target=target_id,
-                target_kind=target_kind,
-            )
-            anchor_id = primary.node_id
-
-        center_record, node_records, edge_records = await _neo4j_raw_neighborhood_async(
+        center_record, node_records, edge_records = await _expand_backend_neighborhood_async(
             driver=self.driver,
-            node_id=anchor_id,
+            node_id=target_id,
+            repo_id=repo_id,
             hops=2,
             edge_types=None,
         )
@@ -867,7 +862,6 @@ class TimelineQueryService:
             status=IMPLEMENTED_STATUS,
             message="Built a historical provenance timeline around the exact target.",
             repo_id=repo_id,
-            target_kind=target_kind,
             target_id=target_id,
             events=events,
         )
@@ -918,8 +912,6 @@ async def search_context_async(
             message="No indexed record families are mapped to the requested sources.",
             repo_id=repo_id,
             query=query,
-            group_id=group_id,
-            requested_sources=normalized_sources,
             hits=[],
         )
 
@@ -986,8 +978,6 @@ async def search_context_async(
         message=message,
         repo_id=repo_id,
         query=query,
-        group_id=group_id,
-        requested_sources=normalized_sources,
         hits=hits,
     )
 
@@ -1028,13 +1018,11 @@ def get_timeline(
     *,
     service: TimelineQueryService,
     repo_id: str | None,
-    target_kind: str,
     target_id: str,
     limit: int,
 ) -> TimelineResponse:
     return service.get_timeline(
         repo_id=repo_id,
-        target_kind=target_kind,
         target_id=target_id,
         limit=limit,
     )
@@ -1044,13 +1032,11 @@ async def get_timeline_async(
     *,
     service: TimelineQueryService,
     repo_id: str | None,
-    target_kind: str,
     target_id: str,
     limit: int,
 ) -> TimelineResponse:
     return await service.get_timeline_async(
         repo_id=repo_id,
-        target_kind=target_kind,
         target_id=target_id,
         limit=limit,
     )
@@ -1090,53 +1076,27 @@ def get_code_context(
         snippets=snippets,
     )
 
-
-def record_agent_observation(
-    *,
-    result: ObservationWriteResult,
-    task_id: str | None,
-) -> RecordAgentObservationResponse:
-    response: RecordAgentObservationResponse = {
-        "status": IMPLEMENTED_STATUS if result.persisted else SCAFFOLD_STATUS,
-        "message": result.message,
-        "capability": result.capability,
-        "repo_id": result.repo_id,
-        "observation_id": result.observation_id,
-        "task_id": task_id,
-        "accepted": result.accepted,
-        "persisted": result.persisted,
-        "queue_position": result.queue_position,
-    }
-    if result.todo:
-        response["todo"] = result.todo
-    return response
-
-
 def _node_hit_payload(entry: HybridContextEntry) -> dict[str, Any]:
     record_type = _normalize_text(entry.record.get("record_type"))
-    return {
+    payload: dict[str, Any] = {
         "hit_kind": "node",
         "record_id": _normalize_text(entry.record.get("record_id")),
         "record_type": record_type,
         "title": _record_title(entry.record),
-        "summary": _record_summary(entry.record),
-        "score": entry.score,
-        "lexical_score": entry.lexical_score,
-        "semantic_score": entry.semantic_score,
+        "summary": _truncate(entry.matched_lexical_summary, limit=240)
+        if entry.matched_lexical_summary
+        else _record_summary(entry.record),
         "is_active": _record_is_active(entry.record),
         "observed_at": _record_observed_at(entry.record),
-        "source": _source_for_record_type(record_type),
-        "file_path": _record_file_path(entry.record),
-        "relation_type": None,
-        "source_record_id": None,
-        "source_record_type": None,
-        "target_record_id": None,
-        "target_record_type": None,
-        "retrieval_channels": list(entry.retrieval_channels),
-        "matched_profile_key_text": entry.matched_profile_key_text,
-        "matched_profile_key_origin": entry.matched_profile_key_origin,
-        "semantic_profile_kind": entry.semantic_profile_kind,
+        "inactive_at": _record_inactive_at(entry.record),
     }
+    file_path = _record_file_path(entry.record)
+    if file_path:
+        payload["file_path"] = file_path
+    qualified_name = _record_qualified_name(entry.record)
+    if qualified_name:
+        payload["qualified_name"] = qualified_name
+    return payload
 
 
 def _relation_type_from_record(record: Mapping[str, Any]) -> str | None:
@@ -1162,7 +1122,6 @@ def _relation_observed_at_from_record(record: Mapping[str, Any]) -> str | None:
     properties = dict(record.get("properties") or {})
     return _first_text(
         properties.get("observed_at"),
-        properties.get("deactivated_at"),
         properties.get("updated_at"),
         properties.get("created_at"),
     )
@@ -1173,29 +1132,29 @@ def _relation_record_is_active(record: Mapping[str, Any]) -> bool:
     return _coerce_bool(properties.get("is_active"), default=True)
 
 
+def _relation_record_inactive_at(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    if _relation_record_is_active(record):
+        return None
+    return _first_text(
+        properties.get("deactivated_at"),
+        properties.get("valid_to"),
+    )
+
+
 def _relation_hit_payload(entry: RelationContextEntry) -> dict[str, Any]:
     return {
         "hit_kind": "relation",
         "record_id": entry.record_id,
-        "record_type": "relation",
-        "title": _normalize_text(entry.relation_type),
         "summary": _truncate(entry.value_text, limit=240),
-        "score": entry.score,
-        "lexical_score": entry.lexical_score,
-        "semantic_score": entry.semantic_score,
         "is_active": bool(entry.is_active),
         "observed_at": entry.observed_at,
-        "source": "relations",
-        "file_path": None,
+        "inactive_at": entry.inactive_at,
         "relation_type": entry.relation_type,
         "source_record_id": entry.source_record_id,
         "source_record_type": entry.source_record_type,
         "target_record_id": entry.target_record_id,
         "target_record_type": entry.target_record_type,
-        "retrieval_channels": list(entry.retrieval_channels),
-        "matched_profile_key_text": entry.matched_profile_key_text,
-        "matched_profile_key_origin": entry.matched_profile_key_origin,
-        "semantic_profile_kind": entry.semantic_profile_kind,
     }
 
 
@@ -1284,81 +1243,64 @@ async def _fetch_exact_node_record_async(
     return dict(records[0])
 
 
-async def _neo4j_raw_neighborhood_async(
+async def _expand_backend_neighborhood_async(
     *,
     driver: BackendDriver,
     node_id: str,
+    repo_id: str | None,
     hops: int,
     edge_types: Sequence[str] | None,
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
-    center_record = await _fetch_exact_node_record_async(driver=driver, node_id=node_id, repo_id=None)
-    query = """
-MATCH (origin:BackendRecord {record_id: $node_id})
-CALL {
-  WITH origin
-  OPTIONAL MATCH path=(origin)-[rels*1..$max_depth]-(neighbor:BackendRecord)
-  WHERE path IS NULL
-     OR size($edge_types) = 0
-     OR all(rel IN rels WHERE type(rel) IN $edge_types OR coalesce(rel.record_type, '') IN $edge_types)
-  WITH collect(path) AS paths
-  UNWIND paths AS path
-  UNWIND CASE WHEN path IS NULL THEN [] ELSE nodes(path) END AS node
-  RETURN collect(DISTINCT {
-    record_id: node.record_id,
-    record_type: coalesce(node.record_type, head(labels(node))),
-    properties: properties(node)
-  }) AS nodes
-}
-CALL {
-  WITH origin
-  OPTIONAL MATCH path=(origin)-[rels*1..$max_depth]-(neighbor:BackendRecord)
-  WHERE path IS NULL
-     OR size($edge_types) = 0
-     OR all(rel IN rels WHERE type(rel) IN $edge_types OR coalesce(rel.record_type, '') IN $edge_types)
-  WITH collect(path) AS paths
-  UNWIND paths AS path
-  UNWIND CASE WHEN path IS NULL THEN [] ELSE relationships(path) END AS rel
-  WITH DISTINCT rel
-  MATCH (source:BackendRecord)-[rel]->(target:BackendRecord)
-  RETURN collect({
-    record_id: rel.record_id,
-    record_type: coalesce(rel.record_type, type(rel)),
-    relationship_type: type(rel),
-    source_record_id: source.record_id,
-    target_record_id: target.record_id,
-    properties: properties(rel)
-  }) AS edges
-}
-RETURN nodes, edges
-"""
-    records = await driver.execute_query(
-        query,
-        node_id=node_id,
-        max_depth=hops,
-        edge_types=[
-            normalized
-            for normalized in (
-                _normalize_text(edge_type)
-                for edge_type in (edge_types or ())
+    center_record = await _fetch_exact_node_record_async(driver=driver, node_id=node_id, repo_id=repo_id)
+    effective_repo_id = repo_id or _normalize_text(center_record.get("repo_id")) or None
+    effective_group_id = _normalize_text(center_record.get("group_id")) or None
+    traversal_hits = await driver.traversal.expand(
+        TraversalQuery(
+            origin_refs=(
+                GraphRecordRef(
+                    record_kind=RecordKind.NODE,
+                    record_id=node_id,
+                    record_type=_normalize_text(center_record.get("record_type")) or "",
+                    repo_id=effective_repo_id,
+                    group_id=effective_group_id,
+                ),
+            ),
+            max_depth=max(1, int(hops)),
+            edge_types=tuple(
+                normalized
+                for normalized in (
+                    _normalize_text(edge_type)
+                    for edge_type in (edge_types or ())
+                )
+                if normalized
             )
-            if normalized
-        ],
+            or None,
+            direction="both",
+            repo_ids=(effective_repo_id,) if effective_repo_id else None,
+            group_ids=(effective_group_id,) if effective_group_id else None,
+            limit=PROVENANCE_TRAVERSAL_LIMIT,
+        )
     )
-    if not records:
-        return center_record, (), ()
+    node_refs: list[GraphRecordRef] = []
+    edge_refs: list[GraphRecordRef] = []
+    seen_node_ids: set[str] = set()
+    seen_edge_ids: set[str] = set()
+    for hit in traversal_hits:
+        if hit.ref.record_kind is RecordKind.NODE:
+            if hit.ref.record_id == node_id or hit.ref.record_id in seen_node_ids:
+                continue
+            seen_node_ids.add(hit.ref.record_id)
+            node_refs.append(hit.ref)
+            continue
+        if hit.ref.record_kind is RecordKind.EDGE and hit.ref.record_id not in seen_edge_ids:
+            seen_edge_ids.add(hit.ref.record_id)
+            edge_refs.append(hit.ref)
 
-    row = dict(records[0])
-    node_records = tuple(
-        dict(record)
-        for record in row.get("nodes") or ()
-        if isinstance(record, Mapping) and _normalize_text(record.get("record_id")) not in {None, node_id}
+    node_records = tuple(await driver.search.fetch(node_refs)) if node_refs else ()
+    edge_records = tuple(await driver.search.fetch(edge_refs)) if edge_refs else ()
+    return center_record, tuple(dict(record) for record in node_records), tuple(
+        dict(record) for record in edge_records
     )
-    edge_records = tuple(
-        dict(record)
-        for record in row.get("edges") or ()
-        if isinstance(record, Mapping) and _normalize_text(record.get("record_id"))
-    )
-    return center_record, node_records, edge_records
 
 
 def _normalize_sources(sources: list[str]) -> list[str]:
@@ -1434,9 +1376,32 @@ def _record_summary(record: dict[str, Any]) -> str | None:
     )
 
 
+def _matched_lexical_summary(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    return _truncate(
+        _first_text(
+            properties.get("quote_text"),
+            properties.get("summary_text"),
+            properties.get("text"),
+        ),
+        limit=240,
+    )
+
+
 def _record_file_path(record: dict[str, Any]) -> str | None:
     properties = dict(record.get("properties") or {})
     return _normalize_text(properties.get("file_path"))
+
+
+def _record_qualified_name(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    qualified_name = _normalize_text(properties.get("qualified_name"))
+    if qualified_name:
+        return qualified_name
+    record_type = _normalize_text(record.get("record_type"))
+    if record_type in {"code_node", "project", "file", "symbol"}:
+        return _normalize_text(properties.get("title"))
+    return None
 
 
 def _record_observed_at(record: dict[str, Any]) -> str | None:
@@ -1449,6 +1414,17 @@ def _record_observed_at(record: dict[str, Any]) -> str | None:
         properties.get("authored_at"),
         properties.get("updated_at"),
         properties.get("created_at"),
+    )
+
+
+def _record_inactive_at(record: Mapping[str, Any]) -> str | None:
+    properties = dict(record.get("properties") or {})
+    if _record_is_active(record):
+        return None
+    return _first_text(
+        properties.get("valid_to"),
+        properties.get("deactivated_at"),
+        properties.get("invalidated_at"),
     )
 
 
@@ -1514,17 +1490,6 @@ def _fallback_record_from_profile_hit(profile_hit: Mapping[str, Any]) -> dict[st
         "record_type": record_type,
         "properties": properties,
     }
-
-def _unsupported_tool_response(*, response_type: Any, message: str, capability: str, todo: str, **payload: Any) -> Any:
-    return response_type(
-        status="unsupported",
-        message=message,
-        capability=capability,
-        todo=todo,
-        **payload,
-    )
-
-
 def _fetch_exact_node_record(
     *,
     driver: BackendDriver,
@@ -1539,32 +1504,18 @@ def _fetch_exact_node_record(
         )
     )
 
-
-def _neo4j_raw_neighborhood(
-    *,
-    driver: BackendDriver,
-    node_id: str,
-    hops: int,
-    edge_types: Sequence[str] | None,
-) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
-    return _run_async(
-        _neo4j_raw_neighborhood_async(
-            driver=driver,
-            node_id=node_id,
-            hops=hops,
-            edge_types=edge_types,
-        )
-    )
-
-
 def _neighborhood_node_payload(record: Mapping[str, Any]) -> NeighborhoodNode:
-    return NeighborhoodNode(
+    payload = NeighborhoodNode(
         record_id=_normalize_text(record.get("record_id")) or "",
         record_type=_normalize_text(record.get("record_type")) or "unknown",
         display_name=_record_title(dict(record)),
         summary=_record_summary(dict(record)),
         observed_at=_record_observed_at(dict(record)),
     )
+    qualified_name = _record_qualified_name(record)
+    if qualified_name:
+        payload["qualified_name"] = qualified_name
+    return payload
 
 
 def _neighborhood_edge_payload(record: Mapping[str, Any]) -> NeighborhoodEdge:
@@ -1594,7 +1545,7 @@ def _timeline_events_from_records(
 
     for record in (center_record, *node_records):
         record_type = _normalize_text(record.get("record_type"))
-        if record_type not in {"claim", "observation", "evidence_record", "github_pull_request", "github_issue"}:
+        if record_type != "claim":
             continue
         record_id = _normalize_text(record.get("record_id"))
         observed_at = _record_observed_at(dict(record))

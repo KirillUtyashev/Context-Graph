@@ -22,15 +22,22 @@ class BackendSyncBridge:
         self.driver = driver
         self._prepared_for_write = False
 
+    def _driver_loop(self) -> asyncio.AbstractEventLoop | None:
+        loop = getattr(self.driver, "_context_graph_loop", None)
+        return loop if isinstance(loop, asyncio.AbstractEventLoop) else None
+
     def health_check(self) -> None:
         """Validate that the backend is reachable."""
 
-        _run_coroutine_sync(self.driver.health_check())
+        _run_coroutine_sync(self.driver.health_check(), loop=self._driver_loop())
 
     def build_indices(self, *, delete_existing: bool = False) -> None:
         """Build any provider indices needed for writes and lexical search."""
 
-        _run_coroutine_sync(self.driver.build_indices(delete_existing=delete_existing))
+        _run_coroutine_sync(
+            self.driver.build_indices(delete_existing=delete_existing),
+            loop=self._driver_loop(),
+        )
 
     def ensure_write_ready(self) -> None:
         """Run health checks and bootstrap indices once per bridge instance."""
@@ -45,24 +52,30 @@ class BackendSyncBridge:
         """Apply a typed mutation plan synchronously."""
 
         self.ensure_write_ready()
-        return _run_coroutine_sync(self.driver.mutations.apply(plan))
+        return _run_coroutine_sync(self.driver.mutations.apply(plan), loop=self._driver_loop())
 
     def reset_repo(self, repo_id: str) -> RepoResetResult:
         """Delete one repository's graph/search state synchronously."""
 
         self.ensure_write_ready()
-        return _run_coroutine_sync(self.driver.maintenance.reset_repo(repo_id))
+        return _run_coroutine_sync(
+            self.driver.maintenance.reset_repo(repo_id),
+            loop=self._driver_loop(),
+        )
 
     def reset_scope(self, request: ScopeResetRequest) -> ScopeResetResult:
         """Delete one scoped subset of graph/search state synchronously."""
 
         self.ensure_write_ready()
-        return _run_coroutine_sync(self.driver.maintenance.reset_scope(request))
+        return _run_coroutine_sync(
+            self.driver.maintenance.reset_scope(request),
+            loop=self._driver_loop(),
+        )
 
     def close(self) -> None:
         """Close the underlying async backend driver."""
 
-        _run_coroutine_sync(self.driver.close())
+        _run_coroutine_sync(self.driver.close(), loop=self._driver_loop())
 
 
 class _PersistentLoop:
@@ -90,20 +103,22 @@ class _PersistentLoop:
             self._thread = thread
             return loop
 
-    def run(self, coro: Any) -> Any:
-        loop = self._ensure_running()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    def run(self, coro: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> Any:
+        target_loop = loop if loop is not None else self._ensure_running()
+        if not target_loop.is_running():
+            raise RuntimeError("target event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, target_loop)
         return future.result()
 
 
 _persistent_loop = _PersistentLoop()
 
 
-def _run_coroutine_sync(coro: Any) -> Any:
-    return _persistent_loop.run(coro)
+def _run_coroutine_sync(coro: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> Any:
+    return _persistent_loop.run(coro, loop=loop)
 
 
-def run_backend_coroutine_sync(coro: Any) -> Any:
+def run_backend_coroutine_sync(coro: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> Any:
     """Public helper for sync callers that must share the backend event loop."""
 
-    return _run_coroutine_sync(coro)
+    return _run_coroutine_sync(coro, loop=loop)

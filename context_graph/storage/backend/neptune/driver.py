@@ -83,7 +83,7 @@ class NeptuneBackendDriver(BackendDriver):
         self._search = NeptuneSearchOperations(self)
         self._mutations = NeptuneMutationOperations(self)
         self._maintenance = NeptuneMaintenanceOperations(self)
-        self._traversal = NeptuneTraversalOperations()
+        self._traversal = NeptuneTraversalOperations(self)
 
     @property
     def search(self) -> NeptuneSearchOperations:

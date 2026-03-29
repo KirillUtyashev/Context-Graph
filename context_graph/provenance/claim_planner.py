@@ -105,6 +105,7 @@ class ClaimMutationPlanResult:
     plan: MutationPlan
     invalidated_count: int = 0
     invalidated_claim_ids: tuple[str, ...] = ()
+    claim_ids: tuple[str, ...] = ()
     profiles: tuple[ProfileRecord, ...] = ()
     profile_deactivations: tuple[ProfileDeactivation, ...] = ()
 
@@ -172,7 +173,10 @@ class CurrentClaimReader:
             repo_id=repo_id,
         )
         try:
-            rows = run_backend_coroutine_sync(query_coro)
+            rows = run_backend_coroutine_sync(
+                query_coro,
+                loop=getattr(self.backend_driver, "_context_graph_loop", None),
+            )
         except Exception:
             _close_unstarted_coroutine(query_coro)
             return ()
@@ -196,7 +200,10 @@ class CurrentClaimReader:
             repo_id=repo_id,
         )
         try:
-            rows = run_backend_coroutine_sync(query_coro)
+            rows = run_backend_coroutine_sync(
+                query_coro,
+                loop=getattr(self.backend_driver, "_context_graph_loop", None),
+            )
         except Exception:
             _close_unstarted_coroutine(query_coro)
             return ()
@@ -484,7 +491,10 @@ class ClaimResolutionCandidateRetriever:
                 )
             )
             try:
-                lexical_hits = run_backend_coroutine_sync(search_coro)
+                lexical_hits = run_backend_coroutine_sync(
+                    search_coro,
+                    loop=getattr(self.backend_driver, "_context_graph_loop", None),
+                )
             except Exception:
                 _close_unstarted_coroutine(search_coro)
                 lexical_hits = []
@@ -728,6 +738,7 @@ class ClaimMutationPlanner:
             return ClaimMutationPlanResult(
                 plan=plan,
                 invalidated_count=0,
+                claim_ids=(rejected_claim.claim_id,),
                 profiles=(
                     self._build_claim_profile(
                         claim=rejected_claim,
@@ -794,6 +805,7 @@ class ClaimMutationPlanner:
             return ClaimMutationPlanResult(
                 plan=plan,
                 invalidated_count=0,
+                claim_ids=(updated_exact.claim_id,),
                 profiles=(
                     self._build_claim_profile(
                         claim=updated_exact,
@@ -868,6 +880,7 @@ class ClaimMutationPlanner:
             return ClaimMutationPlanResult(
                 plan=plan,
                 invalidated_count=0,
+                claim_ids=(updated_match.claim_id,),
                 profiles=(
                     self._build_claim_profile(
                         claim=updated_match,
@@ -1049,6 +1062,7 @@ class ClaimMutationPlanner:
             plan=plan,
             invalidated_count=len(invalidated_claim_ids),
             invalidated_claim_ids=invalidated_claim_ids,
+            claim_ids=(claim_to_write.claim_id,),
             profiles=(
                 self._build_claim_profile(
                     claim=claim_to_write,

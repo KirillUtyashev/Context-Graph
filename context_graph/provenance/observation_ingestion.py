@@ -47,6 +47,7 @@ class ObservationIngestionResult:
     profiles: tuple[ProfileRecord, ...] = ()
     profile_deactivations: tuple[ProfileDeactivation, ...] = ()
     invalidated_claim_ids: tuple[str, ...] = ()
+    claim_ids: tuple[str, ...] = ()
     claim_candidates_extracted: int = 0
     claim_candidates_validated: int = 0
     claim_candidates_rejected: int = 0
@@ -117,6 +118,7 @@ class ObservationIngestionService:
         validated_count = 0
         rejected_count = 0
         invalidated_count = 0
+        claim_ids: list[str] = []
         rejection_reasons: dict[str, int] = {}
         evidence_plans: list[MutationPlan] = []
         invalidated_claim_ids: list[str] = []
@@ -167,7 +169,10 @@ class ObservationIngestionService:
             )
             evidence_plans.append(invalidation_result.plan)
             invalidated_count += invalidation_result.invalidated_count
-            for claim_id in invalidation_result.invalidated_claim_ids:
+            for claim_id in getattr(invalidation_result, "claim_ids", ()):
+                if claim_id and claim_id not in claim_ids:
+                    claim_ids.append(claim_id)
+            for claim_id in getattr(invalidation_result, "invalidated_claim_ids", ()):
                 if claim_id not in invalidated_claim_observed_at:
                     invalidated_claim_ids.append(claim_id)
                 invalidated_claim_observed_at[claim_id] = (
@@ -191,6 +196,7 @@ class ObservationIngestionService:
             profiles=deduped_profiles,
             profile_deactivations=profile_deactivations,
             invalidated_claim_ids=tuple(invalidated_claim_ids),
+            claim_ids=tuple(claim_ids),
             claim_candidates_extracted=extracted_count,
             claim_candidates_validated=validated_count,
             claim_candidates_rejected=rejected_count,

@@ -71,7 +71,7 @@ class Neo4jBackendDriver(BackendDriver):
         self._search = Neo4jSearchOperations(self)
         self._mutations = Neo4jMutationOperations(self)
         self._maintenance = Neo4jMaintenanceOperations(self)
-        self._traversal = Neo4jTraversalOperations()
+        self._traversal = Neo4jTraversalOperations(self)
 
     @property
     def search(self) -> Neo4jSearchOperations:

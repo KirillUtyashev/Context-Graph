@@ -152,7 +152,6 @@ class TraceCallPathResponse(TypedDict):
 
 
 ToolImplementationStatus = Literal["scaffold", "implemented", "unsupported"]
-TimelineTargetKind = Literal["pull_request", "issue", "file", "symbol", "claim_cluster", "topic"]
 ContextHitKind = Literal["node", "relation"]
 
 
@@ -163,35 +162,39 @@ class ToolScaffoldResponse(TypedDict):
     todo: NotRequired[str]
 
 
-class ContextSearchHit(TypedDict):
-    hit_kind: ContextHitKind
+class NodeContextHit(TypedDict):
+    hit_kind: Literal["node"]
     record_id: str
     record_type: str
     title: str | None
     summary: str | None
-    score: float | None
-    lexical_score: float | None
-    semantic_score: float | None
     is_active: bool
     observed_at: str | None
-    source: str | None
-    file_path: str | None
+    inactive_at: str | None
+    file_path: NotRequired[str]
+    qualified_name: NotRequired[str]
+
+
+class RelationContextHit(TypedDict):
+    hit_kind: Literal["relation"]
+    record_id: str
     relation_type: str | None
+    summary: str | None
+    is_active: bool
+    observed_at: str | None
+    inactive_at: str | None
     source_record_id: str | None
     source_record_type: str | None
     target_record_id: str | None
     target_record_type: str | None
-    retrieval_channels: list[str]
-    matched_profile_key_text: str | None
-    matched_profile_key_origin: str | None
-    semantic_profile_kind: str | None
+
+
+ContextSearchHit = NodeContextHit | RelationContextHit
 
 
 class SearchContextResponse(ToolScaffoldResponse):
     repo_id: str
     query: str
-    group_id: str | None
-    requested_sources: list[str]
     hits: list[ContextSearchHit]
 
 
@@ -201,6 +204,7 @@ class NeighborhoodNode(TypedDict):
     display_name: str | None
     summary: str | None
     observed_at: str | None
+    qualified_name: NotRequired[str]
 
 
 class NeighborhoodEdge(TypedDict):
@@ -213,7 +217,6 @@ class NeighborhoodEdge(TypedDict):
 class NodeNeighborhoodResponse(ToolScaffoldResponse):
     repo_id: str | None
     center_record_id: str | None
-    concept: str | None
     nodes: list[NeighborhoodNode]
     edges: list[NeighborhoodEdge]
 
@@ -229,7 +232,6 @@ class TimelineEvent(TypedDict):
 
 class TimelineResponse(ToolScaffoldResponse):
     repo_id: str | None
-    target_kind: TimelineTargetKind
     target_id: str
     events: list[TimelineEvent]
 
@@ -255,6 +257,6 @@ class RecordAgentObservationResponse(ToolScaffoldResponse):
     repo_id: str
     observation_id: str | None
     task_id: str | None
+    claim_ids: list[str]
     accepted: bool
     persisted: bool
-    queue_position: NotRequired[int]

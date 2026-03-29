@@ -24,7 +24,6 @@ from context_graph.runtime.providers.factories import (
     LLMClientFactory,
 )
 from context_graph.server.mcp.config import MCPServerConfig
-from context_graph.server.mcp.queue import ObservationWriteService, QueueService
 from context_graph.storage.backend import BackendDriver, create_driver
 
 logger = logging.getLogger(__name__)
@@ -340,8 +339,6 @@ class MCPBackendRuntime:
     def __init__(self, config: MCPServerConfig, *, semaphore_limit: int = 10) -> None:
         self.config = config
         self.semaphore = asyncio.Semaphore(semaphore_limit)
-        self.queue_service = QueueService()
-        self.observation_write_service = ObservationWriteService()
         self.driver: BackendDriver | None = None
         self.llm_client: Any | None = None
         self.embedder_client: Any | None = None
@@ -369,7 +366,9 @@ class MCPBackendRuntime:
                 self.embedder_client = None
 
             backend_config = DatabaseDriverFactory.create_backend_config(self.config.database)
+            current_loop = asyncio.get_running_loop()
             self.driver = create_driver(backend_config)
+            setattr(self.driver, "_context_graph_loop", current_loop)
             await self.driver.build_indices()
             self.claim_resolution_service = ClaimResolutionService(
                 llm_client=self.llm_client,
