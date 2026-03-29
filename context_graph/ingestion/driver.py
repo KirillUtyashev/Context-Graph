@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoResolver
+from context_graph.profile_vectors import ProfileVectorIndexer
 from context_graph.storage.backend import BackendDriver
 
 from .commit_indexing import CommitIndexingService
@@ -35,6 +36,7 @@ class IngestionDriver:
         github_api: GitHubApiClient | None = None,
         repo_cache: RepoCacheManager | None = None,
         llm_client=None,
+        profile_indexer: ProfileVectorIndexer | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -43,6 +45,7 @@ class IngestionDriver:
         self.github_api = github_api
         self.repo_cache = repo_cache or RepoCacheManager(git_metadata=self.git_metadata)
         self.llm_client = llm_client
+        self.profile_indexer = profile_indexer
         self.planner = DeterministicMutationPlanner()
         self.repo_resolver = GitHubRepoResolver(
             git_metadata=self.git_metadata,
@@ -102,6 +105,7 @@ class IngestionDriver:
             git_metadata=self.git_metadata,
             planner=self.planner,
             llm_client=self.llm_client,
+            profile_indexer=self.profile_indexer,
         )
 
     def _make_hosted_indexing_service(self) -> HostedIndexingService:
@@ -115,4 +119,5 @@ class IngestionDriver:
             repo_resolver=self.repo_resolver,
             planner=self.planner,
             llm_client=self.llm_client,
+            profile_indexer=self.profile_indexer,
         )

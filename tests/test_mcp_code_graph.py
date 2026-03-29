@@ -99,14 +99,11 @@ def make_code_graph_snapshot(root_path: str) -> GraphSnapshot:
     )
 
 
-class FakeAuroraService:
+class FakeMetadataSnapshotService:
     def __init__(self, metadata_store: InMemoryMetadataStore, *, ready: bool = True) -> None:
-        self._metadata = metadata_store
+        self.metadata_store = metadata_store
         self._ready = ready
-        self._metadata_init_error: str | None = None
-
-    def initialize(self) -> bool:
-        return self._ready
+        self.metadata_init_error: str | None = None
 
     def initialize_metadata_store(self) -> bool:
         return self._ready
@@ -239,13 +236,13 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.metadata_store = InMemoryMetadataStore()
         self.metadata_store.bootstrap()
         self.metadata_store.save_latest_snapshot(self.snapshot)
-        self.fake_service = FakeAuroraService(self.metadata_store)
+        self.fake_service = FakeMetadataSnapshotService(self.metadata_store)
 
     async def asyncTearDown(self) -> None:
         self.temp_dir.cleanup()
 
     async def test_get_code_graph_schema_wrapper_returns_structured_payload(self) -> None:
-        with patch.object(server_module, "aurora_ingestion_service", self.fake_service):
+        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
             response = await server_module.get_code_graph_schema("demo")
 
         self.assertEqual(response["repo_id"], "demo")
@@ -255,7 +252,11 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_code_graph_wrapper_returns_error_when_snapshot_missing(self) -> None:
         empty_store = InMemoryMetadataStore()
         empty_store.bootstrap()
-        with patch.object(server_module, "aurora_ingestion_service", FakeAuroraService(empty_store)):
+        with patch.object(
+            server_module,
+            "metadata_snapshot_service",
+            FakeMetadataSnapshotService(empty_store),
+        ):
             response = await server_module.search_code_graph("missing")
 
         self.assertEqual(
@@ -264,7 +265,7 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_get_code_snippet_wrapper_returns_structured_payload(self) -> None:
-        with patch.object(server_module, "aurora_ingestion_service", self.fake_service):
+        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
             response = await server_module.get_code_snippet("demo", "demo.app.main")
 
         self.assertEqual(response["repo_id"], "demo")
@@ -272,7 +273,7 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("message", response)
 
     async def test_trace_call_path_wrapper_rejects_invalid_direction(self) -> None:
-        with patch.object(server_module, "aurora_ingestion_service", self.fake_service):
+        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
             response = await server_module.trace_call_path(
                 "demo",
                 "demo.app.main",
@@ -285,14 +286,13 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_wrapper_uses_metadata_only_initialization(self) -> None:
-        class MetadataOnlyAuroraService(FakeAuroraService):
-            def initialize(self) -> bool:
-                raise AssertionError("full Aurora initialization should not run for snapshot-backed MCP tools")
+        class MetadataOnlySnapshotService(FakeMetadataSnapshotService):
+            pass
 
         with patch.object(
             server_module,
-            "aurora_ingestion_service",
-            MetadataOnlyAuroraService(self.metadata_store),
+            "metadata_snapshot_service",
+            MetadataOnlySnapshotService(self.metadata_store),
         ):
             response = await server_module.get_code_graph_schema("demo")
 

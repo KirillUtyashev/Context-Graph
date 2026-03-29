@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from context_graph.models import GraphSnapshot
+from context_graph.profiles import ProfileRecord
 from context_graph.storage.backend import (
     BackendDriver,
     MutationPlan,
@@ -18,10 +19,14 @@ from context_graph.storage.backend import (
 )
 
 from .canonicalization import canonical_claim_key
-from .claim_planner import ClaimMutationPlanner
+from .claim_planner import ClaimMutationPlanner, ClaimPlanningSession
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
 from .models import EvidenceRecord, Observation, PersistedEvidenceFact, PersistedEvidenceRecord
-from .services import ClaimResolutionService, FactConflictResolutionService
+from .services import (
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionService,
+    FactConflictResolutionService,
+)
 from .validation import ClaimValidationResult
 
 _CURRENT_EVIDENCE_QUERY = """
@@ -48,6 +53,7 @@ class FactInvalidationPlanResult:
 
     plan: MutationPlan
     invalidated_count: int = 0
+    profiles: tuple[ProfileRecord, ...] = ()
 
 
 class CurrentEvidenceReader:
@@ -117,6 +123,8 @@ class EvidenceInvalidationPlanner:
         backend_driver: BackendDriver | None,
         evidence_planner: EvidenceMutationPlanner | None = None,
         claim_mutation_planner: ClaimMutationPlanner | None = None,
+        claim_candidate_retriever=None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
         claim_resolution_service: ClaimResolutionService | None = None,
         current_evidence_reader: CurrentEvidenceReader | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
@@ -129,6 +137,8 @@ class EvidenceInvalidationPlanner:
         self.claim_mutation_planner = claim_mutation_planner or ClaimMutationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=claim_candidate_retriever,
+            claim_profile_key_generation_service=claim_profile_key_generation_service,
             claim_resolution_service=claim_resolution_service,
             fact_conflict_resolution_service=fact_conflict_resolution_service,
         )
@@ -140,16 +150,22 @@ class EvidenceInvalidationPlanner:
         observation: Observation,
         validation: ClaimValidationResult,
         snapshot: GraphSnapshot | None = None,
+        session: ClaimPlanningSession | None = None,
     ) -> FactInvalidationPlanResult:
         result = self.claim_mutation_planner.plan_validated_claims(
             observation=observation,
             validation=validation,
             snapshot=snapshot,
+            session=session,
         )
         return FactInvalidationPlanResult(
             plan=result.plan,
             invalidated_count=result.invalidated_count,
+            profiles=result.profiles,
         )
+
+    def begin_claim_session(self, *, repo_id: str) -> ClaimPlanningSession:
+        return self.claim_mutation_planner.begin_session(repo_id=repo_id)
 
 
 def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenceRecord | None:

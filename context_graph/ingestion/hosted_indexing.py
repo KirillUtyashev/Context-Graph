@@ -8,6 +8,7 @@ from typing import Any
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, GitHubRepoResolver
 from context_graph.ingestion.git.github_indexer import GitHubIndexer, GitHubSyncResult
+from context_graph.profile_vectors import ProfileVectorIndexer
 from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .commit_indexing import CommitIndexingService, default_repo_id
@@ -34,6 +35,7 @@ class HostedIndexingService:
         repo_resolver: GitHubRepoResolver | None = None,
         planner: DeterministicMutationPlanner | None = None,
         llm_client: Any | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -43,6 +45,7 @@ class HostedIndexingService:
         self.repo_cache = repo_cache or RepoCacheManager(git_metadata=self.git_metadata)
         self.planner = planner or DeterministicMutationPlanner()
         self.llm_client = llm_client
+        self.profile_indexer = profile_indexer
         self.repo_resolver = repo_resolver or GitHubRepoResolver(
             git_metadata=self.git_metadata,
             github_api=self.github_api,
@@ -102,6 +105,7 @@ class HostedIndexingService:
                     git_metadata=repo_git,
                     planner=self.planner,
                     llm_client=self.llm_client,
+                    profile_indexer=self.profile_indexer,
                 )
                 branch_hint = branch_hint_for_request(
                     request=request,
@@ -248,8 +252,10 @@ class HostedIndexingService:
 
         github_indexer = GitHubIndexer(
             github_api=self.github_api,
+            metadata_store=self.metadata_store,
             backend_driver=self.backend_driver,
             llm_client=self.llm_client,
+            profile_indexer=self.profile_indexer,
         )
         sync_started_at = utc_now_iso()
         try:

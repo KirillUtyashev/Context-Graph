@@ -33,7 +33,12 @@ from context_graph.profile_vectors import (
     ProfileSearchService,
     ProfileVectorIndexer,
 )
-from context_graph.profiles import ProfileDeactivation, ProfileRecord
+from context_graph.profiles import (
+    PROFILE_KEY_ORIGIN_RAW_TEXT,
+    ProfileDeactivation,
+    ProfileKeyDefinition,
+    ProfileRecord,
+)
 from context_graph.storage.backend import (
     BackendFeatureNotImplementedError,
     EdgeRecord,
@@ -1265,7 +1270,7 @@ class DeterministicIngestionTests(unittest.TestCase):
                 "claims": [
                     {
                         "claim_text": "Helper support was added to demo.app.main.",
-                        "claim_kind": "change_claim",
+                        "claim_subkind": "fix_or_mitigation",
                         "about_hints": ["demo.app.main"],
                         "confidence": "high",
                         "derivation_kind": "direct_from_observation",
@@ -1307,7 +1312,7 @@ class DeterministicIngestionTests(unittest.TestCase):
             "MENTIONS",
             {edge.relationship_type for edge in result.observation_operations.upsert_edges},
         )
-        self.assertEqual(result.evidence_operations.operation_count(), 9)
+        self.assertEqual(result.evidence_operations.operation_count(), 7)
         self.assertIn(
             "SUPPORTS_CLAIM",
             {edge.relationship_type for edge in result.evidence_operations.upsert_edges},
@@ -1319,7 +1324,7 @@ class DeterministicIngestionTests(unittest.TestCase):
         self.assertEqual(result.claim_candidates_extracted, 1)
         self.assertEqual(result.claim_candidates_validated, 1)
         self.assertEqual(result.claim_candidates_rejected, 0)
-        self.assertEqual(result.operations.operation_count(), 31)
+        self.assertEqual(result.operations.operation_count(), 29)
         self.assertEqual(
             llm_client.calls[0]["prompt_name"],
             "provenance.extract_claims_and_evidence.from_commit_message.v1",
@@ -1335,7 +1340,7 @@ class DeterministicIngestionTests(unittest.TestCase):
                 "claims": [
                     {
                         "claim_text": "Helper support was added to demo.app.main.",
-                        "claim_kind": "change_claim",
+                        "claim_subkind": "fix_or_mitigation",
                         "about_hints": ["demo.app.main"],
                         "confidence": "high",
                         "derivation_kind": "direct_from_observation",
@@ -2090,6 +2095,7 @@ class ProfileVectorBackendTests(unittest.TestCase):
                     source_node_id="main",
                     target_node_id="helper",
                     key_text="helper rollback",
+                    key_origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
                     embedding=(1.0, 1.0, 0.0),
                     is_active=True,
                     valid_from_revision=None,
@@ -2105,6 +2111,7 @@ class ProfileVectorBackendTests(unittest.TestCase):
                     source_node_id="main",
                     target_node_id="helper",
                     key_text="main helper",
+                    key_origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
                     embedding=(1.0, 0.0, 1.0),
                     is_active=False,
                     valid_from_revision=None,
@@ -2136,6 +2143,7 @@ class ProfileVectorBackendTests(unittest.TestCase):
             source_node_id="main",
             target_node_id="helper",
             key_text="helper rollback",
+            key_origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
             embedding=(1.0, 0.0, 0.0),
             is_active=True,
             valid_from_revision=None,
@@ -2191,7 +2199,10 @@ class CompatibilityWrapperTests(unittest.TestCase):
             target_node_kind="Function",
             target_revision_id=None,
             value_text="main uses helper and has rollback guidance",
-            keys=("helper rollback", "main helper"),
+            keys=(
+                ProfileKeyDefinition("helper rollback", PROFILE_KEY_ORIGIN_RAW_TEXT),
+                ProfileKeyDefinition("main helper", PROFILE_KEY_ORIGIN_RAW_TEXT),
+            ),
             metadata={"episode_ids": ["turn-1"]},
             is_active=True,
             updated_at="2026-03-26T00:00:00+00:00",

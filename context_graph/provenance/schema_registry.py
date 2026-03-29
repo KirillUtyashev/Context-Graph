@@ -64,6 +64,8 @@ class ProvenanceSchemaRegistry:
                 "invariant_or_constraint",
                 "desired_behavior_or_requirement",
                 "reviewer_objection_or_requested_change",
+                "approval_or_acceptance",
+                "workaround_or_temporary_mitigation",
                 "test_result_or_validation",
                 "rollout_migration_or_dependency",
                 "ownership_or_impact_scope",
@@ -154,6 +156,10 @@ class ProvenanceSchemaRegistry:
             return "requirement"
         if claim_subkind == "reviewer_objection_or_requested_change":
             return "review_feedback" if source_kind == "pull_request" else "concern"
+        if claim_subkind == "approval_or_acceptance":
+            return "approval"
+        if claim_subkind == "workaround_or_temporary_mitigation":
+            return "workaround"
         if claim_subkind == "test_result_or_validation":
             return "test_expectation"
         if claim_subkind == "rollout_migration_or_dependency":
@@ -169,9 +175,9 @@ class ProvenanceSchemaRegistry:
             "state_claim": "invariant_or_constraint",
             "requirement": "desired_behavior_or_requirement",
             "review_feedback": "reviewer_objection_or_requested_change",
-            "approval": "reviewer_objection_or_requested_change",
+            "approval": "approval_or_acceptance",
             "concern": "reviewer_objection_or_requested_change",
-            "workaround": "fix_or_mitigation",
+            "workaround": "workaround_or_temporary_mitigation",
             "scope_statement": "rollout_migration_or_dependency",
             "test_expectation": "test_result_or_validation",
         }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from typing import Any
 
@@ -26,6 +27,7 @@ from .models import (
     ObservationSourceRef,
     git_commit_message_observation_id,
     github_issue_body_observation_id,
+    github_issue_closed_observation_id,
     github_issue_comment_observation_id,
     github_pr_body_observation_id,
     github_pr_review_comment_observation_id,
@@ -71,6 +73,9 @@ class ObservationMutationPlanner:
                 "parent_shas": list(commit.parent_shas),
                 "changed_files": list(commit.changed_files),
             },
+            ingested_at=_current_timestamp(),
+            thread_kind="commit",
+            thread_id=commit.sha,
         )
         source = ObservationSourceRef(
             source_kind="commit",
@@ -95,6 +100,7 @@ class ObservationMutationPlanner:
 
     def build_github_observations(self, *, bundle: Any) -> tuple[PlannedObservation, ...]:
         observations: list[PlannedObservation] = []
+        ingested_at = _current_timestamp()
         for source in getattr(bundle, "observation_sources", ()):
             body = _normalized_text(getattr(source, "text", None))
             if not body:
@@ -120,6 +126,12 @@ class ObservationMutationPlanner:
                 title=getattr(source, "title", None),
                 text=body,
                 metadata=dict(getattr(source, "metadata", {}) or {}),
+                ingested_at=ingested_at,
+                thread_kind=_observation_thread_kind(
+                    source_kind=str(source.source_kind),
+                    observation_kind=observation_kind,
+                ),
+                thread_id=_observation_thread_id(source=source),
             )
             source_ref = ObservationSourceRef(
                 source_kind=str(source.source_kind),
@@ -188,9 +200,12 @@ class ObservationMutationPlanner:
                 "source_kind": observation.source_kind,
                 "source_id": observation.source_id,
                 "observed_at": observation.observed_at,
+                "ingested_at": observation.ingested_at,
                 "author": observation.author,
                 "title": observation.title,
                 "text": observation.text,
+                "thread_kind": observation.thread_kind,
+                "thread_id": observation.thread_id,
                 "metadata_json": json.dumps(observation.metadata, sort_keys=True, separators=(",", ":")),
             },
         )
@@ -248,6 +263,10 @@ class ObservationMutationPlanner:
                 "source_kind": observation.source_kind,
                 "source_id": observation.source_id,
                 "author": observation.author,
+                "thread_kind": observation.thread_kind,
+                "thread_id": observation.thread_id,
+                "observed_at": observation.observed_at,
+                "ingested_at": observation.ingested_at,
             },
         )
         return MutationPlan(
@@ -294,6 +313,29 @@ def _normalized_text(value: object) -> str:
     return " ".join(str(value).split()).strip()
 
 
+def _current_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _observation_thread_kind(*, source_kind: str, observation_kind: ObservationKind) -> str | None:
+    if observation_kind == ObservationKind.GIT_COMMIT_MESSAGE:
+        return "commit"
+    if source_kind == "pull_request":
+        return "pull_request"
+    if source_kind == "issue":
+        return "issue"
+    return None
+
+
+def _observation_thread_id(*, source: Any) -> str | None:
+    if getattr(source, "number", None) is not None:
+        return str(source.number)
+    source_id = str(getattr(source, "source_id", "") or "").strip()
+    if source_id.startswith("commit:"):
+        return source_id.rsplit(":", 1)[-1] or None
+    return None
+
+
 def _github_observation_id(
     repo_id: str,
     observation_kind: ObservationKind,
@@ -308,6 +350,10 @@ def _github_observation_id(
         if number is None:
             raise ValueError("github_issue_body observations require an issue number")
         return github_issue_body_observation_id(repo_id, number)
+    if observation_kind == ObservationKind.GITHUB_ISSUE_CLOSED:
+        if number is None:
+            raise ValueError("github_issue_closed observations require an issue number")
+        return github_issue_closed_observation_id(repo_id, number)
     if observation_kind == ObservationKind.GITHUB_PR_REVIEW:
         return github_pr_review_observation_id(repo_id, external_id)
     if observation_kind == ObservationKind.GITHUB_PR_REVIEW_COMMENT:

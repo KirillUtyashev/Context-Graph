@@ -14,13 +14,53 @@ from .models import canonical_json
 
 if TYPE_CHECKING:
     from .episodes import EntityEdge, FactInvalidation
+    from .provenance.models import ClaimRecord, Observation
 else:  # pragma: no cover - runtime uses duck typing for these richer graph objects
     EntityEdge = Any
     FactInvalidation = Any
+    ClaimRecord = Any
+    Observation = Any
 
 
 SEMANTIC_FACT_PROFILE_KIND = "semantic_fact_profile"
+SEMANTIC_CLAIM_PROFILE_KIND = "semantic_claim_profile"
+SEMANTIC_OBSERVATION_PROFILE_KIND = "semantic_observation_profile"
 FACT_EDGE_TARGET_KIND = "FactEdge"
+CLAIM_TARGET_KIND = "Claim"
+OBSERVATION_TARGET_KIND = "Observation"
+PROFILE_KEY_ORIGIN_RAW_TEXT = "raw_text"
+PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC = "generated_semantic"
+PROFILE_KEY_ORIGIN_LEGACY_KEYWORD = "legacy_keyword"
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileKeyDefinition:
+    text: str
+    origin: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "text": self.text,
+            "origin": self.origin,
+        }
+
+    @classmethod
+    def from_json_value(cls, value: object) -> "ProfileKeyDefinition | None":
+        if isinstance(value, str):
+            normalized = _normalize_text(value)
+            if not normalized:
+                return None
+            return cls(
+                text=normalized,
+                origin=PROFILE_KEY_ORIGIN_LEGACY_KEYWORD,
+            )
+        if not isinstance(value, Mapping):
+            return None
+        normalized = _normalize_text(value.get("text"))
+        if not normalized:
+            return None
+        origin = _normalize_text(value.get("origin")) or PROFILE_KEY_ORIGIN_LEGACY_KEYWORD
+        return cls(text=normalized, origin=origin)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +77,7 @@ class ProfileRecord:
     target_node_kind: str | None
     target_revision_id: str | None
     value_text: str
-    keys: tuple[str, ...]
+    keys: tuple[ProfileKeyDefinition, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
     is_active: bool = True
     valid_from_revision: str | None = None
@@ -45,7 +85,11 @@ class ProfileRecord:
     updated_at: str = ""
 
     def keys_json(self) -> str:
-        return json.dumps(list(self.keys), sort_keys=False, separators=(",", ":"))
+        return json.dumps(
+            [key.as_dict() for key in self.keys],
+            sort_keys=False,
+            separators=(",", ":"),
+        )
 
     def metadata_json(self) -> str:
         return canonical_json(self.metadata)
@@ -74,7 +118,7 @@ def semantic_fact_profile_from_fact(
     source_kind = entity_node_kind(source) if source else _string_or_none(fact.attributes.get("source_kind"))
     target_kind = entity_node_kind(target) if target else _string_or_none(fact.attributes.get("target_kind"))
     relation_label = _relation_label(fact.name)
-    value_text = fact.fact
+    value_text = _normalize_text(fact.fact)
     metadata = {
         "fact_id": fact.uuid,
         "episode_ids": list(fact.episodes),
@@ -117,6 +161,103 @@ def semantic_fact_profile_from_fact(
     )
 
 
+def semantic_claim_profile_from_claim(
+    claim: ClaimRecord,
+    *,
+    about_record_ids: Sequence[str] = (),
+    support_texts: Sequence[str] = (),
+    generated_keys: Sequence[str] = (),
+) -> ProfileRecord:
+    about_ids = tuple(dict.fromkeys(str(record_id) for record_id in about_record_ids if record_id))
+    normalized_support_texts = tuple(
+        dict.fromkeys(
+            text
+            for text in (_normalize_text(value) for value in support_texts)
+            if text
+        )
+    )
+    normalized_claim_text = _normalize_text(claim.claim_text)
+    metadata = {
+        "claim_id": claim.claim_id,
+        "repo_id": claim.repo_id,
+        "claim_text": normalized_claim_text,
+        "canonical_key": claim.canonical_key,
+        "claim_kind": claim.claim_kind,
+        "claim_subkind": claim.claim_subkind,
+        "thread_kind": claim.thread_kind,
+        "thread_id": claim.thread_id,
+        "about_record_ids": list(about_ids),
+        "support_texts": list(normalized_support_texts),
+        "is_current": claim.is_current,
+        "valid_from": claim.valid_from,
+        "valid_to": claim.valid_to,
+    }
+    return ProfileRecord(
+        profile_id=f"profile:{claim.repo_id}:{SEMANTIC_CLAIM_PROFILE_KIND}:{claim.claim_id}",
+        repo_id=claim.repo_id,
+        profile_kind=SEMANTIC_CLAIM_PROFILE_KIND,
+        profile_target_kind=CLAIM_TARGET_KIND,
+        profile_target_id=claim.claim_id,
+        relation_type=None,
+        source_node_id=None,
+        source_node_kind=None,
+        target_node_id=None,
+        target_node_kind=None,
+        target_revision_id=None,
+        value_text=normalized_claim_text,
+        keys=_claim_profile_keys(
+            claim_text=normalized_claim_text,
+            generated_keys=generated_keys,
+        ),
+        metadata=metadata,
+        is_active=claim.is_current,
+        valid_from_revision=None,
+        valid_to_revision=None,
+        updated_at=claim.valid_to or claim.latest_observed_at or claim.ingested_at or "",
+    )
+
+
+def semantic_observation_profile_from_observation(
+    observation: Observation,
+) -> ProfileRecord:
+    value_text = observation_profile_text(observation)
+    metadata = {
+        "observation_id": observation.observation_id,
+        "observation_kind": observation.observation_kind.value,
+        "source_kind": observation.source_kind,
+        "source_id": observation.source_id,
+        "thread_kind": observation.thread_kind,
+        "thread_id": observation.thread_id,
+        "observed_at": observation.observed_at,
+        "ingested_at": observation.ingested_at,
+    }
+    return ProfileRecord(
+        profile_id=f"profile:{observation.repo_id}:{SEMANTIC_OBSERVATION_PROFILE_KIND}:{observation.observation_id}",
+        repo_id=observation.repo_id,
+        profile_kind=SEMANTIC_OBSERVATION_PROFILE_KIND,
+        profile_target_kind=OBSERVATION_TARGET_KIND,
+        profile_target_id=observation.observation_id,
+        relation_type=None,
+        source_node_id=None,
+        source_node_kind=None,
+        target_node_id=None,
+        target_node_kind=None,
+        target_revision_id=None,
+        value_text=value_text,
+        keys=(
+            ProfileKeyDefinition(
+                text=value_text,
+                origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+            ),
+        ),
+        metadata=metadata,
+        is_active=True,
+        valid_from_revision=None,
+        valid_to_revision=None,
+        updated_at=observation.ingested_at or observation.observed_at or "",
+    )
+
+
 def profile_deactivation_from_fact_invalidation(
     invalidation: FactInvalidation,
 ) -> ProfileDeactivation:
@@ -141,14 +282,16 @@ def _profile_keys_for_fact(
     fact: EntityEdge,
     source: EntityNode | None,
     target: EntityNode | None,
-) -> tuple[str, ...]:
+) -> tuple[ProfileKeyDefinition, ...]:
     if fact.relationship_keywords:
-        return tuple(dict.fromkeys(fact.relationship_keywords))
-        
+        return _legacy_profile_keys(
+            fact.relationship_keywords,
+        )
+
     values: list[str] = [
+        fact.fact,
         fact.name,
         _relation_label(fact.name),
-        fact.fact,
     ]
     if source:
         values.extend(entity_node_searchable_terms(source))
@@ -158,13 +301,7 @@ def _profile_keys_for_fact(
         values.extend(entity_node_searchable_terms(target))
     else:
         values.append(fact.target_node_uuid)
-    deduped: dict[str, str] = {}
-    for value in values:
-        normalized = " ".join(str(value).strip().split())
-        if not normalized:
-            continue
-        deduped.setdefault(normalized.casefold(), normalized)
-    return tuple(deduped.values())
+    return _legacy_profile_keys(values)
 
 
 def _relation_label(value: str | None) -> str:
@@ -178,3 +315,77 @@ def _string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _claim_profile_keys(
+    *,
+    claim_text: str,
+    generated_keys: Sequence[str] = (),
+) -> tuple[ProfileKeyDefinition, ...]:
+    keys: list[ProfileKeyDefinition] = []
+    normalized_claim_text = _normalize_text(claim_text)
+    if normalized_claim_text:
+        keys.append(
+            ProfileKeyDefinition(
+                text=normalized_claim_text,
+                origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+            )
+        )
+    for value in generated_keys:
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        if normalized.casefold() == normalized_claim_text.casefold():
+            continue
+        keys.append(
+            ProfileKeyDefinition(
+                text=normalized,
+                origin=PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC,
+            )
+        )
+    return _dedupe_profile_keys(keys)
+
+
+def observation_profile_text(observation: Observation, *, max_length: int = 4000) -> str:
+    title = _normalize_text(observation.title)
+    body = _normalize_text(observation.text)
+    if title and body:
+        combined = f"{title}\n\n{body}"
+    else:
+        combined = title or body
+    return combined[:max_length]
+
+
+def _legacy_profile_keys(values: Sequence[str]) -> tuple[ProfileKeyDefinition, ...]:
+    keys: list[ProfileKeyDefinition] = []
+    for index, value in enumerate(values):
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        origin = PROFILE_KEY_ORIGIN_RAW_TEXT if index == 0 else PROFILE_KEY_ORIGIN_LEGACY_KEYWORD
+        keys.append(ProfileKeyDefinition(text=normalized, origin=origin))
+    return _dedupe_profile_keys(keys)
+
+
+def _dedupe_profile_keys(values: Sequence[ProfileKeyDefinition]) -> tuple[ProfileKeyDefinition, ...]:
+    deduped: dict[tuple[str, str], ProfileKeyDefinition] = {}
+    for value in values:
+        normalized_text = _normalize_text(value.text)
+        normalized_origin = _normalize_text(value.origin)
+        if not normalized_text or not normalized_origin:
+            continue
+        key = (normalized_text.casefold(), normalized_origin.casefold())
+        deduped.setdefault(
+            key,
+            ProfileKeyDefinition(
+                text=normalized_text,
+                origin=normalized_origin,
+            ),
+        )
+    return tuple(deduped.values())
+
+
+def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().split())

@@ -94,7 +94,8 @@ class ClaimBundleValidator:
         validated: list[ValidatedClaimBundle] = []
         rejected: list[RejectedClaimBundle] = []
         resolver = SnapshotCodeResolver(snapshot) if snapshot is not None else None
-        for candidate in extraction.claims:
+        for raw_candidate in extraction.claims:
+            candidate = self._normalize_support_fields(raw_candidate)
             claim_kind, claim_subkind, assertion_status, claim_frame = self._resolve_claim_shape(
                 observation=observation,
                 candidate=candidate,
@@ -187,6 +188,46 @@ class ClaimBundleValidator:
         )
         return result
 
+    def _normalize_support_fields(
+        self,
+        candidate: ClaimWithEvidenceCandidate,
+    ) -> ClaimWithEvidenceCandidate:
+        normalized_evidence: list[SupportingEvidenceCandidate] = []
+        changed = False
+        for evidence in candidate.supporting_evidence:
+            support_kind = evidence.support_kind
+            support_role = evidence.support_role
+
+            if support_kind not in self.registry.support_kinds and support_kind in self.registry.support_roles:
+                changed = True
+                support_role = support_kind
+                support_kind = (
+                    evidence.support_role
+                    if evidence.support_role in self.registry.support_kinds
+                    else "direct_statement"
+                )
+            elif support_role not in self.registry.support_roles and support_role in self.registry.support_kinds:
+                changed = True
+                support_kind = support_role
+                support_role = (
+                    evidence.support_kind
+                    if evidence.support_kind in self.registry.support_roles
+                    else "provides_context"
+                )
+
+            normalized_evidence.append(
+                evidence.model_copy(
+                    update={
+                        "support_kind": support_kind,
+                        "support_role": support_role,
+                    }
+                )
+            )
+
+        if not changed:
+            return candidate
+        return candidate.model_copy(update={"supporting_evidence": normalized_evidence})
+
     def _validate_structural(
         self,
         *,
@@ -200,65 +241,98 @@ class ClaimBundleValidator:
         claim_text = " ".join(candidate.claim_text.split()).strip()
         if not claim_text:
             return _rejected(candidate, "empty_claim_text", "claim_text must not be empty")
-        if claim_kind not in self.registry.claim_kinds:
-            return _rejected(candidate, "unsupported_claim_kind", f"unsupported claim_kind {claim_kind!r}")
         if claim_subkind not in self.registry.claim_subkinds:
             return _rejected(
                 candidate,
                 "unsupported_claim_subkind",
                 f"unsupported claim_subkind {claim_subkind!r}",
+                claim_kind=claim_kind,
+            )
+        if claim_kind not in self.registry.claim_kinds:
+            return _rejected(
+                candidate,
+                "unsupported_claim_kind",
+                f"unsupported claim_kind {claim_kind!r}",
+                claim_kind=claim_kind,
             )
         if assertion_status not in self.registry.assertion_statuses:
             return _rejected(
                 candidate,
                 "unsupported_assertion_status",
                 f"unsupported assertion_status {assertion_status!r}",
+                claim_kind=claim_kind,
             )
         if claim_frame not in self.registry.claim_frames:
             return _rejected(
                 candidate,
                 "unsupported_claim_frame",
                 f"unsupported claim_frame {claim_frame!r}",
+                claim_kind=claim_kind,
             )
         if candidate.confidence not in self.registry.confidence_levels:
-            return _rejected(candidate, "unsupported_confidence", f"unsupported confidence {candidate.confidence!r}")
+            return _rejected(
+                candidate,
+                "unsupported_confidence",
+                f"unsupported confidence {candidate.confidence!r}",
+                claim_kind=claim_kind,
+            )
         if not candidate.supporting_evidence:
-            return _rejected(candidate, "missing_supporting_evidence", "claim must include supporting evidence")
+            return _rejected(
+                candidate,
+                "missing_supporting_evidence",
+                "claim must include supporting evidence",
+                claim_kind=claim_kind,
+            )
         if len(candidate.supporting_evidence) > 3:
-            return _rejected(candidate, "too_many_supporting_evidence", "claim must include at most three support items")
+            return _rejected(
+                candidate,
+                "too_many_supporting_evidence",
+                "claim must include at most three support items",
+                claim_kind=claim_kind,
+            )
         for evidence in candidate.supporting_evidence:
             if evidence.evidence_kind not in self.registry.evidence_kinds:
                 return _rejected(
                     candidate,
                     "unsupported_evidence_kind",
                     f"unsupported evidence_kind {evidence.evidence_kind!r}",
+                    claim_kind=claim_kind,
                 )
             if evidence.support_kind not in self.registry.support_kinds:
                 return _rejected(
                     candidate,
                     "unsupported_support_kind",
                     f"unsupported support_kind {evidence.support_kind!r}",
+                    claim_kind=claim_kind,
                 )
             if evidence.support_source not in self.registry.support_sources:
                 return _rejected(
                     candidate,
                     "unsupported_support_source",
                     f"unsupported support_source {evidence.support_source!r}",
+                    claim_kind=claim_kind,
                 )
             if evidence.support_role not in self.registry.support_roles:
                 return _rejected(
                     candidate,
                     "unsupported_support_role",
                     f"unsupported support_role {evidence.support_role!r}",
+                    claim_kind=claim_kind,
                 )
             if not self._support_rationale_is_valid(evidence):
                 return _rejected(
                     candidate,
                     "missing_support_rationale",
                     "support_rationale must not be empty",
+                    claim_kind=claim_kind,
                 )
             if not self._support_is_valid(observation=observation, evidence=evidence):
-                return _rejected(candidate, "invalid_evidence_span", "supporting evidence span is invalid")
+                return _rejected(
+                    candidate,
+                    "invalid_evidence_span",
+                    "supporting evidence span is invalid",
+                    claim_kind=claim_kind,
+                )
         return None
 
     def _validate_semantic(
@@ -274,17 +348,23 @@ class ClaimBundleValidator:
                 candidate,
                 "unsupported_source_kind",
                 f"claim_kind {claim_kind!r} is not allowed for source_kind {observation.source_kind!r}",
+                claim_kind=claim_kind,
             )
         normalized_text = " ".join(candidate.claim_text.lower().split()).strip()
         if len(normalized_text) < 12 or len(normalized_text.split()) < 2:
-            return _rejected(candidate, "claim_too_vague", "claim text is too short or vague")
+            return _rejected(candidate, "claim_too_vague", "claim text is too short or vague", claim_kind=claim_kind)
         if (
             assertion_status in {"confirmed", "observed"}
             and any(marker in normalized_text for marker in _VAGUE_MARKERS)
         ):
-            return _rejected(candidate, "speculative_claim", "claim text appears speculative")
+            return _rejected(candidate, "speculative_claim", "claim text appears speculative", claim_kind=claim_kind)
         if candidate.confidence == "low":
-            return _rejected(candidate, "insufficient_confidence", "low-confidence claims are not stored in v1")
+            return _rejected(
+                candidate,
+                "insufficient_confidence",
+                "low-confidence claims are not stored in v1",
+                claim_kind=claim_kind,
+            )
         return None
 
     def _support_is_valid(
@@ -319,15 +399,11 @@ class ClaimBundleValidator:
         observation: Observation,
         candidate: ClaimWithEvidenceCandidate,
     ) -> tuple[str | None, str | None, str | None, str | None]:
-        claim_kind = candidate.claim_kind
         claim_subkind = candidate.claim_subkind
         if claim_subkind is not None:
-            mapped_claim_kind = self.registry.claim_kind_for_subkind(claim_subkind, observation.source_kind)
-            if claim_kind is not None and mapped_claim_kind is not None and claim_kind != mapped_claim_kind:
-                return None, claim_subkind, candidate.assertion_status, candidate.claim_frame
-            claim_kind = mapped_claim_kind
-        elif claim_kind is not None:
-            claim_subkind = self.registry.default_claim_subkind_for_claim_kind(claim_kind)
+            claim_kind = self.registry.claim_kind_for_subkind(claim_subkind, observation.source_kind)
+        else:
+            claim_kind = None
 
         assertion_status = candidate.assertion_status or self._default_assertion_status(
             observation=observation,
@@ -377,10 +453,12 @@ def _rejected(
     candidate: ClaimWithEvidenceCandidate,
     code: str,
     reason: str,
+    *,
+    claim_kind: str | None = None,
 ) -> RejectedClaimBundle:
     return RejectedClaimBundle(
         claim_text=candidate.claim_text or None,
-        claim_kind=candidate.claim_kind or None,
+        claim_kind=claim_kind,
         reason_code=code,
         reason=reason,
     )

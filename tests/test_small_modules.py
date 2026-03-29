@@ -154,6 +154,41 @@ class SmallModuleTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             embeddings.load_embedding_settings(SimpleNamespace(embed_provider="custom"))
 
+    def test_load_embedding_settings_infers_provider_from_llm_or_available_credentials(self) -> None:
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "secret"}, clear=True):
+            settings = embeddings.load_embedding_settings(
+                SimpleNamespace(
+                    embed_provider=None,
+                    llm_provider="openai",
+                    embed_model=None,
+                    embed_dimensions=None,
+                    embed_base_url=None,
+                    embed_api_key=None,
+                    aws_region=None,
+                )
+            )
+
+        self.assertIsNotNone(settings)
+        self.assertEqual(settings.provider, "openai")
+        self.assertEqual(settings.api_key, "secret")
+
+        with patch.dict("os.environ", {"AWS_DEFAULT_REGION": "ca-central-1"}, clear=True):
+            settings = embeddings.load_embedding_settings(
+                SimpleNamespace(
+                    embed_provider=None,
+                    llm_provider=None,
+                    embed_model=None,
+                    embed_dimensions=None,
+                    embed_base_url=None,
+                    embed_api_key=None,
+                    aws_region=None,
+                )
+            )
+
+        self.assertIsNotNone(settings)
+        self.assertEqual(settings.provider, "bedrock")
+        self.assertEqual(settings.aws_region, "ca-central-1")
+
     def test_load_episode_llm_settings_validates_provider_and_api_key(self) -> None:
         args = SimpleNamespace(
             llm_provider="openai",
@@ -403,7 +438,7 @@ class SmallModuleTests(unittest.TestCase):
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
-        source = mcp_config.YamlSettingsSource(mcp_config.GraphitiConfig)
+        source = mcp_config.YamlSettingsSource(mcp_config.MCPServerConfig)
 
         with patch.dict("os.environ", {"API_KEY": "secret", "FLAG": "true"}, clear=True):
             expanded = source._expand_env_vars(
@@ -421,11 +456,11 @@ class SmallModuleTests(unittest.TestCase):
         self.assertEqual(expanded["message"], "Bearer secret")
         self.assertEqual(source.get_field_value("server", None), None)
 
-        app_config = mcp_config.GraphitiAppConfig(episode_id_prefix=None)
-        self.assertEqual(app_config.episode_id_prefix, "")
+        namespace_config = mcp_config.NamespaceConfig(episode_id_prefix=None)
+        self.assertEqual(namespace_config.episode_id_prefix, "")
 
-        graphiti_config = mcp_config.GraphitiConfig()
-        graphiti_config.apply_cli_overrides(
+        server_config = mcp_config.MCPServerConfig()
+        server_config.apply_cli_overrides(
             SimpleNamespace(
                 transport="stdio",
                 llm_provider="bedrock",
@@ -438,13 +473,13 @@ class SmallModuleTests(unittest.TestCase):
                 user_id="student1",
             )
         )
-        self.assertEqual(graphiti_config.server.transport, "stdio")
-        self.assertEqual(graphiti_config.llm.provider, "bedrock")
-        self.assertEqual(graphiti_config.llm.model, "sonnet")
-        self.assertEqual(graphiti_config.embedder.provider, "bedrock")
-        self.assertEqual(graphiti_config.database.provider, "neptune")
-        self.assertEqual(graphiti_config.graphiti.group_id, "course-team")
-        self.assertEqual(graphiti_config.graphiti.user_id, "student1")
+        self.assertEqual(server_config.server.transport, "stdio")
+        self.assertEqual(server_config.llm.provider, "bedrock")
+        self.assertEqual(server_config.llm.model, "sonnet")
+        self.assertEqual(server_config.embedder.provider, "bedrock")
+        self.assertEqual(server_config.database.provider, "neptune")
+        self.assertEqual(server_config.namespace.group_id, "course-team")
+        self.assertEqual(server_config.namespace.user_id, "student1")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = importlib.import_module("pathlib").Path(temp_dir) / "config.yaml"
@@ -452,25 +487,25 @@ class SmallModuleTests(unittest.TestCase):
                 "server:\n"
                 "  host: ${HOST:127.0.0.1}\n"
                 "  port: 9000\n"
-                "graphiti:\n"
+                "namespace:\n"
                 "  episode_id_prefix: ${PREFIX:cg}\n",
                 encoding="utf-8",
             )
-            yaml_source = mcp_config.YamlSettingsSource(mcp_config.GraphitiConfig, config_path)
+            yaml_source = mcp_config.YamlSettingsSource(mcp_config.MCPServerConfig, config_path)
             with patch.dict("os.environ", {"HOST": "0.0.0.0"}, clear=True):
                 loaded = yaml_source()
             self.assertEqual(loaded["server"]["host"], "0.0.0.0")
             self.assertEqual(loaded["server"]["port"], 9000)
-            self.assertEqual(loaded["graphiti"]["episode_id_prefix"], "cg")
+            self.assertEqual(loaded["namespace"]["episode_id_prefix"], "cg")
 
             missing_source = mcp_config.YamlSettingsSource(
-                mcp_config.GraphitiConfig,
+                mcp_config.MCPServerConfig,
                 config_path.with_name("missing.yaml"),
             )
             self.assertEqual(missing_source(), {})
 
-            customized = mcp_config.GraphitiConfig.settings_customise_sources(
-                mcp_config.GraphitiConfig,
+            customized = mcp_config.MCPServerConfig.settings_customise_sources(
+                mcp_config.MCPServerConfig,
                 mcp_config.PydanticBaseSettingsSource,
                 mcp_config.PydanticBaseSettingsSource,
                 mcp_config.PydanticBaseSettingsSource,
@@ -613,10 +648,15 @@ class SmallModuleTests(unittest.TestCase):
             clear=True,
         ):
             driver_config = factories.DatabaseDriverFactory.create_config(neo4j_config)
+            backend_config = factories.DatabaseDriverFactory.create_backend_config(neo4j_config)
         self.assertEqual(driver_config["uri"], "bolt://override:7687")
         self.assertEqual(driver_config["user"], "override-user")
         self.assertEqual(driver_config["password"], "pass")
         self.assertEqual(driver_config["database"], "graph")
+        self.assertEqual(backend_config.uri, "bolt://override:7687")
+        self.assertEqual(backend_config.user, "override-user")
+        self.assertEqual(backend_config.password, "pass")
+        self.assertEqual(backend_config.database, "graph")
 
         with self.assertRaises(ValueError):
             factories.DatabaseDriverFactory.create_config(
@@ -634,8 +674,11 @@ class SmallModuleTests(unittest.TestCase):
         )
         with patch.dict("os.environ", {"AOSS_HOST": "aoss.env"}, clear=True):
             driver_config = factories.DatabaseDriverFactory.create_config(neptune_config)
+            backend_config = factories.DatabaseDriverFactory.create_backend_config(neptune_config)
         self.assertEqual(driver_config["host"], "neptune-db://example")
         self.assertEqual(driver_config["aoss_host"], "aoss.env")
+        self.assertEqual(backend_config.host, "neptune-db://example")
+        self.assertEqual(backend_config.aoss_host, "aoss.env")
 
         with self.assertRaises(ValueError):
             factories.DatabaseDriverFactory.create_config(

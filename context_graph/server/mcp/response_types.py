@@ -1,8 +1,8 @@
 """Response type definitions for MCP server tools."""
 
-from typing import Any
+from typing import Any, Literal
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class ErrorResponse(TypedDict):
@@ -45,12 +45,17 @@ class StatusResponse(TypedDict):
 
 class ProfileResult(TypedDict):
     profile_id: str
+    profile_kind: str
+    profile_target_kind: str
+    profile_target_id: str
     relation_type: str | None
     value_text: str
     source_node_id: str | None
     target_node_id: str | None
     is_active: bool
     score: float
+    matched_key_text: str
+    matched_key_origin: str
     metadata: dict[str, Any]
 
 
@@ -144,3 +149,146 @@ class TraceCallPathResponse(TypedDict):
     revision_id: str
     start_node: CodeGraphNodeRef
     steps: list[CallTraceStep]
+
+
+ToolImplementationStatus = Literal["scaffold", "implemented"]
+ClaimRelationType = Literal[
+    "same_as",
+    "refines",
+    "contradicts",
+    "supersedes",
+    "unrelated",
+]
+TimelineTargetKind = Literal["pull_request", "issue", "file", "symbol", "claim_cluster", "topic"]
+
+
+class ToolScaffoldResponse(TypedDict):
+    status: ToolImplementationStatus
+    message: str
+    capability: NotRequired[str]
+    todo: NotRequired[str]
+
+
+class ContextSearchHit(TypedDict):
+    record_id: str
+    record_type: str
+    title: str | None
+    summary: str | None
+    score: float | None
+    lexical_score: float | None
+    semantic_score: float | None
+    observed_at: str | None
+    source: str | None
+    file_path: str | None
+    retrieval_channels: list[str]
+    matched_profile_key_text: str | None
+    matched_profile_key_origin: str | None
+    semantic_profile_kind: str | None
+
+
+class SearchContextResponse(ToolScaffoldResponse):
+    repo_id: str
+    query: str
+    group_id: str | None
+    requested_sources: list[str]
+    hits: list[ContextSearchHit]
+
+
+class NeighborhoodNode(TypedDict):
+    record_id: str
+    record_type: str
+    display_name: str | None
+    summary: str | None
+    observed_at: str | None
+
+
+class NeighborhoodEdge(TypedDict):
+    edge_type: str
+    source_record_id: str
+    target_record_id: str
+    observed_at: str | None
+
+
+class NodeNeighborhoodResponse(ToolScaffoldResponse):
+    repo_id: str | None
+    center_record_id: str | None
+    concept: str | None
+    nodes: list[NeighborhoodNode]
+    edges: list[NeighborhoodEdge]
+
+
+class TimelineEvent(TypedDict):
+    event_id: str
+    event_type: str
+    title: str | None
+    summary: str | None
+    observed_at: str | None
+    record_id: str | None
+
+
+class TimelineResponse(ToolScaffoldResponse):
+    repo_id: str | None
+    target_kind: TimelineTargetKind
+    target_id: str
+    events: list[TimelineEvent]
+
+
+class ClaimResolutionCandidate(TypedDict):
+    candidate_claim_id: str | None
+    candidate_claim_text: str | None
+    relation: ClaimRelationType
+    confidence: str | None
+    rationale: str | None
+
+
+class ResolveClaimResponse(ToolScaffoldResponse):
+    repo_id: str
+    candidate_claim_text: str
+    claim_kind: str | None
+    claim_subkind: str | None
+    matches: list[ClaimResolutionCandidate]
+
+
+class ArtifactOutlineSection(TypedDict):
+    section_id: str
+    title: str
+    summary: str | None
+
+
+class SynthesizeArtifactResponse(ToolScaffoldResponse):
+    repo_id: str
+    subject_kind: str
+    subject_id: str
+    artifact_kind: str
+    artifact_id: str | None
+    title: str | None
+    summary: str | None
+    sections: list[ArtifactOutlineSection]
+    supporting_claim_ids: list[str]
+    supporting_observation_ids: list[str]
+
+
+class CodeContextSnippet(TypedDict):
+    file_path: str
+    qualified_name: str | None
+    start_line: int | None
+    end_line: int | None
+    snippet: str | None
+
+
+class CodeContextResponse(ToolScaffoldResponse):
+    repo_id: str
+    target: str
+    target_kind: str | None
+    primary_symbol: CodeGraphNodeRef | None
+    related_symbols: list[CodeGraphNodeRef]
+    snippets: list[CodeContextSnippet]
+
+
+class RecordAgentObservationResponse(ToolScaffoldResponse):
+    repo_id: str
+    observation_id: str | None
+    task_id: str | None
+    accepted: bool
+    persisted: bool
+    queue_position: NotRequired[int]

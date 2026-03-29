@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 import hashlib
 import json
 from typing import Any
 
 from context_graph.models import GraphSnapshot
+from context_graph.profile_vectors import ProfileVectorIndexer
+from context_graph.profiles import ProfileRecord, semantic_observation_profile_from_observation
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionCandidateRetriever,
     ClaimResolutionService,
+    ClaimSemanticRetrievalService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
@@ -20,6 +26,8 @@ from context_graph.provenance import (
 )
 from context_graph.provenance.prompt_context import build_deterministic_code_context
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
+from context_graph.metadata import MetadataStore
+from context_graph.query_parser import QueryParser
 from context_graph.storage.backend import (
     BackendDriver,
     BackendSyncBridge,
@@ -124,6 +132,7 @@ class GitHubIndexer:
         self,
         *,
         github_api: GitHubApiClient,
+        metadata_store: MetadataStore | None = None,
         backend_driver: BackendDriver | None,
         planner: GitHubStructuralPlanner | None = None,
         observation_planner: ObservationMutationPlanner | None = None,
@@ -135,8 +144,11 @@ class GitHubIndexer:
         claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
     ) -> None:
         self.github_api = github_api
+        self.metadata_store = metadata_store
         self.backend_driver = backend_driver
         self.planner = planner or GitHubStructuralPlanner()
         self.observation_planner = observation_planner or ObservationMutationPlanner()
@@ -148,15 +160,38 @@ class GitHubIndexer:
         self.claim_resolution_service = claim_resolution_service or (
             ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
         )
+        self.claim_profile_key_generation_service = claim_profile_key_generation_service or (
+            ClaimProfileKeyGenerationService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        semantic_claim_search_service = (
+            ClaimSemanticRetrievalService(
+                metadata_store=metadata_store,
+                vector_store=profile_indexer.vector_store,
+                embedding_provider=profile_indexer.embedding_provider,
+                query_parser=QueryParser(llm_client=llm_client),
+            )
+            if metadata_store is not None
+            and profile_indexer is not None
+            and hasattr(profile_indexer, "vector_store")
+            and hasattr(profile_indexer, "embedding_provider")
+            else None
+        )
+        self.claim_candidate_retriever = ClaimResolutionCandidateRetriever(
+            backend_driver=backend_driver,
+            semantic_claim_search_service=semantic_claim_search_service,
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=self.claim_candidate_retriever,
+            claim_profile_key_generation_service=self.claim_profile_key_generation_service,
             claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
+        self.profile_indexer = profile_indexer
 
     def sync_for_commits(
         self,
@@ -195,6 +230,15 @@ class GitHubIndexer:
             planned_observations=planned_observations,
             snapshot=snapshot,
         )
+        profiles = _dedupe_profiles(
+            (
+                *(
+                    semantic_observation_profile_from_observation(planned.observation)
+                    for planned in planned_observations
+                ),
+                *tuple(claim_counts.get("profiles", ()) or ()),
+            )
+        )
         operations = merge_mutation_plans(
             structural_operations,
             observation_operations,
@@ -206,6 +250,8 @@ class GitHubIndexer:
                 raise RuntimeError("GitHub structural sync execution requires a configured backend driver")
             bridge = BackendSyncBridge(self.backend_driver)
             operations_applied = bridge.apply(operations).operations_applied
+            if profiles:
+                self._persist_profiles(profiles)
         counts: dict[str, int] = {}
         pull_requests: set[int] = set()
         issues: set[int] = set()
@@ -246,17 +292,28 @@ class GitHubIndexer:
             "rejected": 0,
             "reasons": {},
             "invalidated": 0,
+            "profiles": (),
         }
         if self.claim_extraction_service is None:
             return MutationPlan(), zero_counts
 
         plans: list[MutationPlan] = []
+        claim_profiles: list[ProfileRecord] = []
         extracted_count = 0
         validated_count = 0
         rejected_count = 0
         invalidated_count = 0
         rejection_reasons: dict[str, int] = {}
+        claim_session = (
+            self.evidence_invalidation_planner.begin_claim_session(
+                repo_id=planned_observations[0].observation.repo_id
+            )
+            if planned_observations
+            else None
+        )
         for planned in planned_observations:
+            if planned.observation.observation_kind == ObservationKind.GITHUB_ISSUE_CLOSED:
+                continue
             try:
                 extraction = self.claim_extraction_service.extract(
                     planned.observation,
@@ -287,9 +344,11 @@ class GitHubIndexer:
                 observation=planned.observation,
                 validation=validation,
                 snapshot=snapshot,
+                session=claim_session,
             )
             plans.append(invalidation_result.plan)
             invalidated_count += invalidation_result.invalidated_count
+            claim_profiles.extend(invalidation_result.profiles)
         return (
             merge_mutation_plans(*plans),
             {
@@ -298,8 +357,19 @@ class GitHubIndexer:
                 "rejected": rejected_count,
                 "reasons": rejection_reasons,
                 "invalidated": invalidated_count,
+                "profiles": _dedupe_profiles(claim_profiles),
             },
         )
+
+    def _persist_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
+        deduped = _dedupe_profiles(profiles)
+        if not deduped:
+            return
+        if self.metadata_store is None:
+            raise RuntimeError("GitHub profile persistence requires a configured metadata store")
+        self.metadata_store.upsert_profiles(deduped)
+        if self.profile_indexer is not None:
+            self.profile_indexer.apply_profile_updates(profiles=deduped)
 
     def _build_bundle(
         self,
@@ -453,6 +523,14 @@ class GitHubIndexer:
                     body_text=issue_body_text,
                 ),
             )
+            _maybe_add_observation_source(
+                observation_sources,
+                _build_issue_closed_observation_source(
+                    repo_id=repo_id,
+                    repo_ref=repo_ref,
+                    payload=issue,
+                ),
+            )
             for comment in self.github_api.list_issue_comments(owner, repo_name, number):
                 comment_author_login = _author_login(comment)
                 comment_body_text = _normalized_optional_text(comment.get("body"))
@@ -493,7 +571,12 @@ class GitHubIndexer:
             project_links=tuple(sorted(project_links.values(), key=lambda item: (item.relation_type, item.target_node_id))),
             commit_links=tuple(sorted(commit_links.values(), key=lambda item: (item.relation_type, item.commit_sha, item.target_node_id))),
             entity_links=tuple(sorted(entity_links.values(), key=lambda item: (item.relation_type, item.source_node_id, item.target_node_id))),
-            observation_sources=tuple(sorted(observation_sources.values(), key=lambda item: (item.observation_kind.value, item.external_id))),
+            observation_sources=tuple(
+                sorted(
+                    observation_sources.values(),
+                    key=_observation_source_sort_key,
+                )
+            ),
         )
 
 
@@ -621,6 +704,50 @@ def _build_issue_body_observation_source(
             "issue_number": number,
             "url": payload.get("html_url"),
             "state": payload.get("state"),
+        },
+    )
+
+
+def _build_issue_closed_observation_source(
+    *,
+    repo_id: str,
+    repo_ref: GitHubRepoRef,
+    payload: Mapping[str, Any],
+) -> GitHubObservationSource | None:
+    number = int(payload["number"])
+    closed_at = payload.get("closed_at")
+    if not closed_at:
+        return None
+    closed_by = payload.get("closed_by")
+    closed_by_login = _mapping_login(closed_by) if isinstance(closed_by, Mapping) else None
+    issue_title = _normalized_optional_text(payload.get("title"))
+    title = f"Issue #{number} closed"
+    if issue_title:
+        title = f"{title}: {issue_title}"
+    state_reason = _normalized_optional_text(payload.get("state_reason"))
+    text = f"Issue #{number} was closed."
+    if state_reason:
+        text = f"{text} State reason: {state_reason}."
+    return GitHubObservationSource(
+        observation_kind=ObservationKind.GITHUB_ISSUE_CLOSED,
+        source_kind="issue",
+        source_id=_issue_node_id(repo_id, number),
+        source_record_type="github_issue",
+        external_id=f"{payload.get('id', number)}:closed",
+        number=number,
+        url=payload.get("html_url"),
+        title=title,
+        author_login=closed_by_login,
+        created_at=closed_at,
+        updated_at=closed_at,
+        text=text,
+        metadata={
+            "github_repo": repo_ref.canonical_repo,
+            "issue_number": number,
+            "url": payload.get("html_url"),
+            "closed_at": closed_at,
+            "closed_by": closed_by_login,
+            "state_reason": payload.get("state_reason"),
         },
     )
 
@@ -911,10 +1038,15 @@ def _issue_node_id(repo_id: str, number: int) -> str:
 
 def _author_login(payload: Mapping[str, Any]) -> str | None:
     user = payload.get("user")
-    if isinstance(user, Mapping):
-        login = user.get("login")
-        if isinstance(login, str):
-            return login
+    return _mapping_login(user) if isinstance(user, Mapping) else None
+
+
+def _mapping_login(payload: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    login = payload.get("login")
+    if isinstance(login, str):
+        return login
     return None
 
 
@@ -938,9 +1070,36 @@ def _normalized_optional_text(value: object) -> str | None:
     return normalized or None
 
 
+def _observation_source_sort_key(source: GitHubObservationSource) -> tuple[bool, datetime, str, str]:
+    observed_at = _parse_datetime(source.updated_at or source.created_at)
+    return (
+        observed_at is None,
+        observed_at or datetime.max,
+        source.observation_kind.value,
+        source.external_id,
+    )
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
 def _merge_reason_counts(*reason_maps: Mapping[str, int]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for reason_map in reason_maps:
         for key, value in reason_map.items():
             counts[key] = counts.get(key, 0) + value
     return counts
+
+
+def _dedupe_profiles(profiles: Sequence[ProfileRecord]) -> tuple[ProfileRecord, ...]:
+    deduped: dict[str, ProfileRecord] = {}
+    for profile in profiles:
+        deduped[profile.profile_id] = profile
+    return tuple(deduped[profile_id] for profile_id in sorted(deduped))

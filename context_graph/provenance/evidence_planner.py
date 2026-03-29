@@ -31,7 +31,7 @@ from .validation import ClaimValidationResult, ValidatedClaimBundle
 
 @dataclass(frozen=True, slots=True)
 class PreparedEvidenceRecord:
-    """One evidence record plus the grounded ABOUT targets it should emit."""
+    """One evidence record plus grounded targets available to claim planning."""
 
     evidence: EvidenceRecord
     about_record_ids: tuple[str, ...] = ()
@@ -281,18 +281,6 @@ class EvidenceMutationPlanner:
             target_record_id=observation.observation_id,
             properties={"observation_kind": observation.observation_kind.value},
         )
-        about_edges = tuple(
-            EdgeRecord(
-                record_id=f"about:{evidence.evidence_id}:{target_record_id}",
-                record_type="about",
-                repo_id=evidence.repo_id,
-                group_id=evidence.repo_id,
-                relationship_type="ABOUT",
-                source_record_id=evidence.evidence_id,
-                target_record_id=target_record_id,
-            )
-            for target_record_id in prepared.about_record_ids
-        )
         support_edge = (
             EdgeRecord(
                 record_id=f"supports_claim:{evidence.evidence_id}:{claim_record_id}",
@@ -320,7 +308,6 @@ class EvidenceMutationPlanner:
             upsert_nodes=(self._node_record(evidence),),
             upsert_edges=(
                 derived_from_edge,
-                *about_edges,
                 *((support_edge,) if support_edge is not None else ()),
             ),
             upsert_search_documents=(self._search_document(evidence, observation_kind=observation.observation_kind.value),),

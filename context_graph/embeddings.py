@@ -30,7 +30,10 @@ class EmbeddingProvider:
 def load_embedding_settings(args: Any | None = None) -> EmbeddingSettings | None:
     provider = _arg_or_env(args, "embed_provider", "CONTEXT_GRAPH_EMBED_PROVIDER")
     if not provider:
-        return None
+        inferred_provider = _infer_embedding_provider(args)
+        if inferred_provider is None:
+            return None
+        provider = inferred_provider
     provider = provider.strip().lower()
     if provider not in {"openai", "bedrock"}:
         raise RuntimeError(
@@ -109,3 +112,20 @@ def _arg_or_env(args: Any | None, attr: str, env_name: str) -> str | None:
             return str(value)
     value = os.getenv(env_name)
     return value if value else None
+
+
+def _infer_embedding_provider(args: Any | None = None) -> str | None:
+    llm_provider = _arg_or_env(args, "llm_provider", "CONTEXT_GRAPH_LLM_PROVIDER")
+    if llm_provider:
+        normalized = llm_provider.strip().lower()
+        if normalized in {"openai", "bedrock"}:
+            return normalized
+
+    if _arg_or_env(args, "embed_api_key", "CONTEXT_GRAPH_EMBED_API_KEY") or os.getenv("OPENAI_API_KEY"):
+        return "openai"
+
+    aws_region = _arg_or_env(args, "aws_region", "AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    if aws_region:
+        return "bedrock"
+
+    return None

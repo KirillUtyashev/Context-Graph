@@ -17,6 +17,7 @@ class ProfileKeyRecord:
     source_node_id: str | None
     target_node_id: str | None
     key_text: str
+    key_origin: str
     embedding: tuple[float, ...]
     is_active: bool
     valid_from_revision: str | None
@@ -33,4 +34,5 @@ class ProfileVectorHit:
     repo_id: str
     profile_kind: str
     key_text: str
+    key_origin: str
     score: float

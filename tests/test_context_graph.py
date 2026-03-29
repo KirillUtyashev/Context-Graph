@@ -52,7 +52,13 @@ from context_graph.profile_vectors import (
     ProfileSearchService,
     ProfileVectorIndexer,
 )
-from context_graph.profiles import ProfileDeactivation, ProfileRecord, SEMANTIC_FACT_PROFILE_KIND
+from context_graph.profiles import (
+    PROFILE_KEY_ORIGIN_RAW_TEXT,
+    ProfileDeactivation,
+    ProfileKeyDefinition,
+    ProfileRecord,
+    SEMANTIC_FACT_PROFILE_KIND,
+)
 from context_graph.query_parser import QueryParser
 
 
@@ -1603,7 +1609,10 @@ class ProfileVectorStoreTests(unittest.TestCase):
             target_node_kind="Function",
             target_revision_id=None,
             value_text="Function main justifies Function helper. main uses helper for shared logic",
-            keys=("helper rollback", "main helper"),
+            keys=(
+                ProfileKeyDefinition("helper rollback", PROFILE_KEY_ORIGIN_RAW_TEXT),
+                ProfileKeyDefinition("main helper", PROFILE_KEY_ORIGIN_RAW_TEXT),
+            ),
             metadata={"episode_ids": ["turn-1"]},
             is_active=True,
             updated_at="2026-03-22T00:00:00+00:00",
@@ -1893,7 +1902,11 @@ class MetadataStoreTests(unittest.TestCase):
             target_node_kind="Function",
             target_revision_id=None,
             value_text="Function main justifies Function helper. main uses helper for shared logic",
-            keys=("JUSTIFIES", "main", "helper"),
+            keys=(
+                ProfileKeyDefinition("JUSTIFIES", PROFILE_KEY_ORIGIN_RAW_TEXT),
+                ProfileKeyDefinition("main", PROFILE_KEY_ORIGIN_RAW_TEXT),
+                ProfileKeyDefinition("helper", PROFILE_KEY_ORIGIN_RAW_TEXT),
+            ),
             metadata={"episode_ids": ["turn-1"]},
             is_active=True,
             updated_at="2026-03-22T00:00:00+00:00",

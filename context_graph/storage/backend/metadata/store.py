@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any, Iterable, Iterator, Sequence
 
 from context_graph.models import GraphSnapshot, canonical_json, utc_now_iso
-from context_graph.profiles import ProfileDeactivation, ProfileRecord
+from context_graph.profiles import ProfileDeactivation, ProfileKeyDefinition, ProfileRecord
 
 from .types import RepoIndexState, RepoSourceState
 
@@ -901,6 +901,13 @@ def _stable_lock_id(value: str) -> int:
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:
+    raw_keys = json.loads(row[12] or "[]")
+    parsed_keys = tuple(
+        key
+        for raw_value in raw_keys
+        for key in [ProfileKeyDefinition.from_json_value(raw_value)]
+        if key is not None
+    )
     return ProfileRecord(
         profile_id=str(row[0]),
         repo_id=str(row[1]),
@@ -914,7 +921,7 @@ def _profile_from_row(row: Sequence[Any]) -> ProfileRecord:
         target_node_kind=row[9],
         target_revision_id=row[10],
         value_text=str(row[11]),
-        keys=tuple(json.loads(row[12] or "[]")),
+        keys=parsed_keys,
         metadata=json.loads(row[13] or "{}"),
         is_active=bool(row[14]),
         valid_from_revision=row[15],

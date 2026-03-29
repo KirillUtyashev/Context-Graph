@@ -1,4 +1,4 @@
-"""Formatting utilities for Graphiti MCP Server."""
+"""Formatting utilities for the Context Graph MCP server."""
 
 from typing import Any
 

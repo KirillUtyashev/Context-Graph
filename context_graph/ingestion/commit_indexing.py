@@ -5,10 +5,15 @@ import re
 from typing import Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
+from context_graph.profile_vectors import ProfileVectorIndexer
+from context_graph.profiles import ProfileRecord, semantic_observation_profile_from_observation
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionCandidateRetriever,
     ClaimResolutionService,
+    ClaimSemanticRetrievalService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
@@ -16,6 +21,7 @@ from context_graph.provenance import (
     ObservationMutationPlanner,
 )
 from context_graph.provenance.prompt_context import build_deterministic_code_context
+from context_graph.query_parser import QueryParser
 from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .deterministic_planner import DeterministicMutationPlanner
@@ -111,6 +117,8 @@ class CommitIndexingService:
         claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -126,15 +134,37 @@ class CommitIndexingService:
         self.claim_resolution_service = claim_resolution_service or (
             ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
         )
+        self.claim_profile_key_generation_service = claim_profile_key_generation_service or (
+            ClaimProfileKeyGenerationService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        semantic_claim_search_service = (
+            ClaimSemanticRetrievalService(
+                metadata_store=metadata_store,
+                vector_store=profile_indexer.vector_store,
+                embedding_provider=profile_indexer.embedding_provider,
+                query_parser=QueryParser(llm_client=llm_client),
+            )
+            if profile_indexer is not None
+            and hasattr(profile_indexer, "vector_store")
+            and hasattr(profile_indexer, "embedding_provider")
+            else None
+        )
+        self.claim_candidate_retriever = ClaimResolutionCandidateRetriever(
+            backend_driver=backend_driver,
+            semantic_claim_search_service=semantic_claim_search_service,
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=self.claim_candidate_retriever,
+            claim_profile_key_generation_service=self.claim_profile_key_generation_service,
             claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
+        self.profile_indexer = profile_indexer
         self.writer = writer or TemporalGraphWriter(
             metadata_store=metadata_store,
             backend_driver=backend_driver,
@@ -416,6 +446,12 @@ class CommitIndexingService:
             snapshot=structural_plan.snapshot,
             commit=commit,
         )
+        profiles = _dedupe_profiles(
+            (
+                *((semantic_observation_profile_from_observation(planned_observation.observation),) if planned_observation is not None else ()),
+                *tuple(claim_counts.get("profiles", ()) or ()),
+            )
+        )
         all_operation_plans = [structural_plan.plan]
         if not commit_plan.is_empty():
             all_operation_plans.append(commit_plan)
@@ -430,6 +466,8 @@ class CommitIndexingService:
             all_operations,
             execute=execute,
         )
+        if execute and profiles:
+            self._persist_profiles(profiles)
         self.metadata_store.save_repo_index_state(
             RepoIndexState(
                 repo_id=structural_plan.snapshot.repo_id,
@@ -565,6 +603,7 @@ class CommitIndexingService:
             "rejected": 0,
             "reasons": {},
             "invalidated": 0,
+            "profiles": (),
         }
         if planned_observation is None or self.claim_extraction_service is None:
             return MutationPlan(), zero_counts
@@ -600,8 +639,17 @@ class CommitIndexingService:
                 "rejected": validation.rejected_count,
                 "reasons": validation.rejection_reason_counts,
                 "invalidated": invalidation_result.invalidated_count,
+                "profiles": invalidation_result.profiles,
             },
         )
+
+    def _persist_profiles(self, profiles: Sequence[ProfileRecord]) -> None:
+        deduped = _dedupe_profiles(profiles)
+        if not deduped:
+            return
+        self.metadata_store.upsert_profiles(deduped)
+        if self.profile_indexer is not None:
+            self.profile_indexer.apply_profile_updates(profiles=deduped)
 
 
 def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
@@ -610,3 +658,10 @@ def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
         for key, value in reason_map.items():
             counts[key] = counts.get(key, 0) + value
     return counts
+
+
+def _dedupe_profiles(profiles: Sequence[ProfileRecord]) -> tuple[ProfileRecord, ...]:
+    deduped: dict[str, ProfileRecord] = {}
+    for profile in profiles:
+        deduped[profile.profile_id] = profile
+    return tuple(deduped[profile_id] for profile_id in sorted(deduped))

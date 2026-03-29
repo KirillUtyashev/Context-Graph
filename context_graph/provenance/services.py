@@ -8,6 +8,7 @@ import threading
 from typing import Any, Mapping, Sequence
 
 from context_graph.memory.prompts.models import Message
+from pydantic import BaseModel, Field
 
 from .canonicalization import canonicalize_claim_text
 from .debug import emit_provenance_debug
@@ -122,6 +123,62 @@ class ClaimEvidenceExtractionService:
 
 
 EvidenceExtractionService = ClaimEvidenceExtractionService
+
+
+class ClaimProfileKeyGenerationResponse(BaseModel):
+    retrieval_keys: list[str] = Field(default_factory=list)
+
+
+class ClaimProfileKeyGenerationService:
+    """Generate a few grounded semantic retrieval phrases for persisted claims."""
+
+    def __init__(self, *, llm_client: Any | None = None) -> None:
+        self.llm_client = llm_client
+
+    def generate(
+        self,
+        *,
+        repo_id: str,
+        claim_text: str,
+        claim_subkind: str,
+        support_texts: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        normalized_claim_text = _normalize_profile_key_text(claim_text)
+        normalized_support_texts = tuple(
+            text
+            for text in (
+                _normalize_profile_key_text(text)
+                for text in support_texts[:3]
+            )
+            if text
+        )
+        if not normalized_claim_text or self.llm_client is None:
+            return ()
+        try:
+            response = _execute_provenance_request(
+                llm_client=self.llm_client,
+                messages=_claim_profile_key_prompt(
+                    claim_text=normalized_claim_text,
+                    claim_subkind=claim_subkind,
+                    support_texts=normalized_support_texts,
+                ),
+                response_model=ClaimProfileKeyGenerationResponse,
+                group_id=repo_id,
+                prompt_name="context_graph.provenance.generate_claim_profile_keys",
+                debug_metadata={
+                    "repo_id": repo_id,
+                    "claim_text": normalized_claim_text,
+                    "claim_subkind": claim_subkind,
+                    "support_texts": list(normalized_support_texts),
+                },
+            )
+        except Exception:
+            return ()
+        return _filter_generated_claim_profile_keys(
+            response.retrieval_keys,
+            claim_text=normalized_claim_text,
+            limit=3,
+        )
 
 
 class EvidenceDedupService:
@@ -332,6 +389,9 @@ class FactConflictResolutionService:
 class ResearchArtifactSynthesisService:
     """Build bounded research artifact synthesis requests."""
 
+    def __init__(self, *, llm_client: Any | None = None) -> None:
+        self.llm_client = llm_client
+
     def build_request(
         self,
         *,
@@ -352,6 +412,38 @@ class ResearchArtifactSynthesisService:
             metadata=synthesize_research_artifact.SYNTHESIZE_RESEARCH_ARTIFACT_FROM_CODE_AND_EVIDENCE,
             messages=tuple(synthesize_research_artifact.from_code_and_evidence(context)),
             response_model=ResearchArtifactSynthesisResponse,
+        )
+
+    def synthesize(
+        self,
+        *,
+        repo_id: str,
+        repo_region: Mapping[str, Any] | None = None,
+        code_context: Mapping[str, Any] | None = None,
+        evidence: Sequence[EvidenceCandidate] | None = None,
+        claims: Sequence[ClaimCandidate | ClaimRelationCandidate | ResearchArtifactCandidate] | None = None,
+    ) -> ResearchArtifactSynthesisResponse:
+        if self.llm_client is None:
+            raise RuntimeError("research artifact synthesis requires a configured llm_client")
+        request = self.build_request(
+            repo_region=repo_region,
+            code_context=code_context,
+            evidence=evidence,
+            claims=claims,
+        )
+        return _execute_provenance_request(
+            llm_client=self.llm_client,
+            messages=request.messages,
+            response_model=request.response_model,
+            group_id=repo_id,
+            prompt_name=request.prompt_name,
+            debug_metadata={
+                "repo_id": repo_id,
+                "repo_region": dict(repo_region or {}),
+                "evidence_count": len(evidence or ()),
+                "claim_count": len(claims or ()),
+                "has_code_context": bool(code_context),
+            },
         )
 def _run_coroutine_sync(coro: Any) -> Any:
     try:
@@ -377,10 +469,94 @@ def _run_coroutine_sync(coro: Any) -> Any:
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_PATH_LIKE_RE = re.compile(r"(?:^|[\s`])(?:[\w.-]+/)+[\w./-]+(?:$|[\s`])")
+_DOTTED_NAME_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+\b")
+_SNAKE_CASE_RE = re.compile(r"\b[A-Za-z_]+_[A-Za-z0-9_]+\b")
+_UPPER_IDENTIFIER_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 
 
 def _normalize_text_key(value: str) -> str:
     return _WHITESPACE_RE.sub(" ", value.strip()).lower()
+
+
+def _normalize_profile_key_text(value: object) -> str:
+    if value is None:
+        return ""
+    return _WHITESPACE_RE.sub(" ", str(value).strip())
+
+
+def _claim_profile_key_prompt(
+    *,
+    claim_text: str,
+    claim_subkind: str,
+    support_texts: Sequence[str],
+) -> list[Message]:
+    support_lines = "\n".join(f"- {text}" for text in support_texts) or "- (none)"
+    return [
+        Message(
+            role="system",
+            content=(
+                "You generate semantic retrieval phrases for one persisted software-provenance claim.\n"
+                "Return only short noun phrases or compact search phrases.\n"
+                "The phrases must stay grounded in the provided claim text and support text.\n"
+                "Do not output code anchors, file paths, dotted names, SHAs, issue numbers, tags, or explanations.\n"
+                "Do not invent causes, architecture changes, or rationale unless directly stated.\n"
+                "Return JSON with exactly one key: \"retrieval_keys\"."
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                f"Claim subkind: {claim_subkind}\n"
+                f"Claim text: {claim_text}\n"
+                "Support text excerpts:\n"
+                f"{support_lines}\n\n"
+                "Produce 1 to 3 grounded semantic retrieval phrases."
+            ),
+        ),
+    ]
+
+
+def _filter_generated_claim_profile_keys(
+    values: Sequence[str],
+    *,
+    claim_text: str,
+    limit: int,
+) -> tuple[str, ...]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    normalized_claim_text = _normalize_profile_key_text(claim_text)
+    for value in values:
+        normalized = _normalize_profile_key_text(value)
+        if not normalized:
+            continue
+        if normalized.casefold() == normalized_claim_text.casefold():
+            continue
+        if _looks_like_code_anchor_phrase(normalized):
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(normalized)
+        if len(filtered) >= limit:
+            break
+    return tuple(filtered)
+
+
+def _looks_like_code_anchor_phrase(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return any(
+        pattern.search(stripped) is not None
+        for pattern in (
+            _PATH_LIKE_RE,
+            _DOTTED_NAME_RE,
+            _SNAKE_CASE_RE,
+            _UPPER_IDENTIFIER_RE,
+        )
+    )
 
 
 def _execute_provenance_request(

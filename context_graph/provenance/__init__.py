@@ -34,21 +34,28 @@ from .models import (
     evidence_record_id,
     git_commit_message_observation_id,
     github_issue_body_observation_id,
+    github_issue_closed_observation_id,
     github_issue_comment_observation_id,
     github_pr_review_comment_observation_id,
     github_pr_review_observation_id,
     github_pr_body_observation_id,
 )
-from .claim_planner import ClaimMutationPlanner, ClaimPromotionService
+from .claim_planner import (
+    ClaimMutationPlanner,
+    ClaimPromotionService,
+    ClaimResolutionCandidateRetriever,
+)
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner, PreparedEvidenceRecord
 from .invalidation import CurrentEvidenceReader, EvidenceInvalidationPlanner, FactInvalidationPlanResult
 from .schema_registry import DEFAULT_PROVENANCE_SCHEMA_REGISTRY, ProvenanceSchemaRegistry
 from .validation import ClaimBundleValidator, ClaimValidationResult, RejectedClaimBundle, ValidatedClaimBundle
 from .planner import ObservationMutationPlanner
+from .claim_retrieval import ClaimSemanticRetrievalService
 from .services import (
     ClaimEvidenceExtractionService,
     ClaimCanonicalizationService,
     ClaimDerivationService,
+    ClaimProfileKeyGenerationService,
     ClaimResolutionService,
     ClaimRelationService,
     EvidenceDedupService,
@@ -68,12 +75,15 @@ __all__ = [
     "ClaimDerivationService",
     "ClaimEvidenceExtractionResponse",
     "ClaimEvidenceExtractionService",
+    "ClaimProfileKeyGenerationService",
     "ClaimRecord",
     "ClaimResolutionCandidate",
     "ClaimResolutionResponse",
     "ClaimMutationPlanner",
     "ClaimPromotionService",
+    "ClaimResolutionCandidateRetriever",
     "ClaimResolutionService",
+    "ClaimSemanticRetrievalService",
     "ClaimValidationResult",
     "ClaimRelationCandidate",
     "ClaimRelationResponse",
@@ -115,6 +125,7 @@ __all__ = [
     "evidence_record_id",
     "git_commit_message_observation_id",
     "github_issue_body_observation_id",
+    "github_issue_closed_observation_id",
     "github_issue_comment_observation_id",
     "github_pr_review_comment_observation_id",
     "github_pr_review_observation_id",

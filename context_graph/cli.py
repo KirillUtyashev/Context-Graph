@@ -12,7 +12,13 @@ from .ingestion import CodebaseMemorySnapshotProducer, HostedIndexRequest, Inges
 from context_graph.ingestion.git.github_client import GitHubApiClient
 from .llm import load_episode_llm_settings, make_episode_llm_client
 from .metadata import MetadataStore, PostgresMetadataStore, SQLiteMetadataStore
-from .profile_vectors import AuroraProfileVectorStore, ProfileVectorIndexer
+from .profile_vectors import (
+    AuroraProfileVectorStore,
+    InMemoryProfileVectorStore,
+    ProfileSearchService,
+    ProfileVectorIndexer,
+    SemanticProvenanceSearchService,
+)
 from .query_parser import QueryParser
 from .storage.backend import (
     BackendSyncBridge,
@@ -421,7 +427,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search_profiles_parser = subparsers.add_parser(
         "search-profiles",
-        help="Parse a query and search semantic relation profiles through Aurora pgvector",
+        help="Parse a query and search semantic provenance profiles",
     )
     search_profiles_parser.add_argument("--repo-id", required=True, help="Stable repository identifier")
     search_profiles_parser.add_argument("--query", required=True, help="Natural-language retrieval query")
@@ -681,9 +687,9 @@ def _make_profile_vector_store(args, *, metadata: MetadataStore):
 
 
 def _make_profile_vector_store_from_metadata(metadata: MetadataStore, *, embedding_dim: int = 1024):
-    if not isinstance(metadata, PostgresMetadataStore):
-        return None
-    return AuroraProfileVectorStore.from_metadata_store(metadata, embedding_dim=embedding_dim)
+    if isinstance(metadata, PostgresMetadataStore):
+        return AuroraProfileVectorStore.from_metadata_store(metadata, embedding_dim=embedding_dim)
+    return InMemoryProfileVectorStore()
 
 
 def _make_profile_indexer(args, *, metadata: MetadataStore, embedding_provider=None):
@@ -984,6 +990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backend_driver=backend_driver,
                 snapshot_producer=_producer(),
                 llm_client=llm_client,
+                profile_indexer=_make_profile_indexer(args, metadata=metadata),
             )
             if args.command == "apply-latest-commit":
                 result = driver.apply_latest_commit(
@@ -1046,6 +1053,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 github_api=_make_github_api(args),
                 repo_cache=RepoCacheManager(base_dir=args.repo_cache_dir),
                 llm_client=llm_client,
+                profile_indexer=_make_profile_indexer(args, metadata=metadata),
             )
             result = driver.index_hosted(
                 HostedIndexRequest(
@@ -1163,6 +1171,97 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _emit_json(payload)
         finally:
             _close_backend_driver(backend_driver)
+
+    if args.command == "parse-query":
+        parser_service = _make_query_parser(args)
+        result = parser_service.parse(args.query, llm_enabled=True)
+        return _emit_json(
+            {
+                "query": args.query,
+                "anchors": [
+                    {"kind": anchor.kind, "value": anchor.value}
+                    for anchor in result.anchors
+                ],
+                "high_level_keywords": list(result.high_level_keywords),
+                "intent_tags": list(result.intent_tags),
+            }
+        )
+
+    if args.command == "sync-profile-vectors":
+        metadata = _make_metadata_store(args)
+        profile_indexer = _make_profile_indexer(args, metadata=metadata)
+        if profile_indexer is None:
+            raise RuntimeError("sync-profile-vectors requires embedding settings")
+        indexed = profile_indexer.sync_repo(repo_id=args.repo_id, metadata_store=metadata)
+        return _emit_json(
+            {
+                "repo_id": args.repo_id,
+                "profile_key_records_indexed": indexed,
+            }
+        )
+
+    if args.command == "search-profiles":
+        metadata = _make_metadata_store(args)
+        embedding_provider = _make_embedding_provider(args)
+        if embedding_provider is None:
+            raise RuntimeError("search-profiles requires embedding settings")
+        vector_store = _make_profile_vector_store(args, metadata=metadata)
+        if vector_store is None:
+            raise RuntimeError("unable to create a profile vector store")
+        vector_store.bootstrap()
+        if isinstance(vector_store, InMemoryProfileVectorStore):
+            profile_indexer = ProfileVectorIndexer(
+                vector_store=vector_store,
+                embedding_provider=embedding_provider,
+            )
+            profile_indexer.sync_repo(repo_id=args.repo_id, metadata_store=metadata)
+        llm_settings = load_episode_llm_settings(args)
+        llm_client = make_episode_llm_client(llm_settings)
+        profile_search = ProfileSearchService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=embedding_provider,
+            query_parser=QueryParser(llm_client=llm_client),
+        )
+        fused_search = SemanticProvenanceSearchService(
+            profile_search_service=profile_search,
+        )
+        result = fused_search.search(
+            repo_id=args.repo_id,
+            query=args.query,
+            limit=args.limit,
+            active_only=not args.include_inactive,
+        )
+        return _emit_json(
+            {
+                "repo_id": args.repo_id,
+                "query": args.query,
+                "anchors": [
+                    {"kind": anchor.kind, "value": anchor.value}
+                    for anchor in result.parse_result.anchors
+                ],
+                "high_level_keywords": list(result.parse_result.high_level_keywords),
+                "intent_tags": list(result.parse_result.intent_tags),
+                "profiles": [
+                    {
+                        "profile_id": profile.profile_id,
+                        "profile_kind": profile.profile_kind,
+                        "profile_target_kind": profile.profile_target_kind,
+                        "profile_target_id": profile.profile_target_id,
+                        "relation_type": profile.relation_type,
+                        "value_text": profile.value_text,
+                        "source_node_id": profile.source_node_id,
+                        "target_node_id": profile.target_node_id,
+                        "is_active": bool(profile.is_active),
+                        "score": hit.score,
+                        "matched_key_text": hit.key_text,
+                        "matched_key_origin": hit.key_origin,
+                        "metadata": dict(profile.metadata),
+                    }
+                    for hit, profile in zip(result.hits, result.profiles)
+                ],
+            }
+        )
 
     parser.error(f"unsupported command: {args.command}")
     return 2

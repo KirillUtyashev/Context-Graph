@@ -6,9 +6,11 @@ into grounded claims, evidence, and claim relations.
 The current system is claim-centric:
 
 - observations are the raw source records
+- observations also keep event time, ingestion time, and normalized thread scope
 - extraction produces claim candidates plus exact supporting evidence
 - validation filters and grounds those candidates deterministically
-- claim planning reconciles new claims against existing claims
+- claim planning reconciles new claims against existing claims with a
+  thread-local pass first and a repo-global fallback second
 - evidence is attached to claims, not treated as the top-level fact model
 
 Claim nodes are now the authoritative layer for currentness, reconciliation,
@@ -25,6 +27,7 @@ An `Observation` is a single raw authored artifact, for example:
 - a commit message
 - a GitHub PR body
 - a GitHub issue body
+- a GitHub issue closed event
 - a PR review
 - a review comment
 - an issue comment
@@ -44,10 +47,15 @@ Important current claim fields:
 - `claim_subkind`
 - `canonical_key`
 - `is_current`
+- `ingested_at`
+- `valid_from`
+- `valid_to`
 - `first_observed_at`
 - `latest_observed_at`
 - `invalidated_at`
 - `invalidated_by_claim_id`
+- `thread_kind`
+- `thread_id`
 
 Claims also keep stance information in metadata:
 
@@ -78,12 +86,13 @@ Those are written on `SUPPORTS_CLAIM` edges from evidence to claim.
 The runtime flow is:
 
 1. Build an observation.
-2. Build a sanitized prompt payload for extraction.
-3. Ask the extraction LLM for bounded claim candidates and exact support.
-4. Validate the returned claims and evidence deterministically.
-5. Resolve claim `ABOUT` targets against the current snapshot.
-6. Reconcile each validated claim against existing persisted claims.
-7. Persist claim nodes, evidence nodes, support edges, and claim relations.
+2. Persist the observation as append-only provenance.
+3. Build a sanitized prompt payload for extraction when the observation kind is claim-bearing.
+4. Ask the extraction LLM for bounded claim candidates and exact support.
+5. Validate the returned claims and evidence deterministically.
+6. Resolve claim `ABOUT` targets against the current snapshot.
+7. Reconcile each validated claim against existing persisted claims.
+8. Persist claim nodes, evidence nodes, support edges, and claim relations.
 
 ### 1. Observation Creation
 
@@ -98,7 +107,14 @@ deterministic context such as:
 - changed files
 - PR number and title
 - issue number and title
+- normalized thread scope (`pull_request`, `issue`, `commit`)
 - mentioned or touched code entities from the current snapshot
+
+Observations now carry:
+
+- `observed_at`: the real source event time
+- `ingested_at`: when this system materialized the observation
+- `thread_kind` / `thread_id`: the local PR, issue, or commit thread
 
 ### 2. Sanitized Prompt Context
 
@@ -147,10 +163,13 @@ The extraction prompt asks for small, source-local claim instances with:
 
 - a normalized `claim_text`
 - an ontology-aligned `claim_subkind`
-- a coarse compatibility `claim_kind`
 - `assertion_status`
 - `claim_frame`
 - 1 to 3 exact support items
+
+The coarse compatibility `claim_kind` is derived deterministically from
+`claim_subkind` during validation. The extraction LLM no longer emits
+`claim_kind` directly.
 
 Each support item must come from the observation title or text and includes:
 
@@ -174,7 +193,7 @@ We do not run a second LLM for validation.
 
 Validation currently checks:
 
-- allowed enums for `claim_kind`, `claim_subkind`, `assertion_status`,
+- allowed enums for derived `claim_kind`, `claim_subkind`, `assertion_status`,
   `claim_frame`, `evidence_kind`, `support_kind`, `support_source`,
   and `support_role`
 - the claim has 1 to 3 support items
@@ -198,14 +217,15 @@ deterministic input to claim persistence.
 
 For each validated claim bundle it:
 
-1. prepares evidence records with grounded `ABOUT` targets
+1. prepares evidence records and carries grounded targets forward for claim planning
 2. computes the claim `canonical_key`
 3. loads current candidate claims from the backend
 4. backfills legacy evidence-carried claims into temporary claim candidates
 5. checks for an exact canonical-key match
-6. if needed, asks the claim-resolution LLM about a bounded candidate set
-7. applies deterministic acceptance and winner-selection rules
-8. emits mutation plans for claims, evidence, and relations
+6. tries same-thread candidates first
+7. falls back to repo-global candidates only if the thread-local pass does not resolve
+8. applies deterministic acceptance and winner-selection rules
+9. emits mutation plans for claims, evidence, and relations
 
 #### Canonical Identity
 
@@ -222,15 +242,15 @@ This becomes `canonical_key`.
 #### Candidate Retrieval
 
 Candidate retrieval is deterministic and local. Candidates are restricted to the
-same repo and same coarse `claim_kind`, then filtered by scope:
+same repo and same coarse `claim_kind`, then filtered in two stages:
 
-- overlapping `ABOUT` targets when we have them
-- otherwise same source scope such as PR or issue
+- same-thread candidates first when `thread_kind` / `thread_id` match
+- repo-global candidates second when grounded `ABOUT` targets overlap
 
 Candidates are ranked by:
 
-- `ABOUT` overlap
 - lexical overlap of normalized claim text
+- `ABOUT` overlap
 - recency
 
 Only a small candidate set is sent to the resolution LLM.
@@ -270,8 +290,6 @@ Persistence currently writes:
 - claim nodes
 - evidence nodes
 - `ABOUT` edges from claim to grounded code targets
-- `ABOUT` edges from evidence to grounded code targets
-- `DERIVED_FROM` edges from claim to observation
 - `DERIVED_FROM` edges from evidence to observation
 - `SUPPORTS_CLAIM` edges from evidence to claim
 - claim-to-claim relation edges
@@ -316,6 +334,18 @@ This means we preserve:
 
 `rejected` claims are stored as historical, non-current claims and do not
 participate in conflict resolution.
+
+Claim timing is now explicit:
+
+- `ingested_at` tracks when the system learned about the claim
+- `valid_from` defaults to the source event time that introduced the claim
+- `valid_to` is set to the source event time of the claim that invalidated or
+  superseded it
+- `invalidated_at` remains as a compatibility mirror of `valid_to`
+
+GitHub `issue_closed` observations are deterministic timeline events in v1.
+They are stored for chronology and thread reasoning, but they do not currently
+produce extracted claims or code `ABOUT` edges.
 
 ## Migration State
 

@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import inspect
 import json
-import re
 from typing import Any
 
 from context_graph.models import GraphSnapshot
+from context_graph.profiles import ProfileRecord, semantic_claim_profile_from_claim
 from context_graph.storage.backend import (
     BackendDriver,
     EdgeRecord,
     MutationPlan,
     NodeRecord,
     RecordKind,
+    SearchMode,
+    SearchQuery,
     SearchDocumentRecord,
     merge_mutation_plans,
     run_backend_coroutine_sync,
 )
 
-from .canonicalization import canonical_claim_key, canonicalize_claim_text
+from .canonicalization import canonical_claim_key
+from .claim_retrieval import ClaimSemanticRetrievalService, build_claim_retrieval_features
 from .debug import emit_provenance_debug
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
 from .models import (
@@ -33,7 +36,7 @@ from .models import (
     PersistedEvidenceRecord,
     claim_record_id,
 )
-from .services import ClaimResolutionService
+from .services import ClaimProfileKeyGenerationService, ClaimResolutionService
 from .services import FactConflictResolutionService
 from .validation import ClaimValidationResult, ValidatedClaimBundle
 
@@ -41,7 +44,6 @@ _CURRENT_CLAIM_QUERY = """
 MATCH (c:BackendRecord)
 WHERE c.record_type = "claim"
   AND c.repo_id = $repo_id
-  AND c.claim_kind = $claim_kind
   AND coalesce(c.is_current, true) = true
 OPTIONAL MATCH (c)-[:ABOUT]->(about:BackendRecord)
 OPTIONAL MATCH (c)<-[:SUPPORTS_CLAIM]-(e:BackendRecord)
@@ -49,14 +51,14 @@ RETURN
     c.record_id AS claim_id,
     properties(c) AS claim_properties,
     collect(DISTINCT about.record_id) AS about_record_ids,
-    collect(DISTINCT e.record_id) AS evidence_record_ids
+    collect(DISTINCT e.record_id) AS evidence_record_ids,
+    collect(DISTINCT e.quote_text) AS support_texts
 """
 
 _CURRENT_EVIDENCE_QUERY = """
-MATCH (e:BackendRecord)-[:ABOUT]->(matched_about:BackendRecord)
+MATCH (e:BackendRecord)
 WHERE e.record_type = "evidence_record"
   AND e.repo_id = $repo_id
-  AND matched_about.record_id IN $about_record_ids
   AND coalesce(e.is_current, true) = true
 WITH DISTINCT e
 OPTIONAL MATCH (e)-[:ABOUT]->(about:BackendRecord)
@@ -69,7 +71,6 @@ RETURN
     collect(DISTINCT properties(observation)) AS observation_properties
 """
 
-_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _INVALIDATING_RELATION_TYPES = frozenset({"contradicts", "supersedes"})
 _RELATION_EDGE_TYPES = {
     "refines": "REFINES",
@@ -93,6 +94,7 @@ class ClaimPromotionCandidate:
 class ClaimMutationPlanResult:
     plan: MutationPlan
     invalidated_count: int = 0
+    profiles: tuple[ProfileRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +102,23 @@ class CandidateClaimState:
     claim: ClaimRecord
     about_record_ids: tuple[str, ...] = ()
     evidence_record_ids: tuple[str, ...] = ()
+    support_texts: tuple[str, ...] = ()
     legacy_evidence_records: tuple[PersistedEvidenceRecord, ...] = ()
     backfill_required: bool = False
+    origin: str = "persisted"
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRetrievalScore:
+    candidate: CandidateClaimState
+    same_thread: bool
+    about_overlap: int
+    lexical_overlap: int
+    code_anchor_overlap: int
+    numeric_anchor_overlap: int
+    kind_compatibility: int
+    retrieval_sources: tuple[str, ...]
+    total_score: float
 
 
 class CurrentClaimReader:
@@ -114,23 +131,15 @@ class CurrentClaimReader:
         self,
         *,
         repo_id: str,
-        claim_kind: str,
-        about_record_ids: Sequence[str],
-        source_id: str | None,
-        limit: int = 50,
+        limit: int = 200,
     ) -> tuple[CandidateClaimState, ...]:
         if self.backend_driver is None:
             return ()
         claim_candidates = self._load_claim_nodes(
             repo_id=repo_id,
-            claim_kind=claim_kind,
-            about_record_ids=about_record_ids,
-            source_id=source_id,
         )
         legacy_candidates = self._load_legacy_evidence_claims(
             repo_id=repo_id,
-            claim_kind=claim_kind,
-            about_record_ids=about_record_ids,
         )
         merged: dict[str, CandidateClaimState] = {
             candidate.claim.claim_id: candidate
@@ -145,14 +154,10 @@ class CurrentClaimReader:
         self,
         *,
         repo_id: str,
-        claim_kind: str,
-        about_record_ids: Sequence[str],
-        source_id: str | None,
     ) -> tuple[CandidateClaimState, ...]:
         query_coro = self.backend_driver.execute_query(
             _CURRENT_CLAIM_QUERY,
             repo_id=repo_id,
-            claim_kind=claim_kind,
         )
         try:
             rows = run_backend_coroutine_sync(query_coro)
@@ -161,17 +166,10 @@ class CurrentClaimReader:
             return ()
         _close_unstarted_coroutine(query_coro)
 
-        ordered_abouts = tuple(dict.fromkeys(about_record_ids))
         candidates: list[CandidateClaimState] = []
         for row in rows:
             claim = _parse_persisted_claim_record(row)
             if claim is None:
-                continue
-            if not _claim_candidate_in_scope(
-                claim,
-                about_record_ids=ordered_abouts,
-                source_id=source_id,
-            ):
                 continue
             candidates.append(claim)
         return tuple(candidates)
@@ -180,16 +178,10 @@ class CurrentClaimReader:
         self,
         *,
         repo_id: str,
-        claim_kind: str,
-        about_record_ids: Sequence[str],
     ) -> tuple[CandidateClaimState, ...]:
-        ordered_abouts = tuple(dict.fromkeys(about_record_ids))
-        if not ordered_abouts:
-            return ()
         query_coro = self.backend_driver.execute_query(
             _CURRENT_EVIDENCE_QUERY,
             repo_id=repo_id,
-            about_record_ids=list(ordered_abouts),
         )
         try:
             rows = run_backend_coroutine_sync(query_coro)
@@ -202,10 +194,6 @@ class CurrentClaimReader:
         for row in rows:
             record = _parse_persisted_evidence_record(row)
             if record is None:
-                continue
-            if record.evidence.claim_kind != claim_kind:
-                continue
-            if not any(record_id in set(ordered_abouts) for record_id in record.about_record_ids):
                 continue
             fact_key = (
                 record.evidence.fact_key
@@ -251,6 +239,8 @@ class CurrentClaimReader:
                 first_observed_at=representative.evidence.observed_at,
                 latest_observed_at=representative.evidence.observed_at,
                 is_current=representative.evidence.is_current,
+                valid_from=representative.evidence.observed_at,
+                valid_to=representative.evidence.invalidated_at,
                 invalidated_at=representative.evidence.invalidated_at,
                 observation_id=representative.evidence.observation_id,
                 metadata={"legacy_backfill": True},
@@ -260,11 +250,303 @@ class CurrentClaimReader:
                     claim=claim,
                     about_record_ids=candidate_about_ids,
                     evidence_record_ids=tuple(record.evidence.evidence_id for record in records),
+                    support_texts=tuple(
+                        dict.fromkeys(
+                            record.evidence.quote_text
+                            for record in records
+                            if record.evidence.quote_text
+                        )
+                    ),
                     legacy_evidence_records=tuple(records),
                     backfill_required=True,
                 )
             )
         return tuple(candidates)
+
+
+class ClaimPlanningSession:
+    """Mutable in-memory view of current claims during one planning run."""
+
+    def __init__(
+        self,
+        *,
+        planner: ClaimMutationPlanner,
+        repo_id: str,
+        seeded_candidates: Sequence[CandidateClaimState] = (),
+        seed_loader: Callable[[], Sequence[CandidateClaimState]] | None = None,
+    ) -> None:
+        self.planner = planner
+        self.repo_id = repo_id
+        self._current_by_claim_id: dict[str, CandidateClaimState] = {}
+        self._claim_ids_by_canonical_key: dict[str, set[str]] = {}
+        self._seed_loader = seed_loader
+        self._seeded = seed_loader is None
+        for candidate in seeded_candidates:
+            self.record_current_candidate(candidate)
+
+    def _ensure_seeded(self) -> None:
+        if self._seeded:
+            return
+        self._seeded = True
+        if self._seed_loader is None:
+            return
+        for candidate in self._seed_loader():
+            if candidate.claim.claim_id in self._current_by_claim_id:
+                continue
+            self.record_current_candidate(candidate)
+
+    def current_candidates(self) -> tuple[CandidateClaimState, ...]:
+        self._ensure_seeded()
+        return tuple(
+            sorted(
+                self._current_by_claim_id.values(),
+                key=_candidate_sort_key,
+                reverse=True,
+            )
+        )
+
+    def find_exact_match(self, canonical_key: str) -> CandidateClaimState | None:
+        self._ensure_seeded()
+        claim_ids = self._claim_ids_by_canonical_key.get(canonical_key, set())
+        matches = [
+            self._current_by_claim_id[claim_id]
+            for claim_id in claim_ids
+            if claim_id in self._current_by_claim_id
+        ]
+        if not matches:
+            return None
+        return sorted(matches, key=_candidate_sort_key, reverse=True)[0]
+
+    def record_current_candidate(self, candidate: CandidateClaimState) -> None:
+        previous = self._current_by_claim_id.get(candidate.claim.claim_id)
+        if previous is not None:
+            previous_ids = self._claim_ids_by_canonical_key.get(previous.claim.canonical_key)
+            if previous_ids is not None:
+                previous_ids.discard(previous.claim.claim_id)
+                if not previous_ids:
+                    self._claim_ids_by_canonical_key.pop(previous.claim.canonical_key, None)
+        self._current_by_claim_id[candidate.claim.claim_id] = candidate
+        self._claim_ids_by_canonical_key.setdefault(candidate.claim.canonical_key, set()).add(
+            candidate.claim.claim_id
+        )
+
+    def discard_current_candidate(self, claim_id: str) -> None:
+        candidate = self._current_by_claim_id.pop(claim_id, None)
+        if candidate is None:
+            return
+        claim_ids = self._claim_ids_by_canonical_key.get(candidate.claim.canonical_key)
+        if claim_ids is None:
+            return
+        claim_ids.discard(claim_id)
+        if not claim_ids:
+            self._claim_ids_by_canonical_key.pop(candidate.claim.canonical_key, None)
+
+    def mark_backfilled(self, claim_ids: Sequence[str]) -> None:
+        for claim_id in claim_ids:
+            candidate = self._current_by_claim_id.get(claim_id)
+            if candidate is None or not candidate.backfill_required:
+                continue
+            self._current_by_claim_id[claim_id] = replace(candidate, backfill_required=False)
+
+    def update_matched_candidate(
+        self,
+        matched: CandidateClaimState,
+        *,
+        claim: ClaimRecord,
+        about_record_ids: Sequence[str],
+        support_texts: Sequence[str],
+        backfill_consumed: bool = False,
+    ) -> None:
+        resolved_about_ids = tuple(matched.about_record_ids or tuple(dict.fromkeys(about_record_ids)))
+        merged_support_texts = _merge_support_texts(matched.support_texts, support_texts)
+        updated = replace(
+            matched,
+            claim=claim,
+            about_record_ids=resolved_about_ids,
+            support_texts=merged_support_texts,
+            backfill_required=False if backfill_consumed else matched.backfill_required,
+        )
+        self.record_current_candidate(updated)
+
+    def add_pending_claim(
+        self,
+        *,
+        claim: ClaimRecord,
+        about_record_ids: Sequence[str],
+        support_texts: Sequence[str],
+    ) -> None:
+        self.record_current_candidate(
+            CandidateClaimState(
+                claim=claim,
+                about_record_ids=tuple(dict.fromkeys(about_record_ids)),
+                support_texts=tuple(dict.fromkeys(support_texts)),
+                origin="pending_batch",
+            )
+        )
+
+    def plan_validated_claims(
+        self,
+        *,
+        observation: Observation,
+        validation: ClaimValidationResult,
+        snapshot: GraphSnapshot | None = None,
+    ) -> ClaimMutationPlanResult:
+        plans: list[MutationPlan] = []
+        invalidated_count = 0
+        profiles: list[ProfileRecord] = []
+        for bundle in validation.validated_claims:
+            result = self.planner._plan_validated_claim_bundle_in_session(
+                session=self,
+                observation=observation,
+                bundle=bundle,
+                snapshot=snapshot,
+            )
+            plans.append(result.plan)
+            invalidated_count += result.invalidated_count
+            profiles.extend(result.profiles)
+        return ClaimMutationPlanResult(
+            plan=merge_mutation_plans(*plans),
+            invalidated_count=invalidated_count,
+            profiles=tuple(profiles),
+        )
+
+    def plan_validated_claim_bundle(
+        self,
+        *,
+        observation: Observation,
+        bundle: ValidatedClaimBundle,
+        snapshot: GraphSnapshot | None = None,
+    ) -> ClaimMutationPlanResult:
+        return self.planner._plan_validated_claim_bundle_in_session(
+            session=self,
+            observation=observation,
+            bundle=bundle,
+            snapshot=snapshot,
+        )
+
+
+class ClaimResolutionCandidateRetriever:
+    """Expand planner claim candidates through lexical and semantic retrieval."""
+
+    def __init__(
+        self,
+        *,
+        backend_driver: BackendDriver | None,
+        semantic_claim_search_service: ClaimSemanticRetrievalService | None = None,
+    ) -> None:
+        self.backend_driver = backend_driver
+        self.semantic_claim_search_service = semantic_claim_search_service
+
+    def retrieve(
+        self,
+        *,
+        candidates: Sequence[CandidateClaimState],
+        new_claim: ClaimRecord,
+        observation: Observation,
+        about_record_ids: Sequence[str],
+        support_texts: Sequence[str],
+        limit: int = 10,
+    ) -> tuple[CandidateRetrievalScore, ...]:
+        current_by_claim_id = {
+            candidate.claim.claim_id: candidate
+            for candidate in candidates
+            if candidate.claim.is_current
+        }
+        if not current_by_claim_id:
+            return ()
+
+        lexical_ranks: dict[str, int] = {}
+        lexical_scores: dict[str, float] = {}
+        if self.backend_driver is not None and hasattr(self.backend_driver, "search"):
+            search_coro = self.backend_driver.search.search(
+                SearchQuery(
+                    mode=SearchMode.LEXICAL,
+                    text=new_claim.claim_text,
+                    record_kinds=(RecordKind.NODE,),
+                    record_types=("claim",),
+                    repo_ids=(new_claim.repo_id,),
+                    limit=max(limit * 4, limit),
+                    filters={"is_current": True},
+                )
+            )
+            try:
+                lexical_hits = run_backend_coroutine_sync(search_coro)
+            except Exception:
+                _close_unstarted_coroutine(search_coro)
+                lexical_hits = []
+            else:
+                _close_unstarted_coroutine(search_coro)
+            for rank, hit in enumerate(lexical_hits, start=1):
+                claim_id = hit.ref.record_id
+                if claim_id not in current_by_claim_id or claim_id in lexical_ranks:
+                    continue
+                lexical_ranks[claim_id] = rank
+                lexical_scores[claim_id] = float(hit.score)
+
+        semantic_ranks: dict[str, int] = {}
+        semantic_scores: dict[str, float] = {}
+        if self.semantic_claim_search_service is not None:
+            try:
+                semantic_result = self.semantic_claim_search_service.search(
+                    repo_id=new_claim.repo_id,
+                    query=new_claim.claim_text,
+                    limit=max(limit * 4, limit),
+                    active_only=True,
+                    llm_enabled=True,
+                )
+            except Exception:
+                semantic_result = None
+            if semantic_result is not None:
+                for rank, hit in enumerate(semantic_result.hits, start=1):
+                    if hit.claim_id not in current_by_claim_id or hit.claim_id in semantic_ranks:
+                        continue
+                    semantic_ranks[hit.claim_id] = rank
+                    semantic_scores[hit.claim_id] = float(hit.score)
+
+        if not lexical_ranks and not semantic_ranks:
+            return ()
+
+        new_features = build_claim_retrieval_features(
+            claim_text=new_claim.claim_text,
+            support_texts=support_texts,
+            fallback_texts=((observation.title,) if observation.title else ()),
+            about_record_ids=about_record_ids,
+        )
+        selected: list[CandidateRetrievalScore] = []
+        for claim_id, candidate in current_by_claim_id.items():
+            lexical_rank = lexical_ranks.get(claim_id)
+            semantic_rank = semantic_ranks.get(claim_id)
+            if lexical_rank is None and semantic_rank is None:
+                continue
+            base_score = _score_candidate(
+                candidate=candidate,
+                new_claim=new_claim,
+                observation=observation,
+                new_about_record_ids=about_record_ids,
+                new_features=new_features,
+            )
+            if not _candidate_is_viable_from_search(
+                base_score,
+                lexical_hit=lexical_rank is not None,
+                semantic_hit=semantic_rank is not None,
+            ):
+                continue
+            selected.append(
+                _score_candidate_from_search(
+                    base_score,
+                    lexical_rank=lexical_rank,
+                    lexical_score=lexical_scores.get(claim_id),
+                    semantic_rank=semantic_rank,
+                    semantic_score=semantic_scores.get(claim_id),
+                )
+            )
+        return tuple(
+            sorted(
+                selected,
+                key=_candidate_retrieval_sort_key,
+                reverse=True,
+            )
+        )
 
 
 class ClaimMutationPlanner:
@@ -276,6 +558,8 @@ class ClaimMutationPlanner:
         backend_driver: BackendDriver | None,
         evidence_planner: EvidenceMutationPlanner | None = None,
         current_claim_reader: CurrentClaimReader | None = None,
+        claim_candidate_retriever: ClaimResolutionCandidateRetriever | None = None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
         claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
     ) -> None:
@@ -284,8 +568,19 @@ class ClaimMutationPlanner:
         self.current_claim_reader = current_claim_reader or CurrentClaimReader(
             backend_driver=backend_driver
         )
+        self.claim_candidate_retriever = claim_candidate_retriever or ClaimResolutionCandidateRetriever(
+            backend_driver=backend_driver,
+        )
+        self.claim_profile_key_generation_service = claim_profile_key_generation_service
         self.claim_resolution_service = claim_resolution_service
         self.fact_conflict_resolution_service = fact_conflict_resolution_service
+
+    def begin_session(self, *, repo_id: str) -> ClaimPlanningSession:
+        return ClaimPlanningSession(
+            planner=self,
+            repo_id=repo_id,
+            seed_loader=lambda: self.current_claim_reader.load_current_claims(repo_id=repo_id),
+        )
 
     def build_promotion_candidates(
         self,
@@ -310,25 +605,34 @@ class ClaimMutationPlanner:
         observation: Observation,
         validation: ClaimValidationResult,
         snapshot: GraphSnapshot | None = None,
+        session: ClaimPlanningSession | None = None,
     ) -> ClaimMutationPlanResult:
-        plans: list[MutationPlan] = []
-        invalidated_count = 0
-        for bundle in validation.validated_claims:
-            result = self.plan_validated_claim_bundle(
-                observation=observation,
-                bundle=bundle,
-                snapshot=snapshot,
-            )
-            plans.append(result.plan)
-            invalidated_count += result.invalidated_count
-        return ClaimMutationPlanResult(
-            plan=merge_mutation_plans(*plans),
-            invalidated_count=invalidated_count,
+        claim_session = session or self.begin_session(repo_id=observation.repo_id)
+        return claim_session.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=snapshot,
         )
 
     def plan_validated_claim_bundle(
         self,
         *,
+        observation: Observation,
+        bundle: ValidatedClaimBundle,
+        snapshot: GraphSnapshot | None = None,
+        session: ClaimPlanningSession | None = None,
+    ) -> ClaimMutationPlanResult:
+        claim_session = session or self.begin_session(repo_id=observation.repo_id)
+        return claim_session.plan_validated_claim_bundle(
+            observation=observation,
+            bundle=bundle,
+            snapshot=snapshot,
+        )
+
+    def _plan_validated_claim_bundle_in_session(
+        self,
+        *,
+        session: ClaimPlanningSession,
         observation: Observation,
         bundle: ValidatedClaimBundle,
         snapshot: GraphSnapshot | None = None,
@@ -340,6 +644,14 @@ class ClaimMutationPlanner:
         )
         if not prepared_records:
             return ClaimMutationPlanResult(plan=MutationPlan(), invalidated_count=0)
+
+        new_support_texts = tuple(
+            dict.fromkeys(
+                prepared.evidence.quote_text
+                for prepared in prepared_records
+                if prepared.evidence.quote_text
+            )
+        )
 
         about_record_ids = tuple(
             dict.fromkeys(
@@ -370,9 +682,15 @@ class ClaimMutationPlanner:
                 first_observed_at=new_claim.first_observed_at,
                 latest_observed_at=new_claim.latest_observed_at,
                 is_current=False,
+                ingested_at=new_claim.ingested_at,
+                valid_from=new_claim.valid_from,
+                valid_to=new_claim.valid_from,
+                invalidated_at=new_claim.valid_from,
                 observation_id=new_claim.observation_id,
                 source_kind=new_claim.source_kind,
                 source_id=new_claim.source_id,
+                thread_kind=new_claim.thread_kind,
+                thread_id=new_claim.thread_id,
                 metadata=new_claim.metadata,
             )
             plan = merge_mutation_plans(
@@ -391,25 +709,53 @@ class ClaimMutationPlanner:
                     claim_record_id=rejected_claim.claim_id,
                 ),
             )
-            return ClaimMutationPlanResult(plan=plan, invalidated_count=0)
+            return ClaimMutationPlanResult(
+                plan=plan,
+                invalidated_count=0,
+                profiles=(
+                    self._build_claim_profile(
+                        claim=rejected_claim,
+                        about_record_ids=about_record_ids,
+                        support_texts=new_support_texts,
+                    ),
+                ),
+            )
 
-        candidates = self.current_claim_reader.load_current_claims(
-            repo_id=observation.repo_id,
-            claim_kind=bundle.claim_kind,
+        candidates = session.current_candidates()
+        exact_match = session.find_exact_match(canonical_key)
+        hybrid_candidates = self.claim_candidate_retriever.retrieve(
+            candidates=candidates,
+            new_claim=new_claim,
+            observation=observation,
             about_record_ids=about_record_ids,
-            source_id=observation.source_id,
+            support_texts=new_support_texts,
         )
-        exact_match = next(
-            (candidate for candidate in candidates if candidate.claim.canonical_key == canonical_key),
-            None,
+        thread_candidates = _select_candidate_pass(
+            candidates=candidates,
+            new_claim=new_claim,
+            observation=observation,
+            about_record_ids=about_record_ids,
+            support_texts=new_support_texts,
+            thread_scoped=True,
+        )
+        global_candidates = _select_candidate_pass(
+            candidates=candidates,
+            new_claim=new_claim,
+            observation=observation,
+            about_record_ids=about_record_ids,
+            support_texts=new_support_texts,
+            thread_scoped=False,
+            excluded_claim_ids={score.candidate.claim.claim_id for score in thread_candidates},
         )
         if exact_match is not None:
             updated_exact = self._merge_claim_observation(exact_match.claim, observation=observation)
+            resolved_about_record_ids = exact_match.about_record_ids or about_record_ids
+            merged_support_texts = _merge_support_texts(exact_match.support_texts, new_support_texts)
             plan = merge_mutation_plans(
                 self._plan_backfill_candidate(exact_match),
                 self._plan_claim_record(
                     claim=updated_exact,
-                    about_record_ids=exact_match.about_record_ids or about_record_ids,
+                    about_record_ids=resolved_about_record_ids,
                 ),
                 self.evidence_planner.plan_prepared_records(
                     observation=observation,
@@ -422,18 +768,36 @@ class ClaimMutationPlanner:
                     claim_record_id=exact_match.claim.claim_id,
                 ),
             )
-            return ClaimMutationPlanResult(plan=plan, invalidated_count=0)
+            session.update_matched_candidate(
+                exact_match,
+                    claim=updated_exact,
+                    about_record_ids=resolved_about_record_ids,
+                    support_texts=new_support_texts,
+                    backfill_consumed=exact_match.backfill_required,
+                )
+            return ClaimMutationPlanResult(
+                plan=plan,
+                invalidated_count=0,
+                profiles=(
+                    self._build_claim_profile(
+                        claim=updated_exact,
+                        about_record_ids=resolved_about_record_ids,
+                        support_texts=merged_support_texts,
+                    ),
+                ),
+            )
 
-        ranked_candidates = _rank_candidates(
-            new_claim=new_claim,
-            new_about_record_ids=about_record_ids,
-            candidates=candidates,
-        )[:10]
-        accepted_relations = self._resolve_candidate_relations(
+        accepted_relations, ranked_candidates = self._resolve_candidate_pass(
             observation=observation,
             new_claim=new_claim,
             about_record_ids=about_record_ids,
-            candidates=ranked_candidates,
+            support_texts=new_support_texts,
+            candidates=_merge_candidate_scores(
+                hybrid_candidates,
+                thread_candidates,
+                global_candidates,
+            ),
+            scope_label="hybrid",
         )
         same_as_candidates = [item for item in accepted_relations if item["resolution_type"] == "same_as"]
         if len(same_as_candidates) == 1:
@@ -443,11 +807,13 @@ class ClaimMutationPlanner:
                 if candidate.claim.claim_id == same_as_candidates[0]["candidate_claim_id"]
             )
             updated_match = self._merge_claim_observation(matched.claim, observation=observation)
+            resolved_about_record_ids = matched.about_record_ids or about_record_ids
+            merged_support_texts = _merge_support_texts(matched.support_texts, new_support_texts)
             plan = merge_mutation_plans(
                 self._plan_backfill_candidate(matched),
                 self._plan_claim_record(
                     claim=updated_match,
-                    about_record_ids=matched.about_record_ids or about_record_ids,
+                    about_record_ids=resolved_about_record_ids,
                 ),
                 self.evidence_planner.plan_prepared_records(
                     observation=observation,
@@ -460,7 +826,24 @@ class ClaimMutationPlanner:
                     claim_record_id=matched.claim.claim_id,
                 ),
             )
-            return ClaimMutationPlanResult(plan=plan, invalidated_count=0)
+            session.update_matched_candidate(
+                matched,
+                    claim=updated_match,
+                    about_record_ids=resolved_about_record_ids,
+                    support_texts=new_support_texts,
+                    backfill_consumed=matched.backfill_required,
+                )
+            return ClaimMutationPlanResult(
+                plan=plan,
+                invalidated_count=0,
+                profiles=(
+                    self._build_claim_profile(
+                        claim=updated_match,
+                        about_record_ids=resolved_about_record_ids,
+                        support_texts=merged_support_texts,
+                    ),
+                ),
+            )
         if len(same_as_candidates) > 1:
             accepted_relations = ()
 
@@ -468,7 +851,7 @@ class ClaimMutationPlanner:
             relation
             for relation in accepted_relations
             if relation["resolution_type"] != "same_as"
-        )
+        )[:10]
         relation_states = {
             candidate.claim.claim_id: candidate
             for candidate in ranked_candidates
@@ -500,11 +883,16 @@ class ClaimMutationPlanner:
                     first_observed_at=new_claim.first_observed_at,
                     latest_observed_at=new_claim.latest_observed_at,
                     is_current=False,
+                    ingested_at=new_claim.ingested_at,
+                    valid_from=new_claim.valid_from,
+                    valid_to=newest_existing.claim.latest_observed_at,
                     invalidated_at=newest_existing.claim.latest_observed_at,
                     invalidated_by_claim_id=newest_existing.claim.claim_id,
                     observation_id=new_claim.observation_id,
                     source_kind=new_claim.source_kind,
                     source_id=new_claim.source_id,
+                    thread_kind=new_claim.thread_kind,
+                    thread_id=new_claim.thread_id,
                     metadata=new_claim.metadata,
                 )
             else:
@@ -514,6 +902,18 @@ class ClaimMutationPlanner:
                         for relation in invalidating_relations
                     )
                 )
+        invalidated_claims = tuple(
+            (
+                claim_id,
+                self._build_invalidated_claim_record(
+                    relation_states[claim_id].claim,
+                    invalidated_at=observation.observed_at,
+                    invalidated_by_claim_id=claim_to_write.claim_id,
+                ),
+            )
+            for claim_id in invalidated_claim_ids
+            if claim_id in relation_states
+        )
         plan = merge_mutation_plans(
             self._plan_claim_record(
                 claim=claim_to_write,
@@ -550,17 +950,50 @@ class ClaimMutationPlanner:
             ),
             *(
                 self._plan_claim_state_update(
-                    relation_states[claim_id].claim,
-                    invalidated_at=observation.observed_at,
-                    invalidated_by_claim_id=claim_to_write.claim_id,
+                    invalidated_claim,
+                    about_record_ids=relation_states[claim_id].about_record_ids,
                 )
-                for claim_id in invalidated_claim_ids
-                if claim_id in relation_states
+                for claim_id, invalidated_claim in invalidated_claims
             ),
         )
+        session.mark_backfilled(
+            [
+                claim_id
+                for claim_id in {
+                    relation["candidate_claim_id"]
+                    for relation in relation_candidates
+                    if relation["candidate_claim_id"] in relation_states
+                }
+            ]
+        )
+        for claim_id in invalidated_claim_ids:
+            session.discard_current_candidate(claim_id)
+        if claim_to_write.is_current:
+            session.add_pending_claim(
+                claim=claim_to_write,
+                about_record_ids=about_record_ids,
+                support_texts=new_support_texts,
+            )
+        else:
+            session.discard_current_candidate(claim_to_write.claim_id)
         return ClaimMutationPlanResult(
             plan=plan,
             invalidated_count=len(invalidated_claim_ids),
+            profiles=(
+                self._build_claim_profile(
+                    claim=claim_to_write,
+                    about_record_ids=about_record_ids,
+                    support_texts=new_support_texts,
+                ),
+                *(
+                    self._build_claim_profile(
+                        claim=invalidated_claim,
+                        about_record_ids=relation_states[claim_id].about_record_ids,
+                        support_texts=relation_states[claim_id].support_texts,
+                    )
+                    for claim_id, invalidated_claim in invalidated_claims
+                ),
+            ),
         )
 
     def _merge_claim_observation(
@@ -571,12 +1004,16 @@ class ClaimMutationPlanner:
     ) -> ClaimRecord:
         first_observed_at = claim.first_observed_at
         latest_observed_at = claim.latest_observed_at
+        valid_from = claim.valid_from or claim.first_observed_at
         observation_time = _parse_datetime(observation.observed_at)
         first_time = _parse_datetime(first_observed_at)
         latest_time = _parse_datetime(latest_observed_at)
+        valid_from_time = _parse_datetime(valid_from)
         if observation_time is not None:
             if first_time is None or observation_time < first_time:
                 first_observed_at = observation.observed_at
+            if valid_from_time is None or observation_time < valid_from_time:
+                valid_from = observation.observed_at
             if latest_time is None or observation_time > latest_time:
                 latest_observed_at = observation.observed_at
         return ClaimRecord(
@@ -589,11 +1026,16 @@ class ClaimMutationPlanner:
             first_observed_at=first_observed_at,
             latest_observed_at=latest_observed_at,
             is_current=claim.is_current,
+            ingested_at=claim.ingested_at,
+            valid_from=valid_from,
+            valid_to=claim.valid_to,
             invalidated_at=claim.invalidated_at,
             invalidated_by_claim_id=claim.invalidated_by_claim_id,
             observation_id=claim.observation_id,
             source_kind=claim.source_kind,
             source_id=claim.source_id,
+            thread_kind=claim.thread_kind,
+            thread_id=claim.thread_id,
             metadata=claim.metadata,
         )
 
@@ -619,9 +1061,13 @@ class ClaimMutationPlanner:
             first_observed_at=observation.observed_at,
             latest_observed_at=observation.observed_at,
             is_current=True,
+            ingested_at=observation.ingested_at,
+            valid_from=observation.observed_at,
             observation_id=observation.observation_id,
             source_kind=observation.source_kind,
             source_id=observation.source_id,
+            thread_kind=observation.thread_kind,
+            thread_id=observation.thread_id,
             metadata={
                 **bundle.metadata,
                 "assertion_status": bundle.assertion_status,
@@ -667,6 +1113,11 @@ class ClaimMutationPlanner:
                     "observation_id": claim.observation_id,
                     "first_observed_at": claim.first_observed_at,
                     "latest_observed_at": claim.latest_observed_at,
+                    "ingested_at": claim.ingested_at,
+                    "valid_from": claim.valid_from,
+                    "valid_to": claim.valid_to,
+                    "thread_kind": claim.thread_kind,
+                    "thread_id": claim.thread_id,
                     "is_current": claim.is_current,
                     "invalidated_at": claim.invalidated_at,
                     "invalidated_by_claim_id": claim.invalidated_by_claim_id,
@@ -685,20 +1136,6 @@ class ClaimMutationPlanner:
                 target_record_id=target_record_id,
             )
             for target_record_id in dict.fromkeys(about_record_ids)
-        )
-        derived_from_edge = (
-            EdgeRecord(
-                record_id=f"claim_derived_from:{claim.claim_id}:{claim.observation_id}",
-                record_type="claim_derived_from",
-                repo_id=claim.repo_id,
-                group_id=claim.repo_id,
-                relationship_type="DERIVED_FROM",
-                source_record_id=claim.claim_id,
-                target_record_id=claim.observation_id,
-                properties={},
-            )
-            if claim.observation_id is not None
-            else None
         )
         search_document = SearchDocumentRecord(
             record_kind=RecordKind.NODE,
@@ -725,16 +1162,18 @@ class ClaimMutationPlanner:
                     "observation_id": claim.observation_id,
                     "first_observed_at": claim.first_observed_at,
                     "latest_observed_at": claim.latest_observed_at,
+                    "ingested_at": claim.ingested_at,
+                    "valid_from": claim.valid_from,
+                    "valid_to": claim.valid_to,
+                    "thread_kind": claim.thread_kind,
+                    "thread_id": claim.thread_id,
                     "is_current": claim.is_current,
                 }
             ),
         )
         return MutationPlan(
             upsert_nodes=(node,),
-            upsert_edges=(
-                *about_edges,
-                *((derived_from_edge,) if derived_from_edge is not None else ()),
-            ),
+            upsert_edges=about_edges,
             upsert_search_documents=(search_document,),
         )
 
@@ -773,10 +1212,18 @@ class ClaimMutationPlanner:
         self,
         claim: ClaimRecord,
         *,
+        about_record_ids: Sequence[str],
+    ) -> MutationPlan:
+        return self._plan_claim_record(claim=claim, about_record_ids=about_record_ids)
+
+    def _build_invalidated_claim_record(
+        self,
+        claim: ClaimRecord,
+        *,
         invalidated_at: str | None,
         invalidated_by_claim_id: str,
-    ) -> MutationPlan:
-        updated = ClaimRecord(
+    ) -> ClaimRecord:
+        return ClaimRecord(
             claim_id=claim.claim_id,
             repo_id=claim.repo_id,
             canonical_key=claim.canonical_key,
@@ -786,14 +1233,42 @@ class ClaimMutationPlanner:
             first_observed_at=claim.first_observed_at,
             latest_observed_at=claim.latest_observed_at,
             is_current=False,
+            ingested_at=claim.ingested_at,
+            valid_from=claim.valid_from,
+            valid_to=invalidated_at,
             invalidated_at=invalidated_at,
             invalidated_by_claim_id=invalidated_by_claim_id,
             observation_id=claim.observation_id,
             source_kind=claim.source_kind,
             source_id=claim.source_id,
+            thread_kind=claim.thread_kind,
+            thread_id=claim.thread_id,
             metadata=claim.metadata,
         )
-        return self._plan_claim_record(claim=updated, about_record_ids=())
+
+    def _build_claim_profile(
+        self,
+        *,
+        claim: ClaimRecord,
+        about_record_ids: Sequence[str],
+        support_texts: Sequence[str],
+    ) -> ProfileRecord:
+        generated_keys = (
+            self.claim_profile_key_generation_service.generate(
+                repo_id=claim.repo_id,
+                claim_text=claim.claim_text,
+                claim_subkind=claim.claim_subkind,
+                support_texts=support_texts,
+            )
+            if self.claim_profile_key_generation_service is not None
+            else ()
+        )
+        return semantic_claim_profile_from_claim(
+            claim,
+            about_record_ids=about_record_ids,
+            support_texts=support_texts,
+            generated_keys=generated_keys,
+        )
 
     def _plan_backfill_candidate(self, candidate: CandidateClaimState) -> MutationPlan:
         if not candidate.backfill_required:
@@ -820,11 +1295,68 @@ class ClaimMutationPlanner:
         )
         return merge_mutation_plans(
             self._plan_claim_record(
-                claim=candidate.claim,
+                claim=_claim_with_backfill_ingested_at(candidate.claim),
                 about_record_ids=candidate.about_record_ids,
             ),
             MutationPlan(upsert_edges=support_edges),
         )
+
+    def _resolve_candidate_pass(
+        self,
+        *,
+        observation: Observation,
+        new_claim: ClaimRecord,
+        about_record_ids: Sequence[str],
+        support_texts: Sequence[str],
+        candidates: Sequence[CandidateRetrievalScore],
+        scope_label: str,
+    ) -> tuple[tuple[dict[str, str], ...], tuple[CandidateClaimState, ...]]:
+        if not candidates:
+            return (), ()
+        ranked_scores = tuple(
+            sorted(
+                candidates,
+                key=_candidate_retrieval_sort_key,
+                reverse=True,
+            )[:10]
+        )
+        ranked_candidates = tuple(score.candidate for score in ranked_scores)
+        emit_provenance_debug(
+            "claim_candidate_retrieval",
+            {
+                "repo_id": observation.repo_id,
+                "observation_id": observation.observation_id,
+                "new_claim_id": new_claim.claim_id,
+                "scope_label": scope_label,
+                "candidate_count": len(ranked_scores),
+                "candidates": [
+                    {
+                        "candidate_claim_id": score.candidate.claim.claim_id,
+                        "claim_text": score.candidate.claim.claim_text,
+                        "claim_kind": score.candidate.claim.claim_kind,
+                        "claim_subkind": score.candidate.claim.claim_subkind,
+                        "candidate_origin": score.candidate.origin,
+                        "same_thread": score.same_thread,
+                        "about_overlap": score.about_overlap,
+                        "lexical_overlap": score.lexical_overlap,
+                        "code_anchor_overlap": score.code_anchor_overlap,
+                        "numeric_anchor_overlap": score.numeric_anchor_overlap,
+                        "kind_compatibility": score.kind_compatibility,
+                        "retrieval_sources": list(score.retrieval_sources),
+                        "total_score": score.total_score,
+                    }
+                    for score in ranked_scores
+                ],
+            },
+        )
+        accepted_relations = self._resolve_candidate_relations(
+            observation=observation,
+            new_claim=new_claim,
+            about_record_ids=about_record_ids,
+            candidates=ranked_candidates,
+            scope_label=scope_label,
+        )
+        return accepted_relations, ranked_candidates
 
     def _resolve_candidate_relations(
         self,
@@ -833,6 +1365,7 @@ class ClaimMutationPlanner:
         new_claim: ClaimRecord,
         about_record_ids: Sequence[str],
         candidates: Sequence[CandidateClaimState],
+        scope_label: str,
     ) -> tuple[dict[str, str], ...]:
         if not candidates:
             return ()
@@ -863,6 +1396,7 @@ class ClaimMutationPlanner:
             except Exception:
                 resolution = None
             if resolution is not None:
+                candidate_ids = {candidate.claim.claim_id for candidate in candidates}
                 accepted = tuple(
                     {
                         "candidate_claim_id": relation.candidate_claim_id,
@@ -871,7 +1405,9 @@ class ClaimMutationPlanner:
                         "rationale": relation.rationale,
                     }
                     for relation in resolution.relations
-                    if relation.confidence == "high" and relation.resolution_type != "unrelated"
+                    if relation.candidate_claim_id in candidate_ids
+                    and relation.confidence == "high"
+                    and relation.resolution_type != "unrelated"
                 )
                 emit_provenance_debug(
                     "claim_resolution",
@@ -879,6 +1415,7 @@ class ClaimMutationPlanner:
                         "repo_id": observation.repo_id,
                         "observation_id": observation.observation_id,
                         "new_claim_id": new_claim.claim_id,
+                        "scope_label": scope_label,
                         "candidate_count": len(candidates),
                         "accepted_relations": list(accepted),
                     },
@@ -890,6 +1427,7 @@ class ClaimMutationPlanner:
             new_claim=new_claim,
             about_record_ids=about_record_ids,
             candidates=candidates,
+            scope_label=scope_label,
         )
 
     def _resolve_legacy_conflicts(
@@ -899,6 +1437,7 @@ class ClaimMutationPlanner:
         new_claim: ClaimRecord,
         about_record_ids: Sequence[str],
         candidates: Sequence[CandidateClaimState],
+        scope_label: str,
     ) -> tuple[dict[str, str], ...]:
         if self.fact_conflict_resolution_service is None or not candidates:
             return ()
@@ -944,6 +1483,7 @@ class ClaimMutationPlanner:
                 "repo_id": observation.repo_id,
                 "observation_id": observation.observation_id,
                 "new_claim_id": new_claim.claim_id,
+                "scope_label": scope_label,
                 "candidate_count": len(candidates),
                 "accepted_relations": list(accepted),
             },
@@ -985,11 +1525,21 @@ def _parse_persisted_claim_record(row: Mapping[str, Any]) -> CandidateClaimState
         first_observed_at=_string_or_none(properties.get("first_observed_at")),
         latest_observed_at=_string_or_none(properties.get("latest_observed_at")),
         is_current=_coerce_bool(properties.get("is_current"), default=True),
+        ingested_at=_string_or_none(properties.get("ingested_at")),
+        valid_from=_string_or_none(properties.get("valid_from")),
+        valid_to=_string_or_none(properties.get("valid_to")),
         invalidated_at=_string_or_none(properties.get("invalidated_at")),
         invalidated_by_claim_id=_string_or_none(properties.get("invalidated_by_claim_id")),
         observation_id=_string_or_none(properties.get("observation_id")),
         source_kind=_string_or_none(properties.get("source_kind")),
         source_id=_string_or_none(properties.get("source_id")),
+        thread_kind=_string_or_none(properties.get("thread_kind"))
+        or _derive_thread_kind(_string_or_none(properties.get("source_kind"))),
+        thread_id=_string_or_none(properties.get("thread_id"))
+        or _derive_thread_id(
+            source_kind=_string_or_none(properties.get("source_kind")),
+            source_id=_string_or_none(properties.get("source_id")),
+        ),
         metadata=metadata,
     )
     about_record_ids = tuple(
@@ -1010,6 +1560,13 @@ def _parse_persisted_claim_record(row: Mapping[str, Any]) -> CandidateClaimState
         claim=claim,
         about_record_ids=about_record_ids,
         evidence_record_ids=evidence_record_ids,
+        support_texts=tuple(
+            dict.fromkeys(
+                str(text)
+                for text in row.get("support_texts", ())
+                if isinstance(text, str) and text.strip()
+            )
+        ),
     )
 
 
@@ -1084,35 +1641,218 @@ def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenc
     return evidence
 
 
-def _claim_candidate_in_scope(
-    candidate: CandidateClaimState,
+def _select_candidate_pass(
     *,
+    candidates: Sequence[CandidateClaimState],
+    new_claim: ClaimRecord,
+    observation: Observation,
     about_record_ids: Sequence[str],
-    source_id: str | None,
-) -> bool:
-    ordered_abouts = tuple(dict.fromkeys(about_record_ids))
-    if ordered_abouts:
-        return any(record_id in set(ordered_abouts) for record_id in candidate.about_record_ids)
-    if source_id is None:
-        return False
-    return candidate.claim.source_id == source_id
+    support_texts: Sequence[str],
+    thread_scoped: bool,
+    excluded_claim_ids: set[str] | None = None,
+) -> tuple[CandidateRetrievalScore, ...]:
+    excluded_claim_ids = excluded_claim_ids or set()
+    new_features = build_claim_retrieval_features(
+        claim_text=new_claim.claim_text,
+        support_texts=support_texts,
+        fallback_texts=((observation.title,) if observation.title else ()),
+        about_record_ids=about_record_ids,
+    )
+    selected: list[CandidateRetrievalScore] = []
+    for candidate in candidates:
+        if candidate.claim.claim_id in excluded_claim_ids:
+            continue
+        score = _score_candidate(
+            candidate=candidate,
+            new_claim=new_claim,
+            observation=observation,
+            new_about_record_ids=about_record_ids,
+            new_features=new_features,
+        )
+        if thread_scoped and not score.same_thread:
+            continue
+        if not thread_scoped and score.same_thread:
+            continue
+        if not _candidate_has_strong_signal(score):
+            continue
+        selected.append(score)
+    return tuple(
+        sorted(
+            selected,
+            key=_candidate_retrieval_sort_key,
+            reverse=True,
+        )
+    )
 
 
-def _rank_candidates(
+def _same_thread(claim: ClaimRecord, *, observation: Observation) -> bool:
+    claim_thread_kind = claim.thread_kind or _derive_thread_kind(claim.source_kind)
+    claim_thread_id = claim.thread_id or _derive_thread_id(
+        source_kind=claim.source_kind,
+        source_id=claim.source_id,
+    )
+    return (
+        bool(observation.thread_kind)
+        and bool(observation.thread_id)
+        and claim_thread_kind == observation.thread_kind
+        and claim_thread_id == observation.thread_id
+    )
+
+
+def _score_candidate(
     *,
     new_claim: ClaimRecord,
+    observation: Observation,
     new_about_record_ids: Sequence[str],
-    candidates: Sequence[CandidateClaimState],
-) -> list[CandidateClaimState]:
-    return sorted(
-        candidates,
-        key=lambda candidate: (
-            _about_overlap_score(new_about_record_ids, candidate),
-            _lexical_overlap_score(new_claim.claim_text, candidate.claim.claim_text),
-            _parse_datetime(candidate.claim.latest_observed_at) or datetime.min,
-            candidate.claim.claim_id,
-        ),
-        reverse=True,
+    new_features,
+    candidate: CandidateClaimState,
+) -> CandidateRetrievalScore:
+    candidate_features = build_claim_retrieval_features(
+        claim_text=candidate.claim.claim_text,
+        support_texts=candidate.support_texts,
+        about_record_ids=candidate.about_record_ids,
+    )
+    same_thread = _same_thread(candidate.claim, observation=observation)
+    about_overlap = _about_overlap_score(new_about_record_ids, candidate)
+    lexical_overlap = len(set(new_features.lexical_tokens) & set(candidate_features.lexical_tokens))
+    code_anchor_overlap = len(set(new_features.code_anchors) & set(candidate_features.code_anchors))
+    numeric_anchor_overlap = len(set(new_features.numeric_anchors) & set(candidate_features.numeric_anchors))
+    kind_compatibility = _claim_kind_compatibility_score(new_claim.claim_kind, candidate.claim.claim_kind)
+    retrieval_sources = tuple(
+        source
+        for source, is_active in (
+            ("thread", same_thread),
+            ("about", about_overlap > 0),
+            ("lexical", lexical_overlap >= 3 or code_anchor_overlap > 0),
+        )
+        if is_active
+    )
+    total_score = (
+        (120.0 if same_thread else 0.0)
+        + (40.0 * about_overlap)
+        + (18.0 * code_anchor_overlap)
+        + (6.0 * numeric_anchor_overlap)
+        + (4.0 * lexical_overlap)
+        + (8.0 * kind_compatibility)
+    )
+    return CandidateRetrievalScore(
+        candidate=candidate,
+        same_thread=same_thread,
+        about_overlap=about_overlap,
+        lexical_overlap=lexical_overlap,
+        code_anchor_overlap=code_anchor_overlap,
+        numeric_anchor_overlap=numeric_anchor_overlap,
+        kind_compatibility=kind_compatibility,
+        retrieval_sources=retrieval_sources,
+        total_score=total_score,
+    )
+
+
+def _candidate_has_strong_signal(score: CandidateRetrievalScore) -> bool:
+    if score.about_overlap > 0:
+        return True
+    if score.code_anchor_overlap >= 2:
+        return True
+    if score.code_anchor_overlap >= 1 and score.lexical_overlap >= 2:
+        return True
+    if score.lexical_overlap >= 5:
+        return True
+    if score.same_thread and (score.code_anchor_overlap >= 1 or score.lexical_overlap >= 4):
+        return True
+    return False
+
+
+def _candidate_is_viable_from_search(
+    score: CandidateRetrievalScore,
+    *,
+    lexical_hit: bool,
+    semantic_hit: bool,
+) -> bool:
+    if semantic_hit and (
+        score.kind_compatibility > 0
+        or score.about_overlap > 0
+        or score.same_thread
+        or score.lexical_overlap >= 2
+    ):
+        return True
+    if lexical_hit and (
+        _candidate_has_strong_signal(score)
+        or score.about_overlap > 0
+        or score.same_thread
+        or (score.kind_compatibility > 0 and score.lexical_overlap >= 3)
+    ):
+        return True
+    return False
+
+
+def _score_candidate_from_search(
+    score: CandidateRetrievalScore,
+    *,
+    lexical_rank: int | None,
+    lexical_score: float | None,
+    semantic_rank: int | None,
+    semantic_score: float | None,
+) -> CandidateRetrievalScore:
+    retrieval_sources = list(score.retrieval_sources)
+    total_score = score.total_score
+    if lexical_rank is not None:
+        retrieval_sources.append("lexical_search")
+        total_score += 24.0 / lexical_rank
+    if semantic_rank is not None:
+        retrieval_sources.append("semantic_claim")
+        total_score += 36.0 / semantic_rank
+    _ = lexical_score, semantic_score
+    return CandidateRetrievalScore(
+        candidate=score.candidate,
+        same_thread=score.same_thread,
+        about_overlap=score.about_overlap,
+        lexical_overlap=score.lexical_overlap,
+        code_anchor_overlap=score.code_anchor_overlap,
+        numeric_anchor_overlap=score.numeric_anchor_overlap,
+        kind_compatibility=score.kind_compatibility,
+        retrieval_sources=tuple(dict.fromkeys(retrieval_sources)),
+        total_score=total_score,
+    )
+
+
+def _merge_candidate_scores(
+    *score_groups: Sequence[CandidateRetrievalScore],
+) -> tuple[CandidateRetrievalScore, ...]:
+    merged: dict[str, CandidateRetrievalScore] = {}
+    for scores in score_groups:
+        for score in scores:
+            claim_id = score.candidate.claim.claim_id
+            current = merged.get(claim_id)
+            if current is None:
+                merged[claim_id] = score
+                continue
+            merged[claim_id] = CandidateRetrievalScore(
+                candidate=current.candidate,
+                same_thread=current.same_thread or score.same_thread,
+                about_overlap=max(current.about_overlap, score.about_overlap),
+                lexical_overlap=max(current.lexical_overlap, score.lexical_overlap),
+                code_anchor_overlap=max(current.code_anchor_overlap, score.code_anchor_overlap),
+                numeric_anchor_overlap=max(current.numeric_anchor_overlap, score.numeric_anchor_overlap),
+                kind_compatibility=max(current.kind_compatibility, score.kind_compatibility),
+                retrieval_sources=tuple(
+                    dict.fromkeys((*current.retrieval_sources, *score.retrieval_sources))
+                ),
+                total_score=max(current.total_score, score.total_score),
+            )
+    return tuple(
+        sorted(
+            merged.values(),
+            key=_candidate_retrieval_sort_key,
+            reverse=True,
+        )
+    )
+
+
+def _candidate_retrieval_sort_key(score: CandidateRetrievalScore) -> tuple[float, datetime, str]:
+    return (
+        score.total_score,
+        _parse_datetime(score.candidate.claim.latest_observed_at) or datetime.min,
+        score.candidate.claim.claim_id,
     )
 
 
@@ -1125,10 +1865,30 @@ def _about_overlap_score(
     return len(set(new_about_record_ids) & set(candidate.about_record_ids))
 
 
-def _lexical_overlap_score(left: str, right: str) -> int:
-    left_tokens = set(_TOKEN_RE.findall(canonicalize_claim_text(left)))
-    right_tokens = set(_TOKEN_RE.findall(canonicalize_claim_text(right)))
-    return len(left_tokens & right_tokens)
+def _claim_kind_compatibility_score(left: str, right: str) -> int:
+    if left == right:
+        return 2
+    comparable_families = (
+        frozenset({"change_claim", "state_claim", "scope_statement", "concern", "bug_report"}),
+        frozenset({"review_feedback", "requirement", "concern"}),
+        frozenset({"test_expectation", "state_claim", "change_claim"}),
+    )
+    if any(left in family and right in family for family in comparable_families):
+        return 1
+    return 0
+
+
+def _merge_support_texts(
+    existing_support_texts: Sequence[str],
+    new_support_texts: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            text
+            for text in (*existing_support_texts, *new_support_texts)
+            if isinstance(text, str) and text.strip()
+        )
+    )
 
 
 def _candidate_sort_key(candidate: CandidateClaimState) -> tuple[bool, datetime, str]:
@@ -1167,6 +1927,51 @@ def _legacy_support_rationale(record: PersistedEvidenceRecord) -> str:
     if summary:
         return summary
     return "Legacy evidence attached during claim backfill."
+
+
+def _claim_with_backfill_ingested_at(claim: ClaimRecord) -> ClaimRecord:
+    if claim.ingested_at is not None:
+        return claim
+    return ClaimRecord(
+        claim_id=claim.claim_id,
+        repo_id=claim.repo_id,
+        canonical_key=claim.canonical_key,
+        claim_text=claim.claim_text,
+        claim_kind=claim.claim_kind,
+        claim_subkind=claim.claim_subkind,
+        first_observed_at=claim.first_observed_at,
+        latest_observed_at=claim.latest_observed_at,
+        is_current=claim.is_current,
+        ingested_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        valid_from=claim.valid_from,
+        valid_to=claim.valid_to,
+        invalidated_at=claim.invalidated_at,
+        invalidated_by_claim_id=claim.invalidated_by_claim_id,
+        observation_id=claim.observation_id,
+        source_kind=claim.source_kind,
+        source_id=claim.source_id,
+        thread_kind=claim.thread_kind,
+        thread_id=claim.thread_id,
+        metadata=claim.metadata,
+    )
+
+
+def _derive_thread_kind(source_kind: str | None) -> str | None:
+    if source_kind in {"pull_request", "issue", "commit"}:
+        return source_kind
+    return None
+
+
+def _derive_thread_id(*, source_kind: str | None, source_id: str | None) -> str | None:
+    if not source_id:
+        return None
+    if source_kind == "pull_request" and source_id.startswith("github:pr:"):
+        return source_id.rsplit(":", 1)[-1] or None
+    if source_kind == "issue" and source_id.startswith("github:issue:"):
+        return source_id.rsplit(":", 1)[-1] or None
+    if source_kind == "commit" and source_id.startswith("commit:"):
+        return source_id.rsplit(":", 1)[-1] or None
+    return source_id
 
 
 def _candidate_fact_identifier(candidate: CandidateClaimState) -> str:

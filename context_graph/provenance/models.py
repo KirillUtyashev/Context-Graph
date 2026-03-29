@@ -15,6 +15,7 @@ class ObservationKind(str, Enum):
     GIT_COMMIT_MESSAGE = "git_commit_message"
     GITHUB_PR_BODY = "github_pr_body"
     GITHUB_ISSUE_BODY = "github_issue_body"
+    GITHUB_ISSUE_CLOSED = "github_issue_closed"
     GITHUB_PR_REVIEW = "github_pr_review"
     GITHUB_PR_REVIEW_COMMENT = "github_pr_review_comment"
     GITHUB_ISSUE_COMMENT = "github_issue_comment"
@@ -26,6 +27,8 @@ ClaimSubkind = Literal[
     "invariant_or_constraint",
     "desired_behavior_or_requirement",
     "reviewer_objection_or_requested_change",
+    "approval_or_acceptance",
+    "workaround_or_temporary_mitigation",
     "test_result_or_validation",
     "rollout_migration_or_dependency",
     "ownership_or_impact_scope",
@@ -61,6 +64,7 @@ ClaimResolutionType = Literal[
     "unrelated",
 ]
 ResolutionConfidence = Literal["low", "medium", "high"]
+ThreadKind = Literal["pull_request", "issue", "commit"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,9 @@ class Observation:
     title: str | None
     text: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    ingested_at: str | None = None
+    thread_kind: ThreadKind | None = None
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,11 +171,16 @@ class ClaimRecord:
     first_observed_at: str | None
     latest_observed_at: str | None
     is_current: bool = True
+    ingested_at: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
     invalidated_at: str | None = None
     invalidated_by_claim_id: str | None = None
     observation_id: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
+    thread_kind: ThreadKind | None = None
+    thread_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -192,6 +204,10 @@ def github_pr_body_observation_id(repo_id: str, pr_number: int) -> str:
 
 def github_issue_body_observation_id(repo_id: str, issue_number: int) -> str:
     return f"observation:{ObservationKind.GITHUB_ISSUE_BODY.value}:{repo_id}:{issue_number}"
+
+
+def github_issue_closed_observation_id(repo_id: str, issue_number: int) -> str:
+    return f"observation:{ObservationKind.GITHUB_ISSUE_CLOSED.value}:{repo_id}:{issue_number}"
 
 
 def github_pr_review_observation_id(repo_id: str, review_id: str | int) -> str:
@@ -285,7 +301,6 @@ class SupportingEvidenceCandidate(ProvenanceBaseModel):
 
 class ClaimWithEvidenceCandidate(ProvenanceBaseModel):
     claim_text: str
-    claim_kind: str | None = None
     claim_subkind: ClaimSubkind | None = None
     assertion_status: AssertionStatus | None = None
     claim_frame: ClaimFrame | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from context_graph.code_identity import CodeIdentityCanonicalizer, SnapshotCodeResolver
@@ -9,18 +10,24 @@ from context_graph.ingestion.commit_indexing import CommitIndexingService
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 from context_graph.ingestion.git.github_indexer import GitHubIndexer, GitHubObservationSource, GitHubProvenanceBundle
 from context_graph.ingestion.git.git_metadata import CommitInfo
+from context_graph.ingestion.temporal import TemporalGraphWriter
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
 from context_graph.provenance import (
     ClaimCanonicalizationResult,
     ClaimCanonicalizationService,
     ClaimBundleValidator,
     ClaimCandidate,
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionCandidateRetriever,
     ClaimWithEvidenceCandidate,
     ClaimDedupCandidate,
     ClaimDerivationResponse,
     ClaimDerivationService,
     ClaimEvidenceExtractionResponse,
     ClaimEvidenceExtractionService,
+    ClaimRecord,
+    ClaimResolutionService,
+    ClaimSemanticRetrievalService,
     CurrentEvidenceReader,
     ClaimRelationResponse,
     ClaimRelationService,
@@ -47,6 +54,26 @@ from context_graph.provenance.prompts import (
 from context_graph.provenance.grounding import resolve_about_record_ids, resolve_mention_record_ids
 from context_graph.provenance.canonicalization import canonical_claim_key
 from context_graph.provenance.hint_enrichment import collect_grounding_hints
+from context_graph.provenance.models import claim_record_id
+from context_graph.metadata import InMemoryMetadataStore
+from context_graph.profile_vectors import (
+    InMemoryProfileVectorStore,
+    ProfileSearchService,
+    ProfileVectorIndexer,
+    SemanticProvenanceSearchService,
+)
+from context_graph.profiles import (
+    PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC,
+    PROFILE_KEY_ORIGIN_RAW_TEXT,
+    ProfileKeyDefinition,
+    ProfileRecord,
+    SEMANTIC_CLAIM_PROFILE_KIND,
+    SEMANTIC_OBSERVATION_PROFILE_KIND,
+    semantic_claim_profile_from_claim,
+    semantic_observation_profile_from_observation,
+)
+from context_graph.query_parser import QueryParseResult
+from context_graph.storage.backend import GraphRecordRef, RecordKind, SearchHit
 
 
 def make_snapshot() -> GraphSnapshot:
@@ -266,10 +293,17 @@ def make_provenance_examples_snapshot() -> GraphSnapshot:
     )
 
 
-def make_commit(*, subject: str = "Add helper support", body: str = "body text") -> CommitInfo:
+def make_commit(
+    *,
+    sha: str = "abc123",
+    parents: tuple[str, ...] = ("parent1",),
+    changed_files: tuple[str, ...] = ("app.py",),
+    subject: str = "Add helper support",
+    body: str = "body text",
+) -> CommitInfo:
     return CommitInfo(
-        sha="abc123",
-        parent_shas=("parent1",),
+        sha=sha,
+        parent_shas=parents,
         branch="main",
         author_name="Dev",
         author_email="dev@example.com",
@@ -277,7 +311,7 @@ def make_commit(*, subject: str = "Add helper support", body: str = "body text")
         committed_at="2026-03-26T00:00:05+00:00",
         subject=subject,
         body=body,
-        changed_files=("app.py",),
+        changed_files=changed_files,
     )
 
 
@@ -287,17 +321,35 @@ def make_observation(
     source_kind: str = "pull_request",
     text: str = "This PR updates demo.app.main.",
 ) -> Observation:
+    source_id = {
+        "pull_request": "github:pr:demo:7",
+        "issue": "github:issue:demo:9",
+        "commit": "commit:demo:abc123",
+    }.get(source_kind, "github:pr:demo:7")
+    thread_id = {
+        "pull_request": "7",
+        "issue": "9",
+        "commit": "abc123",
+    }.get(source_kind)
+    metadata = {"pull_request_number": 7}
+    if source_kind == "issue":
+        metadata = {"issue_number": 9}
+    if source_kind == "commit":
+        metadata = {"commit_sha": "abc123", "changed_files": ["app.py"]}
     return Observation(
         observation_id="observation:github_pr_body:demo:7",
         repo_id="demo",
         observation_kind=kind,
         source_kind=source_kind,
-        source_id="github:pr:demo:7" if source_kind == "pull_request" else "github:issue:demo:9",
+        source_id=source_id,
         observed_at="2026-03-26T00:01:00+00:00",
         author="octocat",
         title="Tighten rollback handling",
         text=text,
-        metadata={"pull_request_number": 7},
+        metadata=metadata,
+        ingested_at="2026-03-28T00:00:00Z",
+        thread_kind=source_kind if source_kind in {"pull_request", "issue", "commit"} else None,
+        thread_id=thread_id,
     )
 
 
@@ -320,12 +372,24 @@ def make_extraction_response(
     support_rationale: str | None = None,
     summary_text: str | None = None,
 ) -> ClaimEvidenceExtractionResponse:
+    if claim_subkind is None and claim_kind is not None:
+        claim_subkind = {
+            "bug_report": "bug_or_regression",
+            "change_claim": "fix_or_mitigation",
+            "state_claim": "invariant_or_constraint",
+            "requirement": "desired_behavior_or_requirement",
+            "review_feedback": "reviewer_objection_or_requested_change",
+            "approval": "approval_or_acceptance",
+            "concern": "reviewer_objection_or_requested_change",
+            "workaround": "workaround_or_temporary_mitigation",
+            "scope_statement": "rollout_migration_or_dependency",
+            "test_expectation": "test_result_or_validation",
+        }.get(claim_kind)
     return ClaimEvidenceExtractionResponse.model_validate(
         {
             "claims": [
                 {
                     "claim_text": claim_text,
-                    "claim_kind": claim_kind,
                     "claim_subkind": claim_subkind,
                     "assertion_status": assertion_status,
                     "claim_frame": claim_frame,
@@ -424,7 +488,71 @@ def make_existing_evidence_row(
         "evidence_properties": evidence_properties,
         "about_record_ids": list(about_record_ids),
         "observation_record_ids": ["observation:github_pr_body:demo:5"],
-        "observation_properties": [{"observed_at": observed_at}] if observed_at else [{}],
+        "observation_properties": [
+            {
+                "observed_at": observed_at,
+                "source_kind": "pull_request",
+                "source_id": "github:pr:demo:5",
+                "thread_kind": "pull_request",
+                "thread_id": "5",
+            }
+        ]
+        if observed_at
+        else [{}],
+    }
+
+
+def make_existing_claim_row(
+    *,
+    claim_id: str = "claim:demo:existing",
+    claim_text: str = "demo.app.main is disabled.",
+    claim_kind: str = "state_claim",
+    claim_subkind: str = "invariant_or_constraint",
+    first_observed_at: str = "2026-03-25T00:00:00+00:00",
+    latest_observed_at: str = "2026-03-25T00:00:00+00:00",
+    about_record_ids: tuple[str, ...] = ("symbol:demo:demo.app.main@r1",),
+    source_kind: str = "pull_request",
+    source_id: str = "github:pr:demo:7",
+    thread_kind: str = "pull_request",
+    thread_id: str = "7",
+    is_current: bool = True,
+    valid_from: str | None = "2026-03-25T00:00:00+00:00",
+    valid_to: str | None = None,
+) -> dict[str, object]:
+    canonical_key = canonical_claim_key(
+        claim_kind=claim_kind,
+        claim_text=claim_text,
+        about_record_ids=about_record_ids,
+    )
+    return {
+        "claim_id": claim_id,
+        "claim_properties": {
+            "claim_id": claim_id,
+            "repo_id": "demo",
+            "canonical_key": canonical_key,
+            "claim_text": claim_text,
+            "claim_kind": claim_kind,
+            "claim_subkind": claim_subkind,
+            "source_kind": source_kind,
+            "source_id": source_id,
+            "observation_id": "observation:github_pr_body:demo:5",
+            "first_observed_at": first_observed_at,
+            "latest_observed_at": latest_observed_at,
+            "ingested_at": "2026-03-28T00:00:00Z",
+            "valid_from": valid_from,
+            "valid_to": valid_to,
+            "thread_kind": thread_kind,
+            "thread_id": thread_id,
+            "is_current": is_current,
+            "metadata_json": json.dumps(
+                {
+                    "assertion_status": "reported",
+                    "claim_frame": "author_statement",
+                }
+            ),
+        },
+        "about_record_ids": list(about_record_ids),
+        "evidence_record_ids": [],
     }
 
 
@@ -452,22 +580,197 @@ class PromptMapLLMClient:
         responses = self.responses_by_prompt[prompt_name]
         if not responses:
             raise AssertionError(f"no queued response for prompt {prompt_name}")
-        return responses.pop(0)
+        response = responses.pop(0)
+        if callable(response):
+            return response(messages=messages, **kwargs)
+        return response
 
 
 class FakeBackendDriver:
     def __init__(self, rows):
         self.rows = list(rows)
         self.calls = []
+        self.search = FakeBackendSearchOperations(self.rows)
 
     async def execute_query(self, query, **kwargs):
         self.calls.append({"query": query, "kwargs": kwargs})
         return list(self.rows)
 
 
+class FakeBackendSearchOperations:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.search_queries = []
+
+    async def search(self, query):
+        self.search_queries.append(query)
+        text = str(query.text or "").lower()
+        query_tokens = {
+            token.strip("`.,:;!?()[]{}")
+            for token in text.split()
+            if token.strip("`.,:;!?()[]{}")
+        }
+        hits: list[SearchHit] = []
+        for row in self.rows:
+            properties = dict(row.get("claim_properties") or {})
+            if query.record_types and "claim" not in query.record_types:
+                continue
+            if "is_current" in query.filters:
+                expected_current = bool(query.filters["is_current"])
+                actual_current = bool(properties.get("is_current", True))
+                if actual_current is not expected_current:
+                    continue
+            claim_id = str(properties.get("claim_id") or row.get("claim_id") or "").strip()
+            claim_text = str(properties.get("claim_text") or "").strip()
+            if not claim_id or not claim_text:
+                continue
+            claim_text_lower = claim_text.lower()
+            overlap = sum(1 for token in query_tokens if token in claim_text_lower)
+            if overlap <= 0:
+                continue
+            hits.append(
+                SearchHit(
+                    ref=GraphRecordRef(
+                        record_kind=RecordKind.NODE,
+                        record_id=claim_id,
+                        record_type="claim",
+                        repo_id=str(properties.get("repo_id") or "demo"),
+                        group_id=str(properties.get("repo_id") or "demo"),
+                    ),
+                    score=float(overlap),
+                    lexical_score=float(overlap),
+                )
+            )
+        hits.sort(key=lambda hit: hit.score, reverse=True)
+        return hits[: query.limit]
+
+    async def fetch(self, refs):
+        records_by_id = {}
+        for row in self.rows:
+            properties = dict(row.get("claim_properties") or {})
+            claim_id = str(properties.get("claim_id") or row.get("claim_id") or "").strip()
+            if not claim_id:
+                continue
+            records_by_id[claim_id] = {
+                "record_id": claim_id,
+                "record_type": "claim",
+                "properties": properties,
+            }
+        return [
+            dict(records_by_id[ref.record_id])
+            for ref in refs
+            if ref.record_id in records_by_id
+        ]
+
+
 class FakeMetadataStore:
     def bootstrap(self):
         return None
+
+
+class FakeSnapshotProducer:
+    def __init__(self, snapshot: GraphSnapshot):
+        self.snapshot = snapshot
+
+    def build_snapshot(self, repo_path: str, *, repo_id: str, revision_id: str, limit: int):
+        _ = repo_path, repo_id, revision_id, limit
+        return self.snapshot
+
+
+class FakeGitMetadata:
+    def __init__(self, commit: CommitInfo):
+        self.commit = commit
+
+    def resolve_repo_root(self, repo_path: str) -> str:
+        return repo_path
+
+    def get_commit_info(self, repo_path: str, commit_sha: str | None = None, branch_hint: str | None = None):
+        _ = repo_path, commit_sha, branch_hint
+        return self.commit
+
+    def is_first_parent_ancestor(self, repo_path: str, previous_commit_sha: str, target_commit_sha: str) -> bool:
+        _ = repo_path, previous_commit_sha, target_commit_sha
+        return True
+
+    @contextmanager
+    def temporary_worktree(self, repo_path: str, commit_sha: str):
+        _ = commit_sha
+        yield repo_path
+
+
+class FakeProfileIndexer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[ProfileRecord, ...]] = []
+
+    def apply_profile_updates(self, *, profiles, deactivations=()):
+        _ = deactivations
+        materialized = tuple(profiles)
+        self.calls.append(materialized)
+        return len(materialized)
+
+
+class FakeBackendLifecycleDriver:
+    def __init__(self) -> None:
+        self.mutations = self
+        self.maintenance = self
+
+    async def execute_query(self, query, **kwargs):
+        _ = query, kwargs
+        return []
+
+    async def health_check(self):
+        return None
+
+    async def build_indices(self, delete_existing: bool = False):
+        _ = delete_existing
+        return None
+
+    async def apply(self, plan):
+        return type("MutationApplyResult", (), {"operations_applied": plan.operation_count()})()
+
+    async def close(self):
+        return None
+
+
+class FakeEmbeddingProvider:
+    def embed_texts(self, texts):
+        vectors = []
+        for text in texts:
+            lowered = text.lower()
+            vectors.append(
+                [
+                    1.0 if "secret_key" in lowered or "secret key" in lowered else 0.0,
+                    1.0 if "auth.py" in lowered or "auth" in lowered else 0.0,
+                    1.0 if "rotated" in lowered else 0.0,
+                ]
+            )
+        return vectors
+
+
+class FakeQueryParser:
+    def __init__(self, keywords):
+        self._keywords = tuple(keywords)
+
+    def parse(self, query: str, llm_enabled: bool = True):
+        _ = query, llm_enabled
+        return QueryParseResult(
+            raw_query=query,
+            anchors=(),
+            high_level_keywords=self._keywords,
+            intent_tags=(),
+        )
+
+
+class AuthEmbeddingProvider:
+    def embed_texts(self, texts):
+        vectors = []
+        for text in texts:
+            lowered = text.lower()
+            authish = 1.0 if "auth" in lowered or "authentication" in lowered else 0.0
+            loginish = 1.0 if "login" in lowered or "session" in lowered else 0.0
+            issueish = 1.0 if "token" in lowered or "credential" in lowered else 0.0
+            vectors.append([authish, loginish, issueish])
+        return vectors
 
 
 class FakeGitHubApi:
@@ -476,6 +779,7 @@ class FakeGitHubApi:
         *,
         commit_prs: list[dict[str, object]] | None = None,
         pull_request_payload: dict[str, object] | None = None,
+        issue_payloads: dict[int, dict[str, object]] | None = None,
         review_comments: list[dict[str, object]] | None = None,
         issue_comments: list[dict[str, object]] | None = None,
         reviews: list[dict[str, object]] | None = None,
@@ -496,6 +800,10 @@ class FakeGitHubApi:
                 "body": "demo.app.main is enabled",
             }
         )
+        self.issue_payloads = {
+            key: dict(value)
+            for key, value in (issue_payloads or {}).items()
+        }
         self.review_comments = list(review_comments or [])
         self.issue_comments = list(issue_comments or [])
         self.reviews = list(reviews or [])
@@ -537,7 +845,9 @@ class FakeGitHubApi:
 
     def get_issue(self, owner: str, repo: str, number: int) -> dict[str, object]:
         _ = owner, repo, number
-        raise AssertionError("linked issues are not expected in this test")
+        if number not in self.issue_payloads:
+            raise AssertionError("linked issues are not expected in this test")
+        return dict(self.issue_payloads[number])
 
 
 class ObservationPlannerTests(unittest.TestCase):
@@ -821,6 +1131,121 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertEqual(comment_observations[0].metadata["comment_id"], 4145222468)
         self.assertEqual(comment_observations[0].metadata["anchor_revision_id"], "merge-sha")
 
+    def test_github_bundle_orders_observations_chronologically_and_includes_issue_closed(self):
+        github_api = FakeGitHubApi(
+            commit_prs=[{"number": 2, "id": 2002}],
+            pull_request_payload={
+                "id": 2002,
+                "number": 2,
+                "html_url": "https://github.com/octo/demo/pull/2",
+                "title": "Rotate SECRET_KEY",
+                "state": "closed",
+                "user": {"login": "octocat"},
+                "created_at": "2026-03-27T20:58:00Z",
+                "updated_at": "2026-03-27T20:58:00Z",
+                "body": "Rotate SECRET_KEY in auth.py",
+            },
+            linked_issue_numbers=(42,),
+            issue_payloads={
+                42: {
+                    "id": 4200,
+                    "number": 42,
+                    "html_url": "https://github.com/octo/demo/issues/42",
+                    "title": "Track SECRET_KEY rollout",
+                    "state": "closed",
+                    "user": {"login": "issue-author"},
+                    "created_at": "2026-03-27T20:57:00Z",
+                    "updated_at": "2026-03-27T20:57:00Z",
+                    "closed_at": "2026-03-27T20:59:00Z",
+                    "closed_by": {"login": "maintainer"},
+                    "state_reason": "completed",
+                    "body": "Issue body",
+                }
+            },
+            issue_comments=[
+                {
+                    "id": 4145222468,
+                    "html_url": "https://github.com/octo/demo/issues/42#issuecomment-4145222468",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T20:58:30Z",
+                    "updated_at": "2026-03-27T20:58:30Z",
+                    "body": "The rotation shipped cleanly.",
+                }
+            ],
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("merge-sha",),
+        )
+
+        ordered_kinds = [source.observation_kind.value for source in bundle.observation_sources]
+        self.assertEqual(
+            ordered_kinds,
+            [
+                "github_issue_body",
+                "github_pr_body",
+                "github_issue_comment",
+                "github_issue_closed",
+            ],
+        )
+        close_source = next(
+            source
+            for source in bundle.observation_sources
+            if source.observation_kind == ObservationKind.GITHUB_ISSUE_CLOSED
+        )
+        self.assertEqual(close_source.created_at, "2026-03-27T20:59:00Z")
+        self.assertEqual(close_source.metadata["issue_number"], 42)
+        self.assertEqual(close_source.metadata["closed_by"], "maintainer")
+        self.assertEqual(close_source.metadata["state_reason"], "completed")
+
+    def test_issue_closed_observations_persist_ingested_and_thread_fields(self):
+        planned = ObservationMutationPlanner().build_github_observations(
+            bundle=GitHubProvenanceBundle(
+                repo_id="demo",
+                github_repo="octo/demo",
+                entities=(),
+                project_links=(),
+                commit_links=(),
+                entity_links=(),
+                observation_sources=(
+                    GitHubObservationSource(
+                        observation_kind=ObservationKind.GITHUB_ISSUE_CLOSED,
+                        source_kind="issue",
+                        source_id="github:issue:demo:42",
+                        source_record_type="github_issue",
+                        external_id="4200:closed",
+                        number=42,
+                        url="https://github.com/octo/demo/issues/42",
+                        title="Issue #42 closed: Track SECRET_KEY rollout",
+                        author_login="maintainer",
+                        created_at="2026-03-27T20:59:00Z",
+                        updated_at="2026-03-27T20:59:00Z",
+                        text="Issue #42 was closed. State reason: completed.",
+                        metadata={"issue_number": 42, "closed_at": "2026-03-27T20:59:00Z"},
+                    ),
+                ),
+            )
+        )[0]
+
+        plan = ObservationMutationPlanner().plan_observations(planned)
+
+        node = plan.upsert_nodes[0]
+        self.assertEqual(node.properties["observation_kind"], "github_issue_closed")
+        self.assertEqual(node.properties["thread_kind"], "issue")
+        self.assertEqual(node.properties["thread_id"], "42")
+        self.assertTrue(node.properties["ingested_at"])
+
 
 class CodeIdentityTests(unittest.TestCase):
     def test_canonicalizer_preserves_stable_node_and_edge_ids(self):
@@ -925,7 +1350,7 @@ class CodeIdentityTests(unittest.TestCase):
         claim = ClaimWithEvidenceCandidate.model_validate(
             {
                 "claim_text": "Increased `MAX_RETRIES` in `tasks.py` from 3 to 5 to align with the new timeout window.",
-                "claim_kind": "change_claim",
+                "claim_subkind": "fix_or_mitigation",
                 "about_hints": [],
                 "confidence": "high",
                 "derivation_kind": "direct_from_observation",
@@ -961,7 +1386,7 @@ class CodeIdentityTests(unittest.TestCase):
         claim = ClaimWithEvidenceCandidate.model_validate(
             {
                 "claim_text": "Rotated `SECRET_KEY` in `auth.py` to a new value.",
-                "claim_kind": "change_claim",
+                "claim_subkind": "fix_or_mitigation",
                 "about_hints": [],
                 "confidence": "high",
                 "derivation_kind": "direct_from_observation",
@@ -1046,7 +1471,7 @@ class ClaimValidationTests(unittest.TestCase):
                 "claims": [
                     {
                         "claim_text": "demo.app.main was updated.",
-                        "claim_kind": "change_claim",
+                        "claim_subkind": "fix_or_mitigation",
                         "about_hints": ["demo.app.main"],
                         "confidence": "high",
                         "derivation_kind": "direct_from_observation",
@@ -1073,6 +1498,22 @@ class ClaimValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(result.validated_count, 1)
+
+    def test_validator_normalizes_support_role_values_placed_in_support_kind(self):
+        result = self.validator.validate(
+            observation=self.observation,
+            extraction=make_extraction_response(
+                support_kind="states_rationale",
+                support_role="provides_context",
+                support_rationale="This quote explains why the change was made.",
+            ),
+            snapshot=self.snapshot,
+        )
+
+        self.assertEqual(result.validated_count, 1)
+        evidence = result.validated_claims[0].supporting_evidence[0]
+        self.assertEqual(evidence.support_kind, "direct_statement")
+        self.assertEqual(evidence.support_role, "states_rationale")
 
     def test_validator_rejects_unsupported_source_kind(self):
         issue_observation = make_observation(kind=ObservationKind.GITHUB_ISSUE_BODY, source_kind="issue")
@@ -1347,18 +1788,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"file:demo:demo.app.__file__@r1"},
         )
 
@@ -1377,18 +1814,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"file:demo:demo.auth.main.__file__@r1"},
         )
 
@@ -1407,18 +1840,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"symbol:demo:demo.app.main@r1"},
         )
 
@@ -1437,18 +1866,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"symbol:demo:demo.auth.AuthService.login@r1"},
         )
 
@@ -1467,18 +1892,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"symbol:demo:demo.auth.AuthService@r1"},
         )
 
@@ -1500,15 +1921,7 @@ class EvidencePlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.upsert_search_documents), 1)
         self.assertEqual(
             {edge.relationship_type for edge in plan.upsert_edges},
-            {"DERIVED_FROM", "ABOUT"},
-        )
-        self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
-            {"symbol:demo:demo.app.main@r1"},
+            {"DERIVED_FROM"},
         )
         self.assertNotIn("claim_kind", plan.upsert_nodes[0].properties)
         self.assertNotIn("claim_kind", plan.upsert_search_documents[0].properties)
@@ -1615,18 +2028,14 @@ class EvidencePlannerTests(unittest.TestCase):
             snapshot=make_snapshot(),
         )
 
-        plan = EvidenceMutationPlanner().plan_validated_claims(
+        prepared = EvidenceMutationPlanner().prepare_validated_claim_bundle(
             observation=observation,
-            validation=validation,
+            bundle=validation.validated_claims[0],
             snapshot=make_snapshot(),
         )
 
         self.assertEqual(
-            {
-                edge.target_record_id
-                for edge in plan.upsert_edges
-                if edge.relationship_type == "ABOUT"
-            },
+            {record_id for item in prepared for record_id in item.about_record_ids},
             {"symbol:demo:demo.app.main@r1"},
         )
 
@@ -1779,6 +2188,8 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         )
         self.assertTrue(new_claim.properties["is_current"])
         self.assertFalse(old_claim.properties["is_current"])
+        self.assertEqual(new_claim.properties["valid_from"], self.observation.observed_at)
+        self.assertEqual(old_claim.properties["valid_to"], self.observation.observed_at)
         self.assertEqual(old_claim.properties["invalidated_by_claim_id"], new_claim.record_id)
         contradicts_edges = [
             edge
@@ -1874,6 +2285,8 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
             and node.properties["claim_text"] == "demo.app.main is disabled."
         )
         self.assertFalse(new_claim.properties["is_current"])
+        self.assertEqual(new_claim.properties["valid_from"], old_observation.observed_at)
+        self.assertEqual(new_claim.properties["valid_to"], "2026-03-25T00:00:00+00:00")
         self.assertTrue(existing_claim.properties["is_current"])
         self.assertNotIn("is_current", new_evidence.properties)
         self.assertNotIn("invalidated_by_fact_key", new_evidence.properties)
@@ -2017,10 +2430,918 @@ class EvidenceInvalidationPlannerTests(unittest.TestCase):
         claim_node = next(node for node in result.plan.upsert_nodes if node.record_type == "claim")
         evidence_node = next(node for node in result.plan.upsert_nodes if node.record_type == "evidence_record")
         self.assertFalse(claim_node.properties["is_current"])
+        self.assertEqual(claim_node.properties["valid_from"], self.observation.observed_at)
+        self.assertEqual(claim_node.properties["valid_to"], self.observation.observed_at)
         self.assertNotIn("is_current", evidence_node.properties)
         self.assertTrue(
             any(edge.relationship_type == "SUPPORTS_CLAIM" for edge in result.plan.upsert_edges)
         )
+
+    def test_exact_match_updates_valid_from_when_older_support_arrives_late(self):
+        observation = make_observation(text="This PR says demo.app.main is enabled now.")
+        observation = Observation(
+            observation_id=observation.observation_id,
+            repo_id=observation.repo_id,
+            observation_kind=observation.observation_kind,
+            source_kind=observation.source_kind,
+            source_id=observation.source_id,
+            observed_at="2026-03-24T00:00:00+00:00",
+            author=observation.author,
+            title=observation.title,
+            text=observation.text,
+            metadata=observation.metadata,
+            ingested_at=observation.ingested_at,
+            thread_kind=observation.thread_kind,
+            thread_id=observation.thread_id,
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="demo.app.main is enabled.",
+                claim_kind="state_claim",
+                quote_text="demo.app.main is enabled",
+                summary_text="The source says demo.app.main is enabled.",
+                span_start=None,
+                span_end=None,
+                evidence_kind="state_detail",
+            ),
+            snapshot=self.snapshot,
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:enabled",
+                        claim_text="demo.app.main is enabled.",
+                        latest_observed_at="2026-03-25T00:00:00+00:00",
+                        first_observed_at="2026-03-25T00:00:00+00:00",
+                    )
+                ]
+            ),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=self.snapshot,
+        )
+
+        claim_node = next(node for node in result.plan.upsert_nodes if node.record_type == "claim")
+        self.assertEqual(claim_node.record_id, "claim:demo:enabled")
+        self.assertEqual(claim_node.properties["first_observed_at"], "2026-03-24T00:00:00+00:00")
+        self.assertEqual(claim_node.properties["valid_from"], "2026-03-24T00:00:00+00:00")
+        self.assertEqual(claim_node.properties["latest_observed_at"], "2026-03-25T00:00:00+00:00")
+
+    def test_same_observation_pending_claim_can_be_invalidated(self):
+        observation = make_observation(
+            text=(
+                "`MAX_RETRIES` was increased from 3 to 5 in `tasks.py` due to database reconnect delay issues. "
+                "Correction: `MAX_RETRIES` in `tasks.py` was left at 3."
+            )
+        )
+        extraction = ClaimEvidenceExtractionResponse.model_validate(
+            {
+                "claims": [
+                    {
+                        "claim_text": "MAX_RETRIES was increased to 5 due to database reconnect delay issues.",
+                        "claim_subkind": "fix_or_mitigation",
+                        "assertion_status": "observed",
+                        "claim_frame": "author_statement",
+                        "about_hints": [],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "`MAX_RETRIES` was increased from 3 to 5 in `tasks.py` due to database reconnect delay issues.",
+                                "summary_text": "The source says MAX_RETRIES was increased.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": [],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "support_role": "states_change",
+                                "support_rationale": "This quote states that MAX_RETRIES was increased to 5.",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    {
+                        "claim_text": "MAX_RETRIES in tasks.py was left at 3.",
+                        "claim_subkind": "invariant_or_constraint",
+                        "assertion_status": "observed",
+                        "claim_frame": "author_statement",
+                        "about_hints": [],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "state_detail",
+                                "quote_text": "`MAX_RETRIES` in `tasks.py` was left at 3.",
+                                "summary_text": "The source says MAX_RETRIES stayed at 3.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": [],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "support_role": "states_constraint",
+                                "support_rationale": "This quote states that MAX_RETRIES remained at 3.",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=extraction,
+            snapshot=None,
+        )
+        first_bundle = validation.validated_claims[0]
+        first_canonical_key = canonical_claim_key(
+            claim_kind=first_bundle.claim_kind,
+            claim_text=first_bundle.claim_text,
+            about_record_ids=first_bundle.resolved_about_record_ids,
+        )
+        first_claim_id = claim_record_id(
+            repo_id=observation.repo_id,
+            canonical_key=first_canonical_key,
+            about_record_ids=first_bundle.resolved_about_record_ids,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": first_claim_id,
+                            "resolution_type": "contradicts",
+                            "confidence": "high",
+                            "rationale": "Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver([]),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(result.invalidated_count, 1)
+        self.assertEqual(len(llm_client.calls), 1)
+        claim_nodes = {
+            node.properties["claim_text"]: node
+            for node in result.plan.upsert_nodes
+            if node.record_type == "claim"
+        }
+        self.assertEqual(len(claim_nodes), 2)
+        increased_claim = claim_nodes["MAX_RETRIES was increased to 5 due to database reconnect delay issues."]
+        left_claim = claim_nodes["MAX_RETRIES in tasks.py was left at 3."]
+        self.assertFalse(increased_claim.properties["is_current"])
+        self.assertEqual(increased_claim.properties["invalidated_by_claim_id"], left_claim.record_id)
+        self.assertTrue(left_claim.properties["is_current"])
+        contradicts_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "CONTRADICTS"
+        )
+        self.assertEqual(contradicts_edge.source_record_id, left_claim.record_id)
+        self.assertEqual(contradicts_edge.target_record_id, increased_claim.record_id)
+
+    def test_same_run_same_as_reuses_pending_claim(self):
+        observation = make_observation(
+            text=(
+                "Rotated `SECRET_KEY` in `auth.py` to a new value. "
+                "Restatement: rotated `SECRET_KEY` in `auth.py` to a fresh value."
+            )
+        )
+        extraction = ClaimEvidenceExtractionResponse.model_validate(
+            {
+                "claims": [
+                    {
+                        "claim_text": "The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+                        "claim_subkind": "fix_or_mitigation",
+                        "assertion_status": "observed",
+                        "claim_frame": "author_statement",
+                        "about_hints": [],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Rotated `SECRET_KEY` in `auth.py` to a new value.",
+                                "summary_text": "The source says SECRET_KEY was rotated.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": [],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "support_role": "states_change",
+                                "support_rationale": "This quote explicitly states the SECRET_KEY rotation.",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    {
+                        "claim_text": "Rotated `SECRET_KEY` in `auth.py` to a fresh value.",
+                        "claim_subkind": "fix_or_mitigation",
+                        "assertion_status": "observed",
+                        "claim_frame": "author_statement",
+                        "about_hints": [],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "rotated `SECRET_KEY` in `auth.py` to a fresh value.",
+                                "summary_text": "The source restates the SECRET_KEY rotation.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": [],
+                                "support_kind": "direct_statement",
+                                "support_source": "observation_text",
+                                "support_role": "states_change",
+                                "support_rationale": "This quote restates the same SECRET_KEY rotation.",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=extraction,
+            snapshot=None,
+        )
+        first_bundle = validation.validated_claims[0]
+        first_canonical_key = canonical_claim_key(
+            claim_kind=first_bundle.claim_kind,
+            claim_text=first_bundle.claim_text,
+            about_record_ids=first_bundle.resolved_about_record_ids,
+        )
+        first_claim_id = claim_record_id(
+            repo_id=observation.repo_id,
+            canonical_key=first_canonical_key,
+            about_record_ids=first_bundle.resolved_about_record_ids,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": first_claim_id,
+                            "resolution_type": "same_as",
+                            "confidence": "high",
+                            "rationale": "These statements describe the same SECRET_KEY rotation.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver([]),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        claim_nodes = [
+            node for node in result.plan.upsert_nodes if node.record_type == "claim"
+        ]
+        self.assertEqual(len(claim_nodes), 1)
+        support_edges = [
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "SUPPORTS_CLAIM"
+        ]
+        self.assertEqual(len(support_edges), 2)
+        self.assertTrue(all(edge.target_record_id == first_claim_id for edge in support_edges))
+
+    def test_same_session_late_arriving_older_claim_is_non_current(self):
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver([]),
+            claim_resolution_service=ClaimResolutionService(
+                llm_client=PromptMapLLMClient(
+                    {
+                        "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                            "relations": [
+                                {
+                                    "candidate_claim_id": "claim:demo:disabled-pending",
+                                    "resolution_type": "contradicts",
+                                    "confidence": "high",
+                                    "rationale": "Enabled contradicts the newer disabled claim.",
+                                }
+                            ]
+                        }
+                    }
+                )
+            ),
+        )
+        session = planner.begin_claim_session(repo_id="demo")
+        newer_observation = make_observation(text="This PR says demo.app.main is disabled now.")
+        newer_observation = Observation(
+            observation_id=newer_observation.observation_id,
+            repo_id=newer_observation.repo_id,
+            observation_kind=newer_observation.observation_kind,
+            source_kind=newer_observation.source_kind,
+            source_id=newer_observation.source_id,
+            observed_at="2026-03-26T00:00:00+00:00",
+            author=newer_observation.author,
+            title=newer_observation.title,
+            text=newer_observation.text,
+            metadata=newer_observation.metadata,
+            ingested_at=newer_observation.ingested_at,
+            thread_kind=newer_observation.thread_kind,
+            thread_id=newer_observation.thread_id,
+        )
+        newer_validation = ClaimBundleValidator().validate(
+            observation=newer_observation,
+            extraction=make_extraction_response(
+                claim_text="demo.app.main is disabled.",
+                claim_kind="state_claim",
+                quote_text="demo.app.main is disabled",
+                summary_text="The source says demo.app.main is disabled.",
+                span_start=None,
+                span_end=None,
+                evidence_kind="state_detail",
+            ),
+            snapshot=self.snapshot,
+        )
+        newer_bundle = newer_validation.validated_claims[0]
+        newer_canonical_key = canonical_claim_key(
+            claim_kind=newer_bundle.claim_kind,
+            claim_text=newer_bundle.claim_text,
+            about_record_ids=newer_bundle.resolved_about_record_ids,
+        )
+        newer_claim_id = claim_record_id(
+            repo_id=newer_observation.repo_id,
+            canonical_key=newer_canonical_key,
+            about_record_ids=newer_bundle.resolved_about_record_ids,
+        )
+        planner.claim_mutation_planner.claim_resolution_service.llm_client.responses_by_prompt[
+            "provenance.relate_claims.resolve_new_claim_against_candidates.v1"
+        ][0]["relations"][0]["candidate_claim_id"] = newer_claim_id
+        planner.plan_validated_claims(
+            observation=newer_observation,
+            validation=newer_validation,
+            snapshot=self.snapshot,
+            session=session,
+        )
+
+        older_observation = make_observation(text="This PR says demo.app.main is enabled now.")
+        older_observation = Observation(
+            observation_id=older_observation.observation_id,
+            repo_id=older_observation.repo_id,
+            observation_kind=older_observation.observation_kind,
+            source_kind=older_observation.source_kind,
+            source_id=older_observation.source_id,
+            observed_at="2026-03-25T00:00:00+00:00",
+            author=older_observation.author,
+            title=older_observation.title,
+            text=older_observation.text,
+            metadata=older_observation.metadata,
+            ingested_at=older_observation.ingested_at,
+            thread_kind=older_observation.thread_kind,
+            thread_id=older_observation.thread_id,
+        )
+        older_validation = ClaimBundleValidator().validate(
+            observation=older_observation,
+            extraction=make_extraction_response(
+                claim_text="demo.app.main is enabled.",
+                claim_kind="state_claim",
+                quote_text="demo.app.main is enabled",
+                summary_text="The source says demo.app.main is enabled.",
+                span_start=None,
+                span_end=None,
+                evidence_kind="state_detail",
+            ),
+            snapshot=self.snapshot,
+        )
+
+        result = planner.plan_validated_claims(
+            observation=older_observation,
+            validation=older_validation,
+            snapshot=self.snapshot,
+            session=session,
+        )
+
+        self.assertEqual(result.invalidated_count, 0)
+        older_claim = next(
+            node
+            for node in result.plan.upsert_nodes
+            if node.record_type == "claim" and node.properties["claim_text"] == "demo.app.main is enabled."
+        )
+        self.assertFalse(older_claim.properties["is_current"])
+        self.assertEqual(older_claim.properties["valid_to"], "2026-03-26T00:00:00+00:00")
+        contradicts_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "CONTRADICTS"
+        )
+        self.assertEqual(contradicts_edge.target_record_id, newer_claim_id)
+
+    def test_same_session_legacy_backfill_runs_once(self):
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_evidence_row(
+                        evidence_id="evidence:demo:legacy",
+                        claim_text="demo.app.main is enabled.",
+                        claim_kind="state_claim",
+                    )
+                ]
+            ),
+        )
+        session = planner.begin_claim_session(repo_id="demo")
+
+        first_result = planner.plan_validated_claims(
+            observation=self.observation,
+            validation=self.validation,
+            snapshot=self.snapshot,
+            session=session,
+        )
+        second_result = planner.plan_validated_claims(
+            observation=self.observation,
+            validation=self.validation,
+            snapshot=self.snapshot,
+            session=session,
+        )
+
+        first_legacy_support_edges = [
+            edge
+            for edge in first_result.plan.upsert_edges
+            if edge.relationship_type == "SUPPORTS_CLAIM"
+            and edge.source_record_id == "evidence:demo:legacy"
+        ]
+        second_legacy_support_edges = [
+            edge
+            for edge in second_result.plan.upsert_edges
+            if edge.relationship_type == "SUPPORTS_CLAIM"
+            and edge.source_record_id == "evidence:demo:legacy"
+        ]
+        self.assertEqual(len(first_legacy_support_edges), 1)
+        self.assertEqual(second_legacy_support_edges, [])
+
+    def test_same_thread_candidates_are_resolved_before_global_candidates(self):
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": "claim:demo:thread",
+                            "resolution_type": "same_as",
+                            "confidence": "high",
+                            "rationale": "These claims express the same scoped proposition.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:thread",
+                        claim_text="demo.app.main is enabled for PR #7.",
+                        source_id="github:pr:demo:7",
+                        thread_kind="pull_request",
+                        thread_id="7",
+                    ),
+                    make_existing_claim_row(
+                        claim_id="claim:demo:global",
+                        claim_text="demo.app.main is enabled for issue #9.",
+                        source_kind="issue",
+                        source_id="github:issue:demo:9",
+                        thread_kind="issue",
+                        thread_id="9",
+                    ),
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=self.observation,
+            validation=self.validation,
+            snapshot=self.snapshot,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        prompt = llm_client.calls[0]["messages"][1].content
+        self.assertIn("claim:demo:thread", prompt)
+        self.assertNotIn("claim:demo:global", prompt)
+        support_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "SUPPORTS_CLAIM"
+        )
+        self.assertEqual(support_edge.target_record_id, "claim:demo:thread")
+
+    def test_cross_kind_same_thread_candidate_is_compared_for_resolution(self):
+        observation = make_observation(
+            text="Correction: `MAX_RETRIES` in `tasks.py` was left at 3 because retry count was not the issue.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="MAX_RETRIES in tasks.py was left at 3 because retry count was not the issue.",
+                claim_kind="state_claim",
+                source_hint=None,
+                quote_text="`MAX_RETRIES` in `tasks.py` was left at 3 because retry count was not the issue",
+                span_start=None,
+                span_end=None,
+                evidence_kind="state_detail",
+                support_rationale="This quote states that MAX_RETRIES stayed at 3 and explains why.",
+            ),
+            snapshot=None,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": "claim:demo:max-retries-change",
+                            "resolution_type": "contradicts",
+                            "confidence": "high",
+                            "rationale": "Leaving MAX_RETRIES at 3 conflicts with the earlier increase to 5.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:max-retries-change",
+                        claim_text="`MAX_RETRIES` was increased from 3 to 5 in `tasks.py`.",
+                        claim_kind="change_claim",
+                        claim_subkind="fix_or_mitigation",
+                        about_record_ids=(),
+                    )
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        prompt = llm_client.calls[0]["messages"][1].content
+        self.assertIn("claim:demo:max-retries-change", prompt)
+        self.assertTrue(
+            any(edge.relationship_type == "CONTRADICTS" for edge in result.plan.upsert_edges)
+        )
+
+    def test_same_thread_lexical_candidate_without_about_overlap_is_compared(self):
+        observation = make_observation(
+            text="Rotated `SECRET_KEY` in `auth.py` to a new value for tighter security.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+                claim_kind="change_claim",
+                source_hint=None,
+                quote_text="Rotated `SECRET_KEY` in `auth.py` to a new value",
+                span_start=None,
+                span_end=None,
+                evidence_kind="change_summary",
+                support_rationale="This quote explicitly states that SECRET_KEY in auth.py was rotated.",
+            ),
+            snapshot=None,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": "claim:demo:secret-thread",
+                            "resolution_type": "same_as",
+                            "confidence": "high",
+                            "rationale": "These are equivalent statements about the same SECRET_KEY rotation.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:secret-thread",
+                        claim_text="Rotated `SECRET_KEY` in `auth.py` to a fresh value.",
+                        claim_kind="change_claim",
+                        claim_subkind="fix_or_mitigation",
+                        about_record_ids=(),
+                    )
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        prompt = llm_client.calls[0]["messages"][1].content
+        self.assertIn("claim:demo:secret-thread", prompt)
+        support_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "SUPPORTS_CLAIM"
+        )
+        self.assertEqual(support_edge.target_record_id, "claim:demo:secret-thread")
+
+    def test_cross_thread_lexical_candidate_is_compared_in_global_pass(self):
+        observation = make_observation(
+            text="Rotated `SECRET_KEY` in `auth.py` to a new value for tighter security.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+                claim_kind="change_claim",
+                source_hint=None,
+                quote_text="Rotated `SECRET_KEY` in `auth.py` to a new value",
+                span_start=None,
+                span_end=None,
+                evidence_kind="change_summary",
+                support_rationale="This quote explicitly states that SECRET_KEY in auth.py was rotated.",
+            ),
+            snapshot=None,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": "claim:demo:secret-global",
+                            "resolution_type": "same_as",
+                            "confidence": "high",
+                            "rationale": "These are equivalent statements about the same SECRET_KEY rotation.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:secret-global",
+                        claim_text="Rotated `SECRET_KEY` in `auth.py` to a fresh value.",
+                        claim_kind="change_claim",
+                        claim_subkind="fix_or_mitigation",
+                        source_kind="issue",
+                        source_id="github:issue:demo:9",
+                        thread_kind="issue",
+                        thread_id="9",
+                        about_record_ids=(),
+                    )
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        prompt = llm_client.calls[0]["messages"][1].content
+        self.assertIn("claim:demo:secret-global", prompt)
+        support_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "SUPPORTS_CLAIM"
+        )
+        self.assertEqual(support_edge.target_record_id, "claim:demo:secret-global")
+
+    def test_same_file_overlap_alone_does_not_trigger_resolution(self):
+        observation = make_observation(
+            text="Added logging to `tasks.py` for task execution visibility.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="Added logging to `tasks.py` for task execution visibility.",
+                claim_kind="change_claim",
+                source_hint=None,
+                quote_text="Added logging to `tasks.py` for task execution visibility",
+                span_start=None,
+                span_end=None,
+                evidence_kind="change_summary",
+                support_rationale="This quote describes the logging change in tasks.py.",
+            ),
+            snapshot=None,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": []
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:file-only",
+                        claim_text="Refactored `tasks.py` imports for readability.",
+                        claim_kind="change_claim",
+                        claim_subkind="fix_or_mitigation",
+                        source_kind="issue",
+                        source_id="github:issue:demo:9",
+                        thread_kind="issue",
+                        thread_id="9",
+                        about_record_ids=(),
+                    )
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(llm_client.calls, [])
+
+    def test_same_numeric_literal_alone_does_not_trigger_resolution(self):
+        observation = make_observation(
+            text="Configured retry jitter to 5 milliseconds in the scheduler.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="Configured retry jitter to 5 milliseconds in the scheduler.",
+                claim_kind="change_claim",
+                source_hint=None,
+                quote_text="Configured retry jitter to 5 milliseconds in the scheduler",
+                span_start=None,
+                span_end=None,
+                evidence_kind="change_summary",
+                support_rationale="This quote states the scheduler jitter value.",
+            ),
+            snapshot=None,
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": []
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver(
+                [
+                    make_existing_claim_row(
+                        claim_id="claim:demo:number-only",
+                        claim_text="Set worker concurrency to 5 for cache warmup.",
+                        claim_kind="change_claim",
+                        claim_subkind="fix_or_mitigation",
+                        source_kind="issue",
+                        source_id="github:issue:demo:9",
+                        thread_kind="issue",
+                        thread_id="9",
+                        about_record_ids=(),
+                    )
+                ]
+            ),
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(llm_client.calls, [])
+
+    def test_semantic_profile_candidate_expansion_can_surface_claim_for_resolution(self):
+        observation = make_observation(
+            text="Auth now needs a refresh token for login.",
+        )
+        validation = ClaimBundleValidator().validate(
+            observation=observation,
+            extraction=make_extraction_response(
+                claim_text="Auth now needs a refresh token for login.",
+                claim_kind="state_claim",
+                source_hint=None,
+                quote_text="Auth now needs a refresh token for login",
+                span_start=None,
+                span_end=None,
+                evidence_kind="change_summary",
+                support_rationale="This quote states the refresh-token requirement.",
+            ),
+            snapshot=None,
+        )
+        existing_claim_row = make_existing_claim_row(
+            claim_id="claim:demo:auth-refresh",
+            claim_text="Authentication now requires a refresh token for login.",
+            claim_kind="state_claim",
+            claim_subkind="desired_behavior_or_requirement",
+            about_record_ids=(),
+            source_kind="issue",
+            source_id="github:issue:demo:18",
+            thread_kind="issue",
+            thread_id="18",
+        )
+        metadata = InMemoryMetadataStore()
+        existing_claim = ClaimRecord(
+            claim_id="claim:demo:auth-refresh",
+            repo_id="demo",
+            canonical_key=canonical_claim_key(
+                claim_kind="state_claim",
+                claim_text="Authentication now requires a refresh token for login.",
+                about_record_ids=(),
+            ),
+            claim_text="Authentication now requires a refresh token for login.",
+            claim_kind="state_claim",
+            claim_subkind="desired_behavior_or_requirement",
+            first_observed_at="2026-03-25T00:00:00+00:00",
+            latest_observed_at="2026-03-25T00:00:00+00:00",
+            is_current=True,
+            ingested_at="2026-03-28T00:00:00Z",
+            valid_from="2026-03-25T00:00:00+00:00",
+            thread_kind="issue",
+            thread_id="18",
+            metadata={},
+        )
+        metadata.upsert_profiles(
+            (
+                semantic_claim_profile_from_claim(
+                    existing_claim,
+                    generated_keys=("auth refresh token",),
+                ),
+            )
+        )
+        vector_store = InMemoryProfileVectorStore()
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=AuthEmbeddingProvider(),
+        )
+        indexer.sync_repo(repo_id="demo", metadata_store=metadata)
+        candidate_retriever = ClaimResolutionCandidateRetriever(
+            backend_driver=FakeBackendDriver([existing_claim_row]),
+            semantic_claim_search_service=ClaimSemanticRetrievalService(
+                metadata_store=metadata,
+                vector_store=vector_store,
+                embedding_provider=AuthEmbeddingProvider(),
+                query_parser=FakeQueryParser(("auth refresh token",)),
+            ),
+        )
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": {
+                    "relations": [
+                        {
+                            "candidate_claim_id": "claim:demo:auth-refresh",
+                            "resolution_type": "same_as",
+                            "confidence": "high",
+                            "rationale": "The semantic phrasing differs, but the requirement is the same.",
+                        }
+                    ]
+                }
+            }
+        )
+        planner = EvidenceInvalidationPlanner(
+            backend_driver=FakeBackendDriver([existing_claim_row]),
+            claim_candidate_retriever=candidate_retriever,
+            claim_resolution_service=ClaimResolutionService(llm_client=llm_client),
+        )
+
+        result = planner.plan_validated_claims(
+            observation=observation,
+            validation=validation,
+            snapshot=None,
+        )
+
+        self.assertEqual(len(llm_client.calls), 1)
+        prompt = llm_client.calls[0]["messages"][1].content
+        self.assertIn("claim:demo:auth-refresh", prompt)
+        support_edge = next(
+            edge for edge in result.plan.upsert_edges if edge.relationship_type == "SUPPORTS_CLAIM"
+        )
+        self.assertEqual(support_edge.target_record_id, "claim:demo:auth-refresh")
 
 
 class PromptScaffoldingTests(unittest.TestCase):
@@ -2071,6 +3392,130 @@ class PromptScaffoldingTests(unittest.TestCase):
         self.assertEqual(len(relation_messages), 2)
         self.assertEqual(len(fact_conflict_messages), 2)
         self.assertEqual(len(artifact_messages), 2)
+
+
+class ClaimSemanticProfileTests(unittest.TestCase):
+    def test_semantic_claim_profile_includes_raw_text_and_generated_keys(self):
+        claim = ClaimRecord(
+            claim_id="claim:demo:secret",
+            repo_id="demo",
+            canonical_key="canonical:secret",
+            claim_text="The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+            claim_kind="change_claim",
+            claim_subkind="fix_or_mitigation",
+            first_observed_at="2026-03-26T00:00:00+00:00",
+            latest_observed_at="2026-03-26T00:00:00+00:00",
+            is_current=True,
+            ingested_at="2026-03-28T00:00:00Z",
+            valid_from="2026-03-26T00:00:00+00:00",
+            thread_kind="pull_request",
+            thread_id="7",
+            metadata={},
+        )
+
+        profile = semantic_claim_profile_from_claim(
+            claim,
+            about_record_ids=(
+                "file:demo:demo.auth.__file__@r1",
+                "variable:demo:demo.auth.SECRET_KEY@r1",
+            ),
+            support_texts=("Rotated `SECRET_KEY` in `auth.py` during incident response.",),
+            generated_keys=("credential rotation",),
+        )
+
+        self.assertEqual(profile.profile_kind, SEMANTIC_CLAIM_PROFILE_KIND)
+        self.assertEqual(profile.profile_target_id, claim.claim_id)
+        self.assertEqual(profile.metadata["claim_id"], claim.claim_id)
+        self.assertEqual(
+            profile.keys[0],
+            ProfileKeyDefinition(
+                text="The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+                origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+            ),
+        )
+        self.assertIn(
+            ProfileKeyDefinition(
+                text="credential rotation",
+                origin=PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC,
+            ),
+            profile.keys,
+        )
+
+    def test_claim_semantic_retrieval_service_filters_to_claim_profiles(self):
+        metadata = InMemoryMetadataStore()
+        claim = ClaimRecord(
+            claim_id="claim:demo:secret",
+            repo_id="demo",
+            canonical_key="canonical:secret",
+            claim_text="The `SECRET_KEY` in `auth.py` was rotated to a new value.",
+            claim_kind="change_claim",
+            claim_subkind="fix_or_mitigation",
+            first_observed_at="2026-03-26T00:00:00+00:00",
+            latest_observed_at="2026-03-26T00:00:00+00:00",
+            is_current=True,
+            ingested_at="2026-03-28T00:00:00Z",
+            valid_from="2026-03-26T00:00:00+00:00",
+            thread_kind="pull_request",
+            thread_id="7",
+            metadata={},
+        )
+        claim_profile = semantic_claim_profile_from_claim(
+            claim,
+            about_record_ids=(
+                "file:demo:demo.auth.__file__@r1",
+                "variable:demo:demo.auth.SECRET_KEY@r1",
+            ),
+            support_texts=("Rotated `SECRET_KEY` in `auth.py` during incident response.",),
+        )
+        fact_profile = ProfileRecord(
+            profile_id="profile:demo:semantic_fact_profile:fact:1",
+            repo_id="demo",
+            profile_kind="semantic_fact_profile",
+            profile_target_kind="FactEdge",
+            profile_target_id="fact:1",
+            relation_type="JUSTIFIES",
+            source_node_id="symbol:demo:demo.auth.main",
+            source_node_kind="Function",
+            target_node_id="symbol:demo:demo.auth.rotate",
+            target_node_kind="Function",
+            target_revision_id=None,
+            value_text="auth rotation was documented elsewhere",
+            keys=(
+                ProfileKeyDefinition(
+                    "SECRET_KEY auth.py rotated",
+                    PROFILE_KEY_ORIGIN_RAW_TEXT,
+                ),
+            ),
+            metadata={"fact_id": "fact:1"},
+            is_active=True,
+            updated_at="2026-03-26T00:00:00+00:00",
+        )
+        metadata.upsert_profiles((claim_profile, fact_profile))
+
+        vector_store = InMemoryProfileVectorStore()
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        indexed = indexer.sync_repo(repo_id="demo", metadata_store=metadata)
+
+        service = ClaimSemanticRetrievalService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=FakeEmbeddingProvider(),
+            query_parser=FakeQueryParser(("SECRET_KEY auth.py rotated",)),
+        )
+        result = service.search(
+            repo_id="demo",
+            query="Where was SECRET_KEY rotated?",
+            limit=5,
+        )
+
+        self.assertGreater(indexed, 0)
+        self.assertEqual(len(result.hits), 1)
+        self.assertEqual(result.hits[0].claim_id, claim.claim_id)
+        self.assertEqual(result.hits[0].profile_id, claim_profile.profile_id)
+        self.assertEqual(result.profiles[0].profile_kind, SEMANTIC_CLAIM_PROFILE_KIND)
         prompt_names = {
             extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_COMMIT_MESSAGE.prompt_name,
             extract_claims_and_evidence.EXTRACT_CLAIMS_AND_EVIDENCE_FROM_GITHUB_PR_BODY.prompt_name,
@@ -2384,7 +3829,7 @@ class PromptScaffoldingTests(unittest.TestCase):
                 "claims": [
                     {
                         "claim_text": "A regression test is required.",
-                        "claim_kind": "review_feedback",
+                        "claim_subkind": "reviewer_objection_or_requested_change",
                         "about_hints": ["demo.app.main"],
                         "confidence": "high",
                         "derivation_kind": "direct_from_observation",
@@ -2452,6 +3897,353 @@ class PromptScaffoldingTests(unittest.TestCase):
         )
 
 
+class ClaimProfileKeyGenerationServiceTests(unittest.TestCase):
+    def test_filters_duplicate_and_code_anchor_like_generated_keys(self):
+        service = ClaimProfileKeyGenerationService(
+            llm_client=FakeLLMClient(
+                {
+                    "retrieval_keys": [
+                        "credential rotation",
+                        "src/auth.py",
+                        "AUTH_SECRET",
+                        "credential rotation",
+                        "The SECRET_KEY was rotated",
+                    ]
+                }
+            )
+        )
+
+        keys = service.generate(
+            repo_id="demo",
+            claim_text="The SECRET_KEY was rotated",
+            claim_subkind="fix_or_mitigation",
+            support_texts=("Rotated SECRET_KEY in auth.py during incident response.",),
+        )
+
+        self.assertEqual(keys, ("credential rotation",))
+
+    def test_returns_empty_tuple_when_generation_fails(self):
+        class RaisingLLM:
+            async def generate_response(self, messages, **kwargs):
+                _ = messages, kwargs
+                raise RuntimeError("boom")
+
+        service = ClaimProfileKeyGenerationService(llm_client=RaisingLLM())
+        self.assertEqual(
+            service.generate(
+                repo_id="demo",
+                claim_text="Authentication now requires a refresh token.",
+                claim_subkind="rollout_migration_or_dependency",
+                support_texts=("Authentication now requires a refresh token.",),
+            ),
+            (),
+        )
+
+
+class ObservationSemanticProfileTests(unittest.TestCase):
+    def test_observation_profile_uses_title_plus_body_and_truncates(self):
+        profile = semantic_observation_profile_from_observation(
+            Observation(
+                observation_id="observation:demo:1",
+                repo_id="demo",
+                observation_kind=ObservationKind.GITHUB_PR_BODY,
+                source_kind="pull_request",
+                source_id="github:pr:demo:7",
+                observed_at="2026-03-26T00:00:00+00:00",
+                author="octocat",
+                title="Authentication follow-up",
+                text="  auth now requires token rotation.  " + ("x" * 5000),
+                metadata={},
+                ingested_at="2026-03-28T00:00:00Z",
+                thread_kind="pull_request",
+                thread_id="7",
+            )
+        )
+
+        self.assertEqual(profile.profile_kind, SEMANTIC_OBSERVATION_PROFILE_KIND)
+        self.assertTrue(profile.value_text.startswith("Authentication follow-up\n\nauth now requires token rotation."))
+        self.assertEqual(len(profile.value_text), 4000)
+        self.assertEqual(
+            profile.keys,
+            (
+                ProfileKeyDefinition(
+                    text=profile.value_text,
+                    origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
+                ),
+            ),
+        )
+
+
+class SemanticProvenanceSearchTests(unittest.TestCase):
+    def test_fused_search_returns_claims_before_observations(self):
+        metadata = InMemoryMetadataStore()
+        claim = ClaimRecord(
+            claim_id="claim:demo:auth-1",
+            repo_id="demo",
+            canonical_key="canonical:auth-1",
+            claim_text="Authentication now requires a refresh token.",
+            claim_kind="change_claim",
+            claim_subkind="rollout_migration_or_dependency",
+            first_observed_at="2026-03-26T00:00:00+00:00",
+            latest_observed_at="2026-03-26T00:00:00+00:00",
+            is_current=True,
+            ingested_at="2026-03-28T00:00:00Z",
+            valid_from="2026-03-26T00:00:00+00:00",
+            metadata={},
+        )
+        claim_profile = semantic_claim_profile_from_claim(
+            claim,
+            generated_keys=("auth flow",),
+        )
+        observation_profile = semantic_observation_profile_from_observation(
+            Observation(
+                observation_id="observation:demo:auth-obs",
+                repo_id="demo",
+                observation_kind=ObservationKind.GITHUB_PR_BODY,
+                source_kind="pull_request",
+                source_id="github:pr:demo:8",
+                observed_at="2026-03-26T00:05:00+00:00",
+                author="octocat",
+                title="Auth migration",
+                text="Authentication now requires a refresh token for login sessions.",
+                metadata={},
+                ingested_at="2026-03-28T00:00:00Z",
+                thread_kind="pull_request",
+                thread_id="8",
+            )
+        )
+        metadata.upsert_profiles((claim_profile, observation_profile))
+
+        vector_store = InMemoryProfileVectorStore()
+        indexer = ProfileVectorIndexer(
+            vector_store=vector_store,
+            embedding_provider=AuthEmbeddingProvider(),
+        )
+        indexer.sync_repo(repo_id="demo", metadata_store=metadata)
+
+        base_search = ProfileSearchService(
+            metadata_store=metadata,
+            vector_store=vector_store,
+            embedding_provider=AuthEmbeddingProvider(),
+            query_parser=FakeQueryParser(("authentication migration",)),
+        )
+        fused_search = SemanticProvenanceSearchService(
+            profile_search_service=base_search,
+        )
+
+        result = fused_search.search(
+            repo_id="demo",
+            query="auth migration",
+            limit=5,
+        )
+
+        self.assertEqual(result.profiles[0].profile_kind, SEMANTIC_CLAIM_PROFILE_KIND)
+        self.assertEqual(result.profiles[1].profile_kind, SEMANTIC_OBSERVATION_PROFILE_KIND)
+        self.assertEqual(result.hits[0].key_origin, PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC)
+
+
+class IngestionSemanticProfilePersistenceTests(unittest.TestCase):
+    def test_commit_indexing_persists_profiles_only_when_execute_true(self):
+        snapshot = make_snapshot()
+        commit = make_commit(
+            sha="r1",
+            parents=(),
+            changed_files=("app.py",),
+            subject="Authentication now requires a refresh token.",
+            body="",
+        )
+        prompt_map = {
+            "provenance.extract_claims_and_evidence.from_commit_message.v1": {
+                "claims": [
+                    {
+                        "claim_text": "Authentication now requires a refresh token.",
+                        "claim_subkind": "rollout_migration_or_dependency",
+                        "about_hints": ["demo.app.main"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Authentication now requires a refresh token.",
+                                "summary_text": "The commit updates authentication requirements.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["demo.app.main"],
+                                "support_kind": "direct_statement",
+                                "metadata": {},
+                            }
+                        ],
+                    }
+                ]
+            },
+            "context_graph.provenance.generate_claim_profile_keys": {
+                "retrieval_keys": ["auth migration"]
+            },
+        }
+
+        preview_metadata = InMemoryMetadataStore()
+        preview_indexer = FakeProfileIndexer()
+        preview_service = CommitIndexingService(
+            metadata_store=preview_metadata,
+            backend_driver=None,
+            snapshot_producer=FakeSnapshotProducer(snapshot),
+            git_metadata=FakeGitMetadata(commit),
+            llm_client=PromptMapLLMClient(prompt_map),
+            profile_indexer=preview_indexer,
+        )
+        preview_service.apply_commit(
+            "/tmp/demo",
+            commit_sha="r1",
+            repo_id="demo",
+            execute=False,
+        )
+        self.assertEqual(preview_metadata.load_profiles("demo"), ())
+        self.assertEqual(preview_indexer.calls, [])
+
+        execute_metadata = InMemoryMetadataStore()
+        execute_indexer = FakeProfileIndexer()
+        real_writer = TemporalGraphWriter(
+            metadata_store=execute_metadata,
+            backend_driver=None,
+        )
+
+        class StubWriter:
+            def plan_snapshot(self, snapshot):
+                return real_writer.plan_snapshot(snapshot)
+
+            def apply_planned_snapshot(self, snapshot, diff, operations, *, execute=False):
+                _ = execute
+                real_writer.finalize_snapshot(snapshot, diff)
+                from context_graph.models import SnapshotApplyResult
+
+                return SnapshotApplyResult(
+                    snapshot=snapshot,
+                    diff=diff,
+                    operations_emitted=operations.operation_count(),
+                    operations_applied=operations.operation_count(),
+                )
+
+        execute_service = CommitIndexingService(
+            metadata_store=execute_metadata,
+            backend_driver=None,
+            snapshot_producer=FakeSnapshotProducer(snapshot),
+            git_metadata=FakeGitMetadata(commit),
+            writer=StubWriter(),
+            llm_client=PromptMapLLMClient(prompt_map),
+            profile_indexer=execute_indexer,
+        )
+        execute_service.apply_commit(
+            "/tmp/demo",
+            commit_sha="r1",
+            repo_id="demo",
+            execute=True,
+        )
+
+        stored_profiles = execute_metadata.load_profiles("demo")
+        self.assertEqual(
+            {profile.profile_kind for profile in stored_profiles},
+            {SEMANTIC_CLAIM_PROFILE_KIND, SEMANTIC_OBSERVATION_PROFILE_KIND},
+        )
+        self.assertEqual(len(execute_indexer.calls), 1)
+
+    def test_github_indexing_persists_profiles_only_when_execute_true(self):
+        metadata = InMemoryMetadataStore()
+        github_api = FakeGitHubApi(
+            commit_prs=[{"number": 7}],
+            pull_request_payload={
+                "id": 700,
+                "number": 7,
+                "html_url": "https://github.com/octo/demo/pull/7",
+                "title": "Auth migration",
+                "state": "open",
+                "user": {"login": "octocat"},
+                "created_at": "2026-03-26T00:00:00+00:00",
+                "updated_at": "2026-03-26T00:01:00+00:00",
+                "body": "Authentication now requires a refresh token.",
+            }
+        )
+        prompt_map = {
+            "provenance.extract_claims_and_evidence.from_github_pr_body.v1": {
+                "claims": [
+                    {
+                        "claim_text": "Authentication now requires a refresh token.",
+                        "claim_subkind": "rollout_migration_or_dependency",
+                        "about_hints": ["demo.app.main"],
+                        "confidence": "high",
+                        "derivation_kind": "direct_from_observation",
+                        "metadata": {},
+                        "supporting_evidence": [
+                            {
+                                "evidence_kind": "change_summary",
+                                "quote_text": "Authentication now requires a refresh token.",
+                                "summary_text": "The PR updates authentication requirements.",
+                                "span_start": None,
+                                "span_end": None,
+                                "about_hints": ["demo.app.main"],
+                                "support_kind": "direct_statement",
+                                "metadata": {},
+                            }
+                        ],
+                    }
+                ]
+            },
+            "context_graph.provenance.generate_claim_profile_keys": {
+                "retrieval_keys": ["auth migration"]
+            },
+        }
+        preview_indexer = FakeProfileIndexer()
+        preview_service = GitHubIndexer(
+            github_api=github_api,
+            metadata_store=metadata,
+            backend_driver=FakeBackendLifecycleDriver(),
+            llm_client=PromptMapLLMClient(prompt_map),
+            profile_indexer=preview_indexer,
+        )
+        repo_ref = GitHubRepoRef(
+            owner="octo",
+            name="demo",
+            canonical_repo="octo/demo",
+            clone_url="https://github.com/octo/demo.git",
+            html_url="https://github.com/octo/demo",
+            default_branch="main",
+            source="api",
+        )
+
+        preview_service.sync_for_commits(
+            repo_id="demo",
+            repo_ref=repo_ref,
+            commit_shas=("abc1234",),
+            snapshot=make_snapshot(),
+            execute=False,
+        )
+        self.assertEqual(metadata.load_profiles("demo"), ())
+        self.assertEqual(preview_indexer.calls, [])
+
+        execute_indexer = FakeProfileIndexer()
+        execute_service = GitHubIndexer(
+            github_api=github_api,
+            metadata_store=metadata,
+            backend_driver=FakeBackendLifecycleDriver(),
+            llm_client=PromptMapLLMClient(prompt_map),
+            profile_indexer=execute_indexer,
+        )
+        execute_service.sync_for_commits(
+            repo_id="demo",
+            repo_ref=repo_ref,
+            commit_shas=("abc1234",),
+            snapshot=make_snapshot(),
+            execute=True,
+        )
+
+        stored_profiles = metadata.load_profiles("demo")
+        self.assertEqual(
+            {profile.profile_kind for profile in stored_profiles},
+            {SEMANTIC_CLAIM_PROFILE_KIND, SEMANTIC_OBSERVATION_PROFILE_KIND},
+        )
+        self.assertEqual(len(execute_indexer.calls), 1)
+
+
 class IngestionInvalidationTests(unittest.TestCase):
     def test_commit_evidence_planning_reports_invalidated_count(self):
         llm_client = PromptMapLLMClient(
@@ -2460,7 +4252,7 @@ class IngestionInvalidationTests(unittest.TestCase):
                     "claims": [
                         {
                             "claim_text": "demo.app.main is enabled.",
-                            "claim_kind": "state_claim",
+                            "claim_subkind": "invariant_or_constraint",
                             "about_hints": ["demo.app.main"],
                             "confidence": "high",
                             "derivation_kind": "direct_from_observation",
@@ -2527,7 +4319,7 @@ class IngestionInvalidationTests(unittest.TestCase):
                     "claims": [
                         {
                             "claim_text": "demo.app.main is enabled.",
-                            "claim_kind": "state_claim",
+                            "claim_subkind": "invariant_or_constraint",
                             "about_hints": ["demo.app.main"],
                             "confidence": "high",
                             "derivation_kind": "direct_from_observation",
@@ -2607,6 +4399,197 @@ class IngestionInvalidationTests(unittest.TestCase):
         self.assertTrue(
             any(edge.relationship_type == "CONTRADICTS" for edge in plan.upsert_edges)
         )
+
+    def test_github_evidence_planning_reuses_pending_claim_session_across_observations(self):
+        bundle = GitHubProvenanceBundle(
+            repo_id="demo",
+            github_repo="octo/demo",
+            entities=(),
+            project_links=(),
+            commit_links=(),
+            entity_links=(),
+            observation_sources=(
+                GitHubObservationSource(
+                    observation_kind=ObservationKind.GITHUB_PR_BODY,
+                    source_kind="pull_request",
+                    source_id="github:pr:demo:7",
+                    source_record_type="github_pull_request",
+                    external_id="700",
+                    number=7,
+                    url="https://github.com/octo/demo/pull/7",
+                    title="Adjust retries",
+                    author_login="octocat",
+                    created_at="2026-03-26T00:00:00+00:00",
+                    updated_at="2026-03-26T00:01:00+00:00",
+                    text="`MAX_RETRIES` was increased from 3 to 5 in `tasks.py` due to database reconnect delay issues.",
+                    metadata={"pull_request_number": 7},
+                ),
+                GitHubObservationSource(
+                    observation_kind=ObservationKind.GITHUB_PR_REVIEW,
+                    source_kind="pull_request",
+                    source_id="github:pr:demo:7",
+                    source_record_type="github_pull_request",
+                    external_id="701",
+                    number=7,
+                    url="https://github.com/octo/demo/pull/7#pullrequestreview-701",
+                    title="Review on PR #7: Adjust retries",
+                    author_login="reviewer",
+                    created_at="2026-03-26T00:02:00+00:00",
+                    updated_at="2026-03-26T00:02:00+00:00",
+                    text="Correction: `MAX_RETRIES` in `tasks.py` was left at 3.",
+                    metadata={"review_id": 701},
+                ),
+            ),
+        )
+        planned_observations = ObservationMutationPlanner().build_github_observations(bundle=bundle)
+        body_extraction = {
+            "claims": [
+                {
+                    "claim_text": "MAX_RETRIES was increased to 5 due to database reconnect delay issues.",
+                    "claim_subkind": "fix_or_mitigation",
+                    "assertion_status": "observed",
+                    "claim_frame": "author_statement",
+                    "about_hints": [],
+                    "confidence": "high",
+                    "derivation_kind": "direct_from_observation",
+                    "metadata": {},
+                    "supporting_evidence": [
+                        {
+                            "evidence_kind": "change_summary",
+                            "quote_text": "`MAX_RETRIES` was increased from 3 to 5 in `tasks.py` due to database reconnect delay issues.",
+                            "summary_text": "The PR says MAX_RETRIES was increased.",
+                            "span_start": None,
+                            "span_end": None,
+                            "about_hints": [],
+                            "support_kind": "direct_statement",
+                            "support_source": "observation_text",
+                            "support_role": "states_change",
+                            "support_rationale": "This quote states that MAX_RETRIES was increased to 5.",
+                            "metadata": {},
+                        }
+                    ],
+                }
+            ]
+        }
+        def resolve_pending_batch_claim(*, messages, **kwargs):
+            _ = kwargs
+            prompt = messages[1].content
+            candidates_json = prompt.split("Candidate existing claims:\n", 1)[1].split(
+                "\n\nFor each candidate claim",
+                1,
+            )[0]
+            candidates = json.loads(candidates_json)
+            return {
+                "relations": [
+                    {
+                        "candidate_claim_id": candidates[0]["candidate_claim_id"],
+                        "resolution_type": "contradicts",
+                        "confidence": "high",
+                        "rationale": "Leaving MAX_RETRIES at 3 contradicts the earlier increase to 5.",
+                    }
+                ]
+            }
+
+        llm_client = PromptMapLLMClient(
+            {
+                "provenance.extract_claims_and_evidence.from_github_pr_body.v1": body_extraction,
+                "provenance.extract_claims_and_evidence.from_github_pr_review.v1": {
+                    "claims": [
+                        {
+                            "claim_text": "MAX_RETRIES in tasks.py was left at 3.",
+                            "claim_subkind": "invariant_or_constraint",
+                            "assertion_status": "observed",
+                            "claim_frame": "reviewer_feedback",
+                            "about_hints": [],
+                            "confidence": "high",
+                            "derivation_kind": "direct_from_observation",
+                            "metadata": {},
+                            "supporting_evidence": [
+                                {
+                                    "evidence_kind": "state_detail",
+                                    "quote_text": "`MAX_RETRIES` in `tasks.py` was left at 3.",
+                                    "summary_text": "The review says MAX_RETRIES stayed at 3.",
+                                    "span_start": None,
+                                    "span_end": None,
+                                    "about_hints": [],
+                                    "support_kind": "direct_statement",
+                                    "support_source": "observation_text",
+                                    "support_role": "states_constraint",
+                                    "support_rationale": "This quote states that MAX_RETRIES remained at 3.",
+                                    "metadata": {},
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "provenance.relate_claims.resolve_new_claim_against_candidates.v1": resolve_pending_batch_claim,
+            }
+        )
+        indexer = GitHubIndexer(
+            github_api=object(),
+            backend_driver=FakeBackendDriver([]),
+            llm_client=llm_client,
+        )
+
+        plan, counts = indexer._plan_evidence_operations(
+            planned_observations=planned_observations,
+            snapshot=make_harness_like_snapshot(),
+        )
+
+        self.assertEqual(counts["invalidated"], 1)
+        self.assertTrue(
+            any(edge.relationship_type == "CONTRADICTS" for edge in plan.upsert_edges)
+        )
+        relation_calls = [
+            call
+            for call in llm_client.calls
+            if call["prompt_name"] == "provenance.relate_claims.resolve_new_claim_against_candidates.v1"
+        ]
+        self.assertEqual(len(relation_calls), 1)
+
+    def test_issue_closed_observations_do_not_trigger_claim_extraction(self):
+        llm_client = PromptMapLLMClient({})
+        indexer = GitHubIndexer(
+            github_api=object(),
+            backend_driver=FakeBackendDriver([]),
+            llm_client=llm_client,
+        )
+        planned_observations = ObservationMutationPlanner().build_github_observations(
+            bundle=GitHubProvenanceBundle(
+                repo_id="demo",
+                github_repo="octo/demo",
+                entities=(),
+                project_links=(),
+                commit_links=(),
+                entity_links=(),
+                observation_sources=(
+                    GitHubObservationSource(
+                        observation_kind=ObservationKind.GITHUB_ISSUE_CLOSED,
+                        source_kind="issue",
+                        source_id="github:issue:demo:42",
+                        source_record_type="github_issue",
+                        external_id="4200:closed",
+                        number=42,
+                        url="https://github.com/octo/demo/issues/42",
+                        title="Issue #42 closed: Rollout complete",
+                        author_login="maintainer",
+                        created_at="2026-03-27T20:59:00Z",
+                        updated_at="2026-03-27T20:59:00Z",
+                        text="Issue #42 was closed. State reason: completed.",
+                        metadata={"issue_number": 42, "closed_at": "2026-03-27T20:59:00Z"},
+                    ),
+                ),
+            )
+        )
+
+        plan, counts = indexer._plan_evidence_operations(
+            planned_observations=planned_observations,
+            snapshot=make_snapshot(),
+        )
+
+        self.assertTrue(plan.is_empty())
+        self.assertEqual(counts["extracted"], 0)
+        self.assertEqual(llm_client.calls, [])
 
 
 if __name__ == "__main__":

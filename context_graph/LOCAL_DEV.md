@@ -212,6 +212,7 @@ python3 -m context_graph hosted-index \
   --neo4j-password contextgraph \
   --llm-provider openai \
   --llm-model gpt-4o \
+  --embed-provider openai \
   --execute
 ```
 

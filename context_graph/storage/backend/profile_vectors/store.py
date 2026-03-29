@@ -53,6 +53,13 @@ class InMemoryProfileVectorStore(ProfileVectorStore):
         return None
 
     def upsert_profile_keys(self, records: Sequence[ProfileKeyRecord]) -> None:
+        profile_ids = {record.profile_id for record in records}
+        if profile_ids:
+            self._records = {
+                key: record
+                for key, record in self._records.items()
+                if record.profile_id not in profile_ids
+            }
         for record in records:
             self._records[record.profile_key_id] = record
 
@@ -84,6 +91,7 @@ class InMemoryProfileVectorStore(ProfileVectorStore):
                         source_node_id=record.source_node_id,
                         target_node_id=record.target_node_id,
                         key_text=record.key_text,
+                        key_origin=record.key_origin,
                         embedding=record.embedding,
                         is_active=False,
                         valid_from_revision=record.valid_from_revision,
@@ -116,6 +124,7 @@ class InMemoryProfileVectorStore(ProfileVectorStore):
                     repo_id=record.repo_id,
                     profile_kind=record.profile_kind,
                     key_text=record.key_text,
+                    key_origin=record.key_origin,
                     score=_cosine_similarity(embedding, record.embedding),
                 )
             )
@@ -165,12 +174,19 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 source_node_id TEXT,
                 target_node_id TEXT,
                 key_text TEXT NOT NULL,
+                key_origin TEXT NOT NULL DEFAULT 'legacy_keyword',
                 embedding vector({self.embedding_dim}) NOT NULL,
                 is_active BOOLEAN NOT NULL,
                 valid_from_revision TEXT,
                 valid_to_revision TEXT,
                 updated_at TEXT NOT NULL
             )
+            """
+        )
+        cursor.execute(
+            """
+            ALTER TABLE cg_profile_keys
+            ADD COLUMN IF NOT EXISTS key_origin TEXT NOT NULL DEFAULT 'legacy_keyword'
             """
         )
         cursor.execute(
@@ -197,6 +213,13 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
         if not records:
             return
         self.bootstrap()
+        profile_ids = tuple(sorted({record.profile_id for record in records}))
+        cursor = self.connection.cursor()
+        if profile_ids:
+            cursor.execute(
+                "DELETE FROM cg_profile_keys WHERE profile_id = ANY(%s)",
+                (list(profile_ids),),
+            )
         sql = """
             INSERT INTO cg_profile_keys (
                 profile_key_id,
@@ -207,13 +230,14 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 source_node_id,
                 target_node_id,
                 key_text,
+                key_origin,
                 embedding,
                 is_active,
                 valid_from_revision,
                 valid_to_revision,
                 updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS vector), %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CAST(%s AS vector), %s, %s, %s, %s)
             ON CONFLICT (profile_key_id) DO UPDATE SET
                 profile_id = excluded.profile_id,
                 repo_id = excluded.repo_id,
@@ -222,6 +246,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 source_node_id = excluded.source_node_id,
                 target_node_id = excluded.target_node_id,
                 key_text = excluded.key_text,
+                key_origin = excluded.key_origin,
                 embedding = excluded.embedding,
                 is_active = excluded.is_active,
                 valid_from_revision = excluded.valid_from_revision,
@@ -238,6 +263,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 record.source_node_id,
                 record.target_node_id,
                 record.key_text,
+                record.key_origin,
                 _vector_literal(record.embedding),
                 record.is_active,
                 record.valid_from_revision,
@@ -246,7 +272,6 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
             )
             for record in records
         ]
-        cursor = self.connection.cursor()
         cursor.executemany(sql, rows)
         self.connection.commit()
 
@@ -303,6 +328,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 repo_id,
                 profile_kind,
                 key_text,
+                key_origin,
                 1 - (embedding <=> CAST(%s AS vector)) AS score
             FROM cg_profile_keys
             WHERE repo_id = %s
@@ -333,7 +359,8 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 repo_id=str(row[2]),
                 profile_kind=str(row[3]),
                 key_text=str(row[4]),
-                score=float(row[5]),
+                key_origin=str(row[5]),
+                score=float(row[6]),
             )
             for row in rows
         )

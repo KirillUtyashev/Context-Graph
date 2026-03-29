@@ -233,8 +233,8 @@ class EntityTypeConfig(BaseModel):
     description: str
 
 
-class GraphitiAppConfig(BaseModel):
-    """Graphiti-specific configuration."""
+class NamespaceConfig(BaseModel):
+    """Namespace configuration for MCP-backed graph data."""
 
     group_id: str = Field(default='main', description='Group ID')
     episode_id_prefix: str | None = Field(default='', description='Episode ID prefix')
@@ -247,17 +247,14 @@ class GraphitiAppConfig(BaseModel):
             self.episode_id_prefix = ''
 
 
-class GraphitiConfig(BaseSettings):
-    """Graphiti configuration with YAML and environment support."""
+class MCPServerConfig(BaseSettings):
+    """MCP server configuration with YAML and environment support."""
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    graphiti: GraphitiAppConfig = Field(default_factory=GraphitiAppConfig)
-
-    # Additional server options
-    destroy_graph: bool = Field(default=False, description='Clear graph on startup')
+    namespace: NamespaceConfig = Field(default_factory=NamespaceConfig)
 
     model_config = SettingsConfigDict(
         env_prefix='',
@@ -305,8 +302,8 @@ class GraphitiConfig(BaseSettings):
         if hasattr(args, 'database_provider') and args.database_provider:
             self.database.provider = args.database_provider
 
-        # Override Graphiti settings
+        # Override namespace settings
         if hasattr(args, 'group_id') and args.group_id:
-            self.graphiti.group_id = args.group_id
+            self.namespace.group_id = args.group_id
         if hasattr(args, 'user_id') and args.user_id:
-            self.graphiti.user_id = args.user_id
+            self.namespace.user_id = args.user_id

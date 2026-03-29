@@ -21,6 +21,7 @@ from context_graph.server.mcp.config import (
     LLMConfig,
     Neo4jProviderConfig,
 )
+from context_graph.storage.backend import Neo4jConfig, NeptuneConfig
 
 
 def _validate_api_key(provider_name: str, api_key: str | None, logger: logging.Logger) -> str:
@@ -116,17 +117,17 @@ class DatabaseDriverFactory:
     """Create database connection settings for the graph runtime."""
 
     @staticmethod
-    def create_config(config: DatabaseConfig) -> dict[str, str | None]:
+    def create_backend_config(config: DatabaseConfig) -> Neo4jConfig | NeptuneConfig:
         provider = config.provider.lower()
 
         if provider == "neo4j":
             neo4j_config = config.providers.neo4j or Neo4jProviderConfig()
-            return {
-                "uri": os.environ.get("NEO4J_URI", neo4j_config.uri),
-                "user": os.environ.get("NEO4J_USER", neo4j_config.username),
-                "password": os.environ.get("NEO4J_PASSWORD", neo4j_config.password),
-                "database": os.environ.get("NEO4J_DATABASE", neo4j_config.database),
-            }
+            return Neo4jConfig(
+                uri=os.environ.get("NEO4J_URI", neo4j_config.uri),
+                user=os.environ.get("NEO4J_USER", neo4j_config.username),
+                password=os.environ.get("NEO4J_PASSWORD", neo4j_config.password),
+                database=os.environ.get("NEO4J_DATABASE", neo4j_config.database),
+            )
 
         if provider == "neptune":
             host = os.environ.get(
@@ -145,11 +146,30 @@ class DatabaseDriverFactory:
                     "Neptune host is required. Set NEPTUNE_HOST or configure "
                     "database.providers.neptune.host."
                 )
-            return {
-                "host": host,
-                "aoss_host": aoss_host,
-            }
+            return NeptuneConfig(
+                host=host,
+                aoss_host=aoss_host,
+            )
 
         raise ValueError(
             f"Unsupported Database provider: {provider}. Supported providers are: neo4j, neptune."
         )
+
+    @staticmethod
+    def create_config(config: DatabaseConfig) -> dict[str, str | None]:
+        """Legacy dict view of the backend config used by older callers."""
+
+        backend_config = DatabaseDriverFactory.create_backend_config(config)
+        if isinstance(backend_config, Neo4jConfig):
+            return {
+                "uri": backend_config.uri,
+                "user": backend_config.user,
+                "password": backend_config.password,
+                "database": backend_config.database,
+            }
+        if isinstance(backend_config, NeptuneConfig):
+            return {
+                "host": backend_config.host,
+                "aoss_host": backend_config.aoss_host,
+            }
+        raise TypeError(f"Unsupported backend config: {type(backend_config)!r}")
