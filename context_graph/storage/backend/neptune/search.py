@@ -50,7 +50,7 @@ class NeptuneSearchOperations(SearchOperations):
         hits: list[SearchHit] = []
         for kind in kinds:
             index_name = NEPTUNE_NODE_AOSS_INDEX if kind is RecordKind.NODE else NEPTUNE_EDGE_AOSS_INDEX
-            response = self._driver._run_aoss_query(index_name=index_name, query=query)
+            response = await self._driver._run_aoss_query(index_name=index_name, query=query)
             hits.extend(_aoss_response_to_hits(kind=kind, response=response))
 
         hits.sort(key=lambda hit: hit.score, reverse=True)

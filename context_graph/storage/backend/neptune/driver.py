@@ -124,12 +124,12 @@ class NeptuneBackendDriver(BackendDriver):
 
         if delete_existing:
             for index_name in _AOSS_INDEX_DEFINITIONS:
-                if self.aoss_client.indices.exists(index=index_name):
-                    self.aoss_client.indices.delete(index=index_name)
+                if await asyncio.to_thread(self.aoss_client.indices.exists, index=index_name):
+                    await asyncio.to_thread(self.aoss_client.indices.delete, index=index_name)
 
         for index_name, body in _AOSS_INDEX_DEFINITIONS.items():
-            if not self.aoss_client.indices.exists(index=index_name):
-                self.aoss_client.indices.create(index=index_name, body=body)
+            if not await asyncio.to_thread(self.aoss_client.indices.exists, index=index_name):
+                await asyncio.to_thread(self.aoss_client.indices.create, index=index_name, body=body)
 
     async def health_check(self) -> None:
         """Validate connectivity by executing a trivial OpenCypher query."""
@@ -173,6 +173,7 @@ class NeptuneBackendDriver(BackendDriver):
             verify_certs=True,
             connection_class=Urllib3HttpConnection,
             pool_maxsize=20,
+            timeout=30,
         )
 
     def _run_query(self, query: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -184,13 +185,13 @@ class NeptuneBackendDriver(BackendDriver):
         response = self.client.client.execute_open_cypher_query(**payload)
         return response["results"]
 
-    def _run_aoss_query(self, *, index_name: str, query: SearchQuery) -> dict[str, Any]:
+    async def _run_aoss_query(self, *, index_name: str, query: SearchQuery) -> dict[str, Any]:
         if self.aoss_client is None:
             return {}
         body = build_aoss_query(query)
         # AOSS returns lightweight search-document hits; the real graph record is
         # hydrated later through `fetch()`.
-        return self.aoss_client.search(index=index_name, body=body)
+        return await asyncio.to_thread(self.aoss_client.search, index=index_name, body=body)
 
 
 class NeptuneBackendSession(BackendSession):

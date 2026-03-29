@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
 
@@ -62,7 +63,7 @@ class NeptuneMutationOperations(MutationOperations):
 
         if self._driver.aoss_client is not None:
             for record in plan.upsert_search_documents:
-                self._upsert_search_document(record)
+                await asyncio.to_thread(self._upsert_search_document, record)
             search_doc_count = len(plan.upsert_search_documents)
 
         return MutationApplyResult(
@@ -81,7 +82,6 @@ class NeptuneMutationOperations(MutationOperations):
             index=index_name,
             id=record.record_id,
             body=record.normalized_properties(),
-            refresh=True,
         )
 
 

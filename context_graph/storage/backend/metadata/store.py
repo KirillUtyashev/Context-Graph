@@ -369,6 +369,14 @@ class _DbApiMetadataStore(MetadataStore):
         self.connection.commit()
 
     def _ensure_repo_state_column(self, definition: str) -> None:
+        col_name = definition.split()[0]
+        existing = self._execute(
+            f"SELECT 1 FROM information_schema.columns"
+            f" WHERE table_name='cg_repo_state' AND column_name={self.placeholder}",
+            (col_name,),
+        ).fetchone()
+        if existing:
+            return
         try:
             self._execute(f"ALTER TABLE cg_repo_state ADD COLUMN {definition}")
         except Exception as exc:  # pragma: no cover - exact DB exception types vary by driver

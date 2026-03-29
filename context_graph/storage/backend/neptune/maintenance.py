@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from context_graph.storage.backend.maintenance import (
     MaintenanceOperations,
     RepoResetResult,
@@ -25,7 +27,7 @@ class NeptuneMaintenanceOperations(MaintenanceOperations):
     async def reset_repo(self, repo_id: str) -> RepoResetResult:
         node_count = await self._count_graph_nodes(repo_id=repo_id, record_types=())
         edge_count = await self._count_edges(repo_id=repo_id, record_types=())
-        search_doc_count = self._delete_search_documents(repo_id=repo_id, record_types=())
+        search_doc_count = await asyncio.to_thread(self._delete_search_documents, repo_id=repo_id, record_types=())
 
         await self._driver.execute_query(_EDGE_DELETE_QUERY(record_types=()), repo_id=repo_id, record_types=[])
         await self._driver.execute_query(_NODE_DELETE_QUERY(record_types=()), repo_id=repo_id, record_types=[])
@@ -53,7 +55,8 @@ class NeptuneMaintenanceOperations(MaintenanceOperations):
         )
         search_doc_count = 0
         if request.delete_search_documents:
-            search_doc_count = self._delete_search_documents(
+            search_doc_count = await asyncio.to_thread(
+                self._delete_search_documents,
                 repo_id=request.repo_id,
                 record_types=search_types,
             )
@@ -95,11 +98,15 @@ class NeptuneMaintenanceOperations(MaintenanceOperations):
     def _delete_search_documents(self, *, repo_id: str, record_types: tuple[str, ...]) -> int:
         if self._driver.aoss_client is None:
             return 0
+        from opensearchpy.exceptions import NotFoundError as AossNotFoundError
         query = _build_aoss_delete_query(repo_id=repo_id, record_types=record_types)
         deleted = 0
         for index_name in (NEPTUNE_NODE_AOSS_INDEX, NEPTUNE_EDGE_AOSS_INDEX):
-            response = self._driver.aoss_client.delete_by_query(index=index_name, body=query, refresh=True)
-            deleted += int(response.get("deleted", 0))
+            try:
+                response = self._driver.aoss_client.delete_by_query(index=index_name, body=query)
+                deleted += int(response.get("deleted", 0))
+            except AossNotFoundError:
+                pass
         return deleted
 
 

@@ -3,11 +3,25 @@ name = "context-graph"
 version = "0.1.0"
 requires-python = ">=3.10,<4"
 dependencies = [
-    # Local editable fork of graphiti-core with neptune + bedrock support
-    "graphiti-core[neptune]",
-    # Context-graph pipeline deps (previously in context_graph/requirements-local.txt)
+    # Graph backends
     "neo4j>=5.22,<6",
+    "langchain-aws>=0.2,<1",
+    "opensearch-py>=2.7,<3",
+    # Metadata backend
     "psycopg[binary]>=3.2,<4",
+    # AWS
+    "boto3>=1.39,<2",
+    # LLM / embeddings
+    "openai>=1.91,<2",
+    "tenacity>=9,<10",
+    # Runtime
+    "pydantic>=2.11,<3",
+    "numpy>=1,<3",
+    "httpx>=0.27,<1",
+    "python-dotenv>=1.0,<2",
+    # MCP server
+    "mcp>=1.9,<2",
+    "starlette>=0.41,<1",
 ]
 
 [dependency-groups]
@@ -17,9 +31,6 @@ dev = [
     "pydantic-settings>=2.10,<3",
     "pyyaml>=6,<7",
 ]
-
-[tool.uv.sources]
-graphiti-core = { path = "./vendor/graphiti", editable = true }
 
 [tool.hatch.metadata]
 allow-direct-references = true
