@@ -331,16 +331,17 @@ PYTHON_BIN="python3"; for py in python3.12 python3.11; do command -v $py &>/dev/
 echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 $PYTHON_BIN -m venv /opt/mcp_server/venv
 /opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
-GRAPHITI_SRC="/opt/mcp_server/current/graphiti_core_src"
-if [ -d "$${GRAPHITI_SRC}" ]; then
-  echo "==> Installing vendored graphiti-core[neptune]..."
-  /opt/mcp_server/venv/bin/pip install -e "$${GRAPHITI_SRC}[neptune]" --quiet
+CONTEXT_GRAPH_SRC="/opt/mcp_server/current/context_graph_src"
+if [ -d "$${CONTEXT_GRAPH_SRC}" ]; then
+  echo "==> Installing context_graph package..."
+  /opt/mcp_server/venv/bin/pip install -e "$${CONTEXT_GRAPH_SRC}" --quiet
   for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
-    echo "$${GRAPHITI_SRC}" > "$${SP}/_graphiti_core_src.pth" 2>/dev/null || true
+    echo "$${CONTEXT_GRAPH_SRC}" > "$${SP}/_context_graph_src.pth" 2>/dev/null || true
   done
 fi
 /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
-/opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import GraphitiService; print('context_graph mcp import OK')"
 systemctl daemon-reload
 systemctl enable --now mcp-server.service
 systemctl restart mcp-server.service

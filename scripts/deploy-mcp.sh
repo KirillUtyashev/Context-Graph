@@ -70,7 +70,6 @@ mkdir -p "${STAGING_DIR}"
 
 # Copy MCP entrypoints and config bundle
 cp "${REPO_ROOT}/main.py" "${STAGING_DIR}/main.py"
-cp "${REPO_ROOT}/graphiti_mcp_server.py" "${STAGING_DIR}/graphiti_mcp_server.py"
 cp "${MCP_CONFIG_DIR}/requirements.txt" "${STAGING_DIR}/requirements.txt"
 mkdir -p "${STAGING_DIR}/config"
 cp -a "${MCP_CONFIG_DIR}/config/." "${STAGING_DIR}/config/"
@@ -162,7 +161,7 @@ echo "==> Installing MCP server dependencies..."
 /opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
 
 # Verify the internal runtime is importable after all dependencies are installed
-/opt/mcp_server/venv/bin/python -c "from context_graph.storage.graph.neptune_driver import NeptuneDriver; print('context_graph storage import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
 /opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import GraphitiService; print('context_graph mcp import OK')"
 
 systemctl daemon-reload

@@ -4,8 +4,9 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "vendor/graphiti/mcp_server/**"
-      - "vendor/graphiti/graphiti_core/**"
+      - "context_graph/server/mcp/**"
+      - "context_graph/**"
+      - "main.py"
   workflow_dispatch:
     inputs:
       env:
@@ -88,19 +89,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          MCP_DIR="vendor/graphiti/mcp_server"
-          GRAPHITI_DIR="vendor/graphiti"
+          MCP_DIR="context_graph/server/mcp"
+          CONTEXT_GRAPH_DIR="context_graph"
           test -d "${MCP_DIR}"
 
           STAGING_DIR="/tmp/mcp_server_staging"
+          rm -rf "${STAGING_DIR}"
           mkdir -p "${STAGING_DIR}"
-          cp -a "${MCP_DIR}/." "${STAGING_DIR}/"
 
-          # Bundle graphiti-core source so EC2 can install it as an editable dep
-          mkdir -p "${STAGING_DIR}/graphiti_core_src"
+          # Copy MCP entrypoint, config, and requirements
+          cp main.py "${STAGING_DIR}/main.py"
+          cp "${MCP_DIR}/requirements.txt" "${STAGING_DIR}/requirements.txt"
+          mkdir -p "${STAGING_DIR}/config"
+          cp -a "${MCP_DIR}/config/." "${STAGING_DIR}/config/"
+
+          # Bundle context_graph source so EC2 can install it as a package.
+          # The .pth file added by the deploy script makes `import context_graph` work.
+          mkdir -p "${STAGING_DIR}/context_graph_src/context_graph"
           rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
-            --exclude='mcp_server' --exclude='uv.lock' --exclude='.venv' \
-            "${GRAPHITI_DIR}/" "${STAGING_DIR}/graphiti_core_src/"
+            --exclude='docker-compose.local.yml' \
+            "${CONTEXT_GRAPH_DIR}/" "${STAGING_DIR}/context_graph_src/context_graph/"
+
+          # Minimal pyproject.toml so pip treats context_graph_src/ as a package root
+          cat > "${STAGING_DIR}/context_graph_src/pyproject.toml" << 'PYPROJECT_EOF'
+          [project]
+          name = "context-graph-pkg"
+          version = "0.1.0"
+          requires-python = ">=3.10"
+          dependencies = [
+              "psycopg[binary]>=3.2,<4",
+              "boto3>=1.34,<2",
+          ]
+
+          [build-system]
+          requires = ["hatchling"]
+          build-backend = "hatchling.build"
+
+          [tool.hatch.build.targets.wheel]
+          packages = ["context_graph"]
+          PYPROJECT_EOF
 
           tar -czf /tmp/mcp_server.tar.gz -C "${STAGING_DIR}" .
 
