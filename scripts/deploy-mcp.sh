@@ -11,8 +11,8 @@
 #
 # What this script does:
 #   1. Resolves the artifacts S3 bucket name and EC2 instance ID from AWS.
-#   2. Builds a tar.gz artifact from the internal Context Graph MCP server,
-#      including the MCP wrappers, config, and context_graph package source.
+#   2. Builds a tar.gz artifact from the standalone mcp_server package plus
+#      the context_graph library source required by the server.
 #   3. Uploads the artifact + a new deploy script to s3://<bucket>/mcp-server/
 #   4. Invokes the updated deploy script on EC2 via SSM.
 
@@ -30,7 +30,7 @@ AWS_REGION="${AWS_REGION:-ca-central-1}"
 PROJECT_NAME="context-graph"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTEXT_GRAPH_DIR="${REPO_ROOT}/context_graph"
-MCP_CONFIG_DIR="${REPO_ROOT}/context_graph/server/mcp"
+MCP_SERVER_DIR="${REPO_ROOT}/mcp_server"
 
 echo "==> Deploying MCP server to env=${ENV} region=${AWS_REGION}"
 
@@ -68,36 +68,22 @@ STAGING_DIR="/tmp/mcp_server_staging_${SHA}"
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}"
 
-# Copy MCP entrypoints and config bundle
-cp "${REPO_ROOT}/main.py" "${STAGING_DIR}/main.py"
-cp "${MCP_CONFIG_DIR}/requirements.txt" "${STAGING_DIR}/requirements.txt"
-mkdir -p "${STAGING_DIR}/config"
-cp -a "${MCP_CONFIG_DIR}/config/." "${STAGING_DIR}/config/"
-
-# Bundle context_graph source as context_graph_src/context_graph/ inside the artifact.
-# The .pth file will add context_graph_src/ to sys.path, making `import context_graph` work.
-mkdir -p "${STAGING_DIR}/context_graph_src/context_graph"
+# Bundle the installable context_graph package using the repo-root packaging metadata.
+mkdir -p "${STAGING_DIR}/context_graph_pkg"
+cp "${REPO_ROOT}/pyproject.toml" "${STAGING_DIR}/context_graph_pkg/pyproject.toml"
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
   --exclude='docker-compose.local.yml' \
-  "${CONTEXT_GRAPH_DIR}/" "${STAGING_DIR}/context_graph_src/context_graph/"
-# Write a minimal pyproject.toml so pip treats context_graph_src/ as a package root
-cat > "${STAGING_DIR}/context_graph_src/pyproject.toml" << 'PYPROJECT_EOF'
-[project]
-name = "context-graph-pkg"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = [
-    "psycopg[binary]>=3.2,<4",
-    "boto3>=1.34,<2",
-]
+  "${CONTEXT_GRAPH_DIR}/" "${STAGING_DIR}/context_graph_pkg/context_graph/"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["context_graph"]
-PYPROJECT_EOF
+# Bundle the standalone MCP server package and runtime config.
+mkdir -p "${STAGING_DIR}/mcp_server_src"
+cp "${MCP_SERVER_DIR}/pyproject.toml" "${STAGING_DIR}/mcp_server_src/pyproject.toml"
+cp "${MCP_SERVER_DIR}/README.md" "${STAGING_DIR}/mcp_server_src/README.md"
+rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
+  "${MCP_SERVER_DIR}/src/" "${STAGING_DIR}/mcp_server_src/src/"
+mkdir -p "${STAGING_DIR}/mcp_server_src/config"
+rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
+  "${MCP_SERVER_DIR}/config/" "${STAGING_DIR}/mcp_server_src/config/"
 
 tar -czf "${ARTIFACT}" -C "${STAGING_DIR}" .
 echo "==> Artifact size: $(du -sh "${ARTIFACT}" | cut -f1)"
@@ -146,23 +132,22 @@ echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 $PYTHON_BIN -m venv /opt/mcp_server/venv
 /opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
 
-# Install context_graph package (bundled in the artifact as context_graph_src/)
-CONTEXT_GRAPH_SRC="/opt/mcp_server/current/context_graph_src"
-if [ -d "${CONTEXT_GRAPH_SRC}" ]; then
-  echo "==> Installing context_graph package..."
-  /opt/mcp_server/venv/bin/pip install -e "${CONTEXT_GRAPH_SRC}" --quiet
-  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
-    echo "${CONTEXT_GRAPH_SRC}" > "${SP}/_context_graph_src.pth" 2>/dev/null || true
-  done
+# Install both local packages from the bundled source tree so the resolver can
+# satisfy mcp_server's dependency on context-graph without reaching for old paths.
+CONTEXT_GRAPH_PKG="/opt/mcp_server/current/context_graph_pkg"
+MCP_SERVER_SRC="/opt/mcp_server/current/mcp_server_src"
+if [[ ! -d "${CONTEXT_GRAPH_PKG}" || ! -d "${MCP_SERVER_SRC}" ]]; then
+  echo "ERROR: release is missing context_graph_pkg/ or mcp_server_src/" >&2
+  exit 1
 fi
-
-# Install remaining MCP server dependencies
-echo "==> Installing MCP server dependencies..."
-/opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
+echo "==> Installing bundled Context Graph packages..."
+/opt/mcp_server/venv/bin/pip install -e "${CONTEXT_GRAPH_PKG}" -e "${MCP_SERVER_SRC}" --quiet
 
 # Verify the internal runtime is importable after all dependencies are installed
 /opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
-/opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import mcp; print('context_graph mcp import OK')"
+/opt/mcp_server/venv/bin/python -c "from src.bootstrap import main; print('mcp_server bootstrap import OK')"
+/opt/mcp_server/venv/bin/context-graph-mcp --help >/dev/null
+echo "context-graph-mcp entrypoint OK"
 
 systemctl daemon-reload
 systemctl enable --now mcp-server.service

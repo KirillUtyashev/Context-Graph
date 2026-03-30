@@ -210,9 +210,9 @@ resource "aws_iam_role_policy" "aurora_secret_read" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "ReadAuroraSecret"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
+        Sid      = "ReadAuroraSecret"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
         Resource = [var.aurora_password_secret_arn]
       }
     ]
@@ -331,11 +331,15 @@ PYTHON_BIN="python3"; for py in python3.12 python3.11; do command -v $py &>/dev/
 echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 $PYTHON_BIN -m venv /opt/mcp_server/venv
 /opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
-CONTEXT_GRAPH_SRC="/opt/mcp_server/current/context_graph_src"
+CONTEXT_GRAPH_PKG="/opt/mcp_server/current/context_graph_pkg"
 MCP_SERVER_SRC="/opt/mcp_server/current/mcp_server_src"
-/opt/mcp_server/venv/bin/pip install -e "$${CONTEXT_GRAPH_SRC}" --quiet
-/opt/mcp_server/venv/bin/pip install -e "$${MCP_SERVER_SRC}" --quiet
+if [[ ! -d "$${CONTEXT_GRAPH_PKG}" || ! -d "$${MCP_SERVER_SRC}" ]]; then
+  echo "ERROR: release is missing context_graph_pkg/ or mcp_server_src/" >&2
+  exit 1
+fi
+/opt/mcp_server/venv/bin/pip install -e "$${CONTEXT_GRAPH_PKG}" -e "$${MCP_SERVER_SRC}" --quiet
 /opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
+/opt/mcp_server/venv/bin/python -c "from src.bootstrap import main; print('mcp_server bootstrap import OK')"
 /opt/mcp_server/venv/bin/context-graph-mcp --help >/dev/null
 echo "context-graph-mcp entrypoint OK"
 systemctl daemon-reload
