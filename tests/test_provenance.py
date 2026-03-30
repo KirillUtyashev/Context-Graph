@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -860,6 +862,143 @@ class FakeGitHubApi:
         return dict(self.issue_payloads[number])
 
 
+class InstrumentedGitHubApi:
+    def __init__(
+        self,
+        *,
+        commit_prs_by_sha: dict[str, list[dict[str, object]]] | None = None,
+        pull_requests: dict[int, dict[str, object]] | None = None,
+        linked_issue_numbers: dict[int, tuple[int, ...]] | None = None,
+        reviews: dict[int, list[dict[str, object]]] | None = None,
+        review_comments: dict[int, list[dict[str, object]]] | None = None,
+        issue_comments: dict[int, list[dict[str, object]]] | None = None,
+        issues: dict[int, dict[str, object]] | None = None,
+        gate_methods: set[str] | None = None,
+    ) -> None:
+        self.commit_prs_by_sha = {
+            sha: [dict(item) for item in rows]
+            for sha, rows in (commit_prs_by_sha or {}).items()
+        }
+        self.pull_requests = {
+            number: dict(payload)
+            for number, payload in (pull_requests or {}).items()
+        }
+        self.linked_issue_numbers = {
+            number: tuple(values)
+            for number, values in (linked_issue_numbers or {}).items()
+        }
+        self.reviews = {
+            number: [dict(item) for item in rows]
+            for number, rows in (reviews or {}).items()
+        }
+        self.review_comments = {
+            number: [dict(item) for item in rows]
+            for number, rows in (review_comments or {}).items()
+        }
+        self.issue_comments_map = {
+            number: [dict(item) for item in rows]
+            for number, rows in (issue_comments or {}).items()
+        }
+        self.issues = {
+            number: dict(payload)
+            for number, payload in (issues or {}).items()
+        }
+        self.call_counts: Counter[tuple[str, str | int]] = Counter()
+        self.max_in_flight_by_method: dict[str, int] = {}
+        self._in_flight_by_method: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._gate_methods = set(gate_methods or ())
+        self._gate_events = {
+            method: threading.Event()
+            for method in self._gate_methods
+        }
+
+    def _begin_call(self, method: str, key: str | int) -> None:
+        with self._lock:
+            self.call_counts[(method, key)] += 1
+            in_flight = self._in_flight_by_method.get(method, 0) + 1
+            self._in_flight_by_method[method] = in_flight
+            self.max_in_flight_by_method[method] = max(
+                in_flight,
+                self.max_in_flight_by_method.get(method, 0),
+            )
+            gate = self._gate_events.get(method)
+            if gate is not None and in_flight >= 2:
+                gate.set()
+        if gate is not None:
+            gate.wait(timeout=1.0)
+
+    def _end_call(self, method: str) -> None:
+        with self._lock:
+            self._in_flight_by_method[method] = self._in_flight_by_method.get(method, 1) - 1
+
+    def list_commit_pull_requests(self, owner: str, repo: str, sha: str) -> list[dict[str, object]]:
+        _ = owner, repo
+        self._begin_call("list_commit_pull_requests", sha)
+        try:
+            return [dict(item) for item in self.commit_prs_by_sha.get(sha, [])]
+        finally:
+            self._end_call("list_commit_pull_requests")
+
+    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, object]:
+        _ = owner, repo
+        self._begin_call("get_pull_request", number)
+        try:
+            return dict(self.pull_requests[number])
+        finally:
+            self._end_call("get_pull_request")
+
+    def list_pull_request_linked_issue_numbers(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> tuple[int, ...]:
+        _ = owner, repo
+        self._begin_call("list_pull_request_linked_issue_numbers", number)
+        try:
+            return tuple(self.linked_issue_numbers.get(number, ()))
+        finally:
+            self._end_call("list_pull_request_linked_issue_numbers")
+
+    def list_pull_request_reviews(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
+        _ = owner, repo
+        self._begin_call("list_pull_request_reviews", number)
+        try:
+            return [dict(item) for item in self.reviews.get(number, [])]
+        finally:
+            self._end_call("list_pull_request_reviews")
+
+    def list_pull_request_review_comments(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> list[dict[str, object]]:
+        _ = owner, repo
+        self._begin_call("list_pull_request_review_comments", number)
+        try:
+            return [dict(item) for item in self.review_comments.get(number, [])]
+        finally:
+            self._end_call("list_pull_request_review_comments")
+
+    def list_issue_comments(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
+        _ = owner, repo
+        self._begin_call("list_issue_comments", number)
+        try:
+            return [dict(item) for item in self.issue_comments_map.get(number, [])]
+        finally:
+            self._end_call("list_issue_comments")
+
+    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, object]:
+        _ = owner, repo
+        self._begin_call("get_issue", number)
+        try:
+            return dict(self.issues[number])
+        finally:
+            self._end_call("get_issue")
+
+
 class ObservationPlannerTests(unittest.TestCase):
     def test_commit_message_observation_emits_node_and_source_link_only(self):
         plan = ObservationMutationPlanner().plan_commit_message_observation(
@@ -1141,6 +1280,257 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertEqual(comment_observations[0].metadata["comment_id"], 4145222468)
         self.assertEqual(comment_observations[0].metadata["anchor_revision_id"], "merge-sha")
 
+    def test_github_bundle_dedupes_pr_fetches_across_multiple_commits(self):
+        github_api = InstrumentedGitHubApi(
+            commit_prs_by_sha={
+                "sha-1": [{"number": 7, "id": 700}],
+                "sha-2": [{"number": 7, "id": 700}],
+            },
+            pull_requests={
+                7: {
+                    "id": 700,
+                    "number": 7,
+                    "html_url": "https://github.com/octo/demo/pull/7",
+                    "title": "Enable main",
+                    "state": "open",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-26T00:00:00Z",
+                    "updated_at": "2026-03-26T00:01:00Z",
+                    "body": "demo.app.main is enabled",
+                }
+            },
+            linked_issue_numbers={7: (42,)},
+            reviews={
+                7: [
+                    {
+                        "id": 701,
+                        "state": "APPROVED",
+                        "user": {"login": "reviewer"},
+                        "submitted_at": "2026-03-26T00:02:00Z",
+                        "body": "Looks good",
+                        "commit_id": "sha-2",
+                    }
+                ]
+            },
+            review_comments={
+                7: [
+                    {
+                        "id": 702,
+                        "html_url": "https://github.com/octo/demo/pull/7#discussion_r1",
+                        "user": {"login": "reviewer"},
+                        "created_at": "2026-03-26T00:02:30Z",
+                        "updated_at": "2026-03-26T00:02:30Z",
+                        "body": "Please rename this",
+                        "path": "app.py",
+                        "commit_id": "sha-2",
+                        "pull_request_review_id": 701,
+                    }
+                ]
+            },
+            issue_comments={
+                7: [
+                    {
+                        "id": 703,
+                        "html_url": "https://github.com/octo/demo/issues/7#issuecomment-1",
+                        "user": {"login": "commenter"},
+                        "created_at": "2026-03-26T00:03:00Z",
+                        "updated_at": "2026-03-26T00:03:00Z",
+                        "body": "Ship it",
+                    }
+                ],
+                42: [],
+            },
+            issues={
+                42: {
+                    "id": 4200,
+                    "number": 42,
+                    "html_url": "https://github.com/octo/demo/issues/42",
+                    "title": "Track rollout",
+                    "state": "open",
+                    "user": {"login": "issue-author"},
+                    "created_at": "2026-03-26T00:00:00Z",
+                    "updated_at": "2026-03-26T00:05:00Z",
+                    "body": "Issue body",
+                    "closed_at": None,
+                }
+            },
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("sha-1", "sha-2"),
+        )
+
+        self.assertEqual(github_api.call_counts[("get_pull_request", 7)], 1)
+        self.assertEqual(github_api.call_counts[("list_pull_request_linked_issue_numbers", 7)], 1)
+        self.assertEqual(github_api.call_counts[("list_pull_request_reviews", 7)], 1)
+        self.assertEqual(github_api.call_counts[("list_pull_request_review_comments", 7)], 1)
+        self.assertEqual(github_api.call_counts[("list_issue_comments", 7)], 1)
+        self.assertEqual(github_api.call_counts[("get_issue", 42)], 1)
+        pr_body = next(
+            source
+            for source in bundle.observation_sources
+            if source.observation_kind == ObservationKind.GITHUB_PR_BODY
+        )
+        self.assertEqual(pr_body.metadata["anchor_revision_id"], "sha-2")
+
+    def test_github_bundle_dedupes_shared_linked_issue_fetches_across_pull_requests(self):
+        github_api = InstrumentedGitHubApi(
+            commit_prs_by_sha={
+                "merge-sha": [{"number": 2, "id": 2002}, {"number": 3, "id": 2003}],
+            },
+            pull_requests={
+                2: {
+                    "id": 2002,
+                    "number": 2,
+                    "html_url": "https://github.com/octo/demo/pull/2",
+                    "title": "Rotate secret",
+                    "state": "closed",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T20:58:00Z",
+                    "updated_at": "2026-03-27T20:58:13Z",
+                    "body": "Rotate SECRET_KEY in auth.py",
+                },
+                3: {
+                    "id": 2003,
+                    "number": 3,
+                    "html_url": "https://github.com/octo/demo/pull/3",
+                    "title": "Add follow-up checks",
+                    "state": "open",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T21:00:00Z",
+                    "updated_at": "2026-03-27T21:01:00Z",
+                    "body": "Adds rollout validation",
+                },
+            },
+            linked_issue_numbers={
+                2: (42,),
+                3: (42,),
+            },
+            issue_comments={
+                2: [],
+                3: [],
+                42: [
+                    {
+                        "id": 4145222468,
+                        "html_url": "https://github.com/octo/demo/issues/42#issuecomment-4145222468",
+                        "user": {"login": "octocat"},
+                        "created_at": "2026-03-27T20:58:30Z",
+                        "updated_at": "2026-03-27T20:58:30Z",
+                        "body": "The rotation shipped cleanly.",
+                    }
+                ],
+            },
+            issues={
+                42: {
+                    "id": 4200,
+                    "number": 42,
+                    "html_url": "https://github.com/octo/demo/issues/42",
+                    "title": "Track SECRET_KEY rollout",
+                    "state": "open",
+                    "user": {"login": "issue-author"},
+                    "created_at": "2026-03-27T20:57:00Z",
+                    "updated_at": "2026-03-27T20:57:00Z",
+                    "body": "Issue body",
+                    "closed_at": None,
+                }
+            },
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("merge-sha",),
+        )
+
+        self.assertEqual(github_api.call_counts[("get_issue", 42)], 1)
+        self.assertEqual(github_api.call_counts[("list_issue_comments", 42)], 1)
+        issue_entities = [
+            entity
+            for entity in bundle.entities
+            if entity.kind == "Issue" and entity.number == 42
+        ]
+        self.assertEqual(len(issue_entities), 1)
+        issue_body_observations = [
+            source
+            for source in bundle.observation_sources
+            if source.observation_kind == ObservationKind.GITHUB_ISSUE_BODY and source.number == 42
+        ]
+        self.assertEqual(len(issue_body_observations), 1)
+
+    def test_github_bundle_parallelizes_commit_pull_request_fetches(self):
+        github_api = InstrumentedGitHubApi(
+            commit_prs_by_sha={
+                "sha-1": [{"number": 2, "id": 2002}],
+                "sha-2": [{"number": 3, "id": 2003}],
+            },
+            pull_requests={
+                2: {
+                    "id": 2002,
+                    "number": 2,
+                    "html_url": "https://github.com/octo/demo/pull/2",
+                    "title": "Rotate secret",
+                    "state": "closed",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T20:58:00Z",
+                    "updated_at": "2026-03-27T20:58:13Z",
+                    "body": "Rotate SECRET_KEY in auth.py",
+                },
+                3: {
+                    "id": 2003,
+                    "number": 3,
+                    "html_url": "https://github.com/octo/demo/pull/3",
+                    "title": "Add follow-up checks",
+                    "state": "open",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T21:00:00Z",
+                    "updated_at": "2026-03-27T21:01:00Z",
+                    "body": "Adds rollout validation",
+                },
+            },
+            gate_methods={"list_commit_pull_requests"},
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("sha-1", "sha-2"),
+        )
+
+        self.assertGreaterEqual(github_api.max_in_flight_by_method.get("list_commit_pull_requests", 0), 2)
+        self.assertEqual(
+            {entity.number for entity in bundle.entities if entity.kind == "PullRequest"},
+            {2, 3},
+        )
+
     def test_github_bundle_orders_observations_chronologically_and_includes_issue_closed(self):
         github_api = FakeGitHubApi(
             commit_prs=[{"number": 2, "id": 2002}],
@@ -1218,6 +1608,168 @@ class ObservationPlannerTests(unittest.TestCase):
         self.assertEqual(close_source.metadata["issue_number"], 42)
         self.assertEqual(close_source.metadata["closed_by"], "maintainer")
         self.assertEqual(close_source.metadata["state_reason"], "completed")
+
+    def test_github_bundle_parallel_fetch_preserves_entities_links_and_observation_order(self):
+        github_api = InstrumentedGitHubApi(
+            commit_prs_by_sha={
+                "sha-1": [{"number": 2, "id": 2002}],
+                "sha-2": [{"number": 2, "id": 2002}, {"number": 3, "id": 2003}],
+            },
+            pull_requests={
+                2: {
+                    "id": 2002,
+                    "number": 2,
+                    "html_url": "https://github.com/octo/demo/pull/2",
+                    "title": "Rotate secret",
+                    "state": "closed",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T20:58:00Z",
+                    "updated_at": "2026-03-27T20:58:00Z",
+                    "body": "Rotate SECRET_KEY in auth.py",
+                },
+                3: {
+                    "id": 2003,
+                    "number": 3,
+                    "html_url": "https://github.com/octo/demo/pull/3",
+                    "title": "Add follow-up checks",
+                    "state": "open",
+                    "user": {"login": "octocat"},
+                    "created_at": "2026-03-27T21:00:00Z",
+                    "updated_at": "2026-03-27T21:00:00Z",
+                    "body": "Adds rollout validation",
+                },
+            },
+            linked_issue_numbers={
+                2: (42,),
+                3: (99,),
+            },
+            review_comments={
+                2: [
+                    {
+                        "id": 702,
+                        "html_url": "https://github.com/octo/demo/pull/2#discussion_r1",
+                        "user": {"login": "reviewer"},
+                        "created_at": "2026-03-27T20:58:20Z",
+                        "updated_at": "2026-03-27T20:58:20Z",
+                        "body": "Please rename this",
+                        "path": "app.py",
+                        "commit_id": "sha-2",
+                        "pull_request_review_id": 701,
+                    }
+                ],
+            },
+            issue_comments={
+                2: [
+                    {
+                        "id": 703,
+                        "html_url": "https://github.com/octo/demo/issues/2#issuecomment-1",
+                        "user": {"login": "commenter"},
+                        "created_at": "2026-03-27T20:58:30Z",
+                        "updated_at": "2026-03-27T20:58:30Z",
+                        "body": "Ship it",
+                    }
+                ],
+                3: [],
+                42: [
+                    {
+                        "id": 704,
+                        "html_url": "https://github.com/octo/demo/issues/42#issuecomment-2",
+                        "user": {"login": "issue-user"},
+                        "created_at": "2026-03-27T20:58:40Z",
+                        "updated_at": "2026-03-27T20:58:40Z",
+                        "body": "Issue discussion",
+                    }
+                ],
+                99: [
+                    {
+                        "id": 705,
+                        "html_url": "https://github.com/octo/demo/issues/99#issuecomment-3",
+                        "user": {"login": "issue-user"},
+                        "created_at": "2026-03-27T21:00:30Z",
+                        "updated_at": "2026-03-27T21:00:30Z",
+                        "body": "Issue discussion",
+                    }
+                ],
+            },
+            issues={
+                42: {
+                    "id": 4200,
+                    "number": 42,
+                    "html_url": "https://github.com/octo/demo/issues/42",
+                    "title": "Track rollout",
+                    "state": "open",
+                    "user": {"login": "issue-author"},
+                    "created_at": "2026-03-27T20:57:00Z",
+                    "updated_at": "2026-03-27T20:57:00Z",
+                    "body": "Issue body",
+                    "closed_at": None,
+                },
+                99: {
+                    "id": 9900,
+                    "number": 99,
+                    "html_url": "https://github.com/octo/demo/issues/99",
+                    "title": "Follow-up validation",
+                    "state": "open",
+                    "user": {"login": "issue-author"},
+                    "created_at": "2026-03-27T20:59:30Z",
+                    "updated_at": "2026-03-27T20:59:30Z",
+                    "body": "Need more checks",
+                    "closed_at": None,
+                },
+            },
+        )
+        indexer = GitHubIndexer(github_api=github_api, backend_driver=None)
+
+        bundle = indexer._build_bundle(
+            repo_id="demo",
+            repo_ref=GitHubRepoRef(
+                owner="octo",
+                name="demo",
+                canonical_repo="octo/demo",
+                clone_url="https://github.com/octo/demo.git",
+                html_url="https://github.com/octo/demo",
+                default_branch="main",
+                source="github_url",
+            ),
+            commit_shas=("sha-1", "sha-2"),
+        )
+
+        self.assertEqual(
+            {(entity.kind, entity.number) for entity in bundle.entities},
+            {
+                ("PullRequest", 2),
+                ("PullRequest", 3),
+                ("Issue", 42),
+                ("Issue", 99),
+            },
+        )
+        self.assertEqual(
+            {
+                (link.relation_type, link.commit_sha, link.target_node_id)
+                for link in bundle.commit_links
+            },
+            {
+                ("ASSOCIATED_WITH_PR", "sha-1", "github:pr:demo:2"),
+                ("ASSOCIATED_WITH_PR", "sha-2", "github:pr:demo:2"),
+                ("ASSOCIATED_WITH_PR", "sha-2", "github:pr:demo:3"),
+                ("REFERENCES_ISSUE", "sha-1", "github:issue:demo:42"),
+                ("REFERENCES_ISSUE", "sha-2", "github:issue:demo:42"),
+                ("REFERENCES_ISSUE", "sha-2", "github:issue:demo:99"),
+            },
+        )
+        self.assertEqual(
+            [(source.observation_kind.value, source.number) for source in bundle.observation_sources],
+            [
+                ("github_issue_body", 42),
+                ("github_pr_body", 2),
+                ("github_pr_review_comment", 2),
+                ("github_issue_comment", 2),
+                ("github_issue_comment", 42),
+                ("github_issue_body", 99),
+                ("github_pr_body", 3),
+                ("github_issue_comment", 99),
+            ],
+        )
 
     def test_issue_closed_observations_persist_ingested_and_thread_fields(self):
         planned = ObservationMutationPlanner().build_github_observations(

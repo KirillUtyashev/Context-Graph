@@ -216,28 +216,37 @@ class FakeAossClient:
 
 
 class FakeSnapshotProducer:
-    def __init__(self, snapshot: GraphSnapshot):
+    def __init__(self, snapshot: GraphSnapshot | dict[str, GraphSnapshot]):
         self.snapshot = snapshot
         self.calls: list[tuple[str, str, str, int]] = []
 
     def build_snapshot(self, repo_path: str, *, repo_id: str, revision_id: str, limit: int):
         self.calls.append((repo_path, repo_id, revision_id, limit))
+        if isinstance(self.snapshot, dict):
+            return self.snapshot[revision_id]
         return self.snapshot
 
 
 class FakeGitMetadata:
-    def __init__(self, commit: CommitInfo):
-        self.commit = commit
+    def __init__(self, commit: CommitInfo | dict[str, CommitInfo]):
+        if isinstance(commit, dict):
+            self.commits = dict(commit)
+            self.commit = next(iter(self.commits.values()))
+        else:
+            self.commits = {commit.sha: commit}
+            self.commit = commit
         self.first_parent_ancestor = True
-        self.first_parent_between_result: tuple[str, ...] = (commit.sha,)
+        self.first_parent_between_result: tuple[str, ...] = (self.commit.sha,)
         self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.worktree_calls: list[tuple[str, str]] = []
+        self.hard_reset_calls: list[tuple[str, str]] = []
 
     def resolve_repo_root(self, repo_path: str) -> str:
         return repo_path
 
     def get_commit_info(self, repo_path: str, sha: str = "HEAD", *, branch_hint: str | None = None):
         _ = repo_path, sha, branch_hint
-        return self.commit
+        return self.commits.get(sha, self.commit)
 
     def is_ancestor(self, repo_path: str, ancestor_sha: str, descendant_sha: str) -> bool:
         _ = repo_path, ancestor_sha, descendant_sha
@@ -279,7 +288,7 @@ class FakeGitMetadata:
         return (end_sha,)
 
     def temporary_worktree(self, repo_path: str, sha: str):
-        _ = sha
+        self.worktree_calls.append((repo_path, sha))
 
         class _Worktree:
             def __enter__(self_inner):
@@ -289,6 +298,9 @@ class FakeGitMetadata:
                 return False
 
         return _Worktree()
+
+    def hard_reset(self, repo_path: str, target_rev: str) -> None:
+        self.hard_reset_calls.append((repo_path, target_rev))
 
 
 class FakeRepoResolver:
@@ -1668,6 +1680,123 @@ class DeterministicIngestionTests(unittest.TestCase):
             ("list_commits_between", ("prev123", "head123")),
             git_metadata.calls,
         )
+
+    def test_apply_commit_sequence_reuses_one_worktree_and_resets_between_commits(self):
+        commits = {
+            "mid456": make_commit(sha="mid456", parents=(), changed_files=("app.py",)),
+            "head123": make_commit(sha="head123", parents=("mid456",), changed_files=("app.py",)),
+        }
+        producer = FakeSnapshotProducer(
+            {
+                "mid456": make_tree_snapshot(revision_id="mid456"),
+                "head123": make_tree_snapshot(revision_id="head123"),
+            }
+        )
+        metadata = InMemoryMetadataStore()
+        git_metadata = FakeGitMetadata(commits)
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=git_metadata,
+        )
+
+        result = service.apply_commit_sequence(
+            "/tmp/demo",
+            commit_shas=("mid456", "head123"),
+            repo_id="demo",
+            execute=False,
+        )
+
+        self.assertEqual(git_metadata.worktree_calls, [("/tmp/demo", "mid456")])
+        self.assertEqual(git_metadata.hard_reset_calls, [("/tmp/demo", "head123")])
+        self.assertEqual(result.applied_commit_shas, ("mid456", "head123"))
+        self.assertEqual(result.commit.sha, "head123")
+        self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, "head123")
+
+    def test_apply_commit_sequence_finalizes_metadata_after_each_commit(self):
+        commits = {
+            "mid456": make_commit(sha="mid456", parents=(), changed_files=("app.py",)),
+            "head123": make_commit(sha="head123", parents=("mid456",), changed_files=("app.py",)),
+        }
+        metadata = InMemoryMetadataStore()
+
+        class InspectingSnapshotProducer:
+            def __init__(self) -> None:
+                self.observed_before_second: tuple[str | None, str | None] | None = None
+
+            def build_snapshot(self, repo_path: str, *, repo_id: str, revision_id: str, limit: int):
+                _ = repo_path, limit
+                if revision_id == "head123":
+                    snapshot = metadata.load_latest_snapshot(repo_id)
+                    state = metadata.load_repo_index_state(repo_id)
+                    self.observed_before_second = (
+                        snapshot.revision_id if snapshot is not None else None,
+                        state.latest_commit_sha if state is not None else None,
+                    )
+                return make_tree_snapshot(revision_id=revision_id)
+
+        producer = InspectingSnapshotProducer()
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=FakeGitMetadata(commits),
+        )
+
+        result = service.apply_commit_sequence(
+            "/tmp/demo",
+            commit_shas=("mid456", "head123"),
+            repo_id="demo",
+            execute=False,
+        )
+
+        self.assertEqual(producer.observed_before_second, ("mid456", "mid456"))
+        self.assertEqual(result.applied_commit_shas, ("mid456", "head123"))
+        self.assertEqual(metadata.load_latest_snapshot("demo").revision_id, "head123")
+        self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, "head123")
+
+    def test_apply_commit_sequence_stops_after_failure_and_keeps_processed_prefix_finalized(self):
+        commits = {
+            "mid456": make_commit(sha="mid456", parents=(), changed_files=("app.py",)),
+            "head123": make_commit(sha="head123", parents=("mid456",), changed_files=("app.py",)),
+            "tail789": make_commit(sha="tail789", parents=("head123",), changed_files=("app.py",)),
+        }
+        metadata = InMemoryMetadataStore()
+
+        class FailingSnapshotProducer:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def build_snapshot(self, repo_path: str, *, repo_id: str, revision_id: str, limit: int):
+                _ = repo_path, repo_id, limit
+                self.calls.append(revision_id)
+                if revision_id == "head123":
+                    raise RuntimeError("snapshot build failed for head123")
+                return make_tree_snapshot(revision_id=revision_id)
+
+        producer = FailingSnapshotProducer()
+        git_metadata = FakeGitMetadata(commits)
+        service = CommitIndexingService(
+            metadata_store=metadata,
+            backend_driver=None,
+            snapshot_producer=producer,
+            git_metadata=git_metadata,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "snapshot build failed for head123"):
+            service.apply_commit_sequence(
+                "/tmp/demo",
+                commit_shas=("mid456", "head123", "tail789"),
+                repo_id="demo",
+                execute=False,
+            )
+
+        self.assertEqual(producer.calls, ["mid456", "head123"])
+        self.assertEqual(metadata.load_latest_snapshot("demo").revision_id, "mid456")
+        self.assertEqual(metadata.load_repo_index_state("demo").latest_commit_sha, "mid456")
+        self.assertEqual(git_metadata.worktree_calls, [("/tmp/demo", "mid456")])
+        self.assertEqual(git_metadata.hard_reset_calls, [("/tmp/demo", "head123")])
 
     def test_apply_commit_rejects_target_off_first_parent_chain(self):
         snapshot = make_snapshot()

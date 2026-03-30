@@ -286,24 +286,48 @@ class CommitIndexingService:
         """Replay an explicit chronological sequence of commits.
 
         This helper is used by hosted indexing when a caller asks for a target
-        commit plus a short ancestor window. Each commit is still indexed via
-        ``apply_commit`` so metadata state and temporal diffs remain consistent
-        between steps.
+        commit plus a short ancestor window. Each commit still goes through the
+        same indexing flow and metadata finalization as ``apply_commit``, but
+        the replay reuses one temporary worktree and the in-memory previous
+        snapshot between steps.
         """
 
         if not commit_shas:
             raise ValueError("commit_shas must not be empty")
-        results = [
-            self.apply_commit(
-                repo_path,
-                commit_sha=commit_sha,
-                repo_id=repo_id,
-                branch_hint=branch_hint,
-                limit=limit,
-                execute=execute,
-            )
-            for commit_sha in commit_shas
-        ]
+        resolved_repo_path = self.git_metadata.resolve_repo_root(repo_path)
+        resolved_repo_id = repo_id or default_repo_id(resolved_repo_path)
+        current_state = self.metadata_store.load_repo_index_state(resolved_repo_id)
+        previous_commit_sha = current_state.latest_commit_sha if current_state else None
+        previous_branch = current_state.latest_branch if current_state else None
+        previous_snapshot = self.metadata_store.load_latest_snapshot(resolved_repo_id)
+
+        results: list[CommitIndexResult] = []
+        first_commit_sha = commit_shas[0]
+        with self.git_metadata.temporary_worktree(resolved_repo_path, first_commit_sha) as worktree_path:
+            for index, commit_sha in enumerate(commit_shas):
+                commit = self.git_metadata.get_commit_info(
+                    resolved_repo_path,
+                    commit_sha,
+                    branch_hint=branch_hint,
+                )
+                if index > 0:
+                    self.git_metadata.hard_reset(worktree_path, commit.sha)
+                result = self._apply_commit_from_checkout(
+                    resolved_repo_path=resolved_repo_path,
+                    resolved_repo_id=resolved_repo_id,
+                    commit=commit,
+                    checkout_root=worktree_path,
+                    previous_snapshot=previous_snapshot,
+                    previous_commit_sha=previous_commit_sha,
+                    previous_branch=previous_branch,
+                    limit=limit,
+                    execute=execute,
+                )
+                results.append(result)
+                if not result.skipped:
+                    previous_snapshot = result.snapshot
+                    previous_commit_sha = commit.sha
+                    previous_branch = commit.branch
         if len(results) == 1:
             return results[0]
         return self._aggregate_commit_results(results)
@@ -405,47 +429,94 @@ class CommitIndexingService:
             branch_hint=branch_hint,
         )
         previous_commit_sha = current_state.latest_commit_sha if current_state else None
+        previous_snapshot = self.metadata_store.load_latest_snapshot(resolved_repo_id)
+        with self.git_metadata.temporary_worktree(resolved_repo_path, commit.sha) as worktree_path:
+            return self._apply_commit_from_checkout(
+                resolved_repo_path=resolved_repo_path,
+                resolved_repo_id=resolved_repo_id,
+                commit=commit,
+                checkout_root=worktree_path,
+                previous_snapshot=previous_snapshot,
+                previous_commit_sha=previous_commit_sha,
+                previous_branch=current_state.latest_branch if current_state else None,
+                limit=limit,
+                execute=execute,
+            )
+
+    def _build_skipped_commit_result(
+        self,
+        *,
+        resolved_repo_path: str,
+        resolved_repo_id: str,
+        commit: CommitInfo,
+        previous_commit_sha: str | None,
+    ) -> CommitIndexResult:
+        return CommitIndexResult(
+            repo_id=resolved_repo_id,
+            repo_path=resolved_repo_path,
+            commit=commit,
+            previous_commit_sha=previous_commit_sha,
+            branch=commit.branch,
+            skipped=True,
+            skip_reason="commit already indexed",
+            snapshot=None,
+            apply_result=None,
+            operations=MutationPlan(),
+            applied_commit_shas=(),
+        )
+
+    def _apply_commit_from_checkout(
+        self,
+        *,
+        resolved_repo_path: str,
+        resolved_repo_id: str,
+        commit: CommitInfo,
+        checkout_root: str,
+        previous_snapshot: GraphSnapshot | None,
+        previous_commit_sha: str | None,
+        previous_branch: str | None,
+        limit: int,
+        execute: bool,
+    ) -> CommitIndexResult:
         if previous_commit_sha == commit.sha:
-            return CommitIndexResult(
-                repo_id=resolved_repo_id,
-                repo_path=resolved_repo_path,
+            return self._build_skipped_commit_result(
+                resolved_repo_path=resolved_repo_path,
+                resolved_repo_id=resolved_repo_id,
                 commit=commit,
                 previous_commit_sha=previous_commit_sha,
-                branch=commit.branch,
-                skipped=True,
-                skip_reason="commit already indexed",
-                snapshot=None,
-                apply_result=None,
-                operations=MutationPlan(),
-                applied_commit_shas=(),
             )
 
         self._ensure_supported_lineage(
             resolved_repo_path,
             previous_commit_sha=previous_commit_sha,
-            previous_branch=current_state.latest_branch if current_state else None,
+            previous_branch=previous_branch,
             target_commit=commit,
         )
 
-        markdown_planned_observations = ()
-        with self.git_metadata.temporary_worktree(resolved_repo_path, commit.sha) as worktree_path:
-            snapshot = self.snapshot_producer.build_snapshot(
-                worktree_path,
-                repo_id=resolved_repo_id,
-                revision_id=commit.sha,
-                limit=limit,
-            )
-            normalized_snapshot = normalize_snapshot_for_commit(
-                snapshot,
-                repo_path=resolved_repo_path,
-                commit=commit,
-            )
-            markdown_planned_observations = self.markdown_observation_adapter.build_observations(
-                planner=self.observation_planner,
+        snapshot = self.snapshot_producer.build_snapshot(
+            checkout_root,
+            repo_id=resolved_repo_id,
+            revision_id=commit.sha,
+            limit=limit,
+        )
+        normalized_snapshot = normalize_snapshot_for_commit(
+            snapshot,
+            repo_path=resolved_repo_path,
+            commit=commit,
+        )
+        markdown_planned_observations = self.markdown_observation_adapter.build_observations(
+            planner=self.observation_planner,
+            snapshot=normalized_snapshot,
+            checkout_root=checkout_root,
+        )
+        plan_snapshot_against = getattr(self.writer, "plan_snapshot_against", None)
+        if callable(plan_snapshot_against):
+            structural_plan = plan_snapshot_against(
+                previous_snapshot=previous_snapshot,
                 snapshot=normalized_snapshot,
-                checkout_root=worktree_path,
             )
-        structural_plan = self.writer.plan_snapshot(normalized_snapshot)
+        else:
+            structural_plan = self.writer.plan_snapshot(normalized_snapshot)
         commit_plan = self.planner.plan_commit_provenance(
             snapshot=structural_plan.snapshot,
             diff=structural_plan.diff,

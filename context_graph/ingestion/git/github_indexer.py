@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 import hashlib
 import json
 from typing import Any
@@ -39,6 +41,8 @@ from context_graph.storage.backend import (
 )
 
 from .structural_planner import GitHubStructuralPlanner
+
+_GITHUB_BUNDLE_FETCH_MAX_WORKERS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +132,17 @@ class GitHubSyncResult:
     claim_candidates_rejected: int = 0
     claim_rejection_reasons: dict[str, int] = field(default_factory=dict)
     evidence_invalidated: int = 0
+
+
+@dataclass(slots=True)
+class _GitHubBundleFetchCache:
+    commit_prs: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    pr_payloads: dict[int, dict[str, Any]] = field(default_factory=dict)
+    pr_linked_issues: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    pr_reviews: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    pr_review_comments: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    issue_comments: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    issue_payloads: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 class GitHubIndexer:
@@ -342,31 +357,143 @@ class GitHubIndexer:
     ) -> GitHubProvenanceBundle:
         owner = repo_ref.owner
         repo_name = repo_ref.name
-        commit_to_prs: dict[str, tuple[int, ...]] = {}
-        pr_payloads: dict[int, dict[str, Any]] = {}
-        pr_to_issues: dict[int, tuple[int, ...]] = {}
-        linked_issues: set[int] = set()
+        cache = _GitHubBundleFetchCache()
 
-        for commit_sha in commit_shas:
-            commit_prs = self.github_api.list_commit_pull_requests(owner, repo_name, commit_sha)
-            numbers = collect_unique_numbers(commit_prs)
-            commit_to_prs[commit_sha] = numbers
-            for number in numbers:
-                if number in pr_payloads:
-                    continue
-                pr = self.github_api.get_pull_request(owner, repo_name, number)
-                pr_payloads[number] = pr
-                linked_numbers = self.github_api.list_pull_request_linked_issue_numbers(
-                    owner,
-                    repo_name,
-                    number,
-                )
-                pr_to_issues[number] = linked_numbers
-                linked_issues.update(linked_numbers)
+        with ThreadPoolExecutor(max_workers=_GITHUB_BUNDLE_FETCH_MAX_WORKERS) as executor:
+            commit_pr_tasks = {
+                commit_sha: partial(self.github_api.list_commit_pull_requests, owner, repo_name, commit_sha)
+                for commit_sha in commit_shas
+                if commit_sha not in cache.commit_prs
+            }
+            commit_pr_rows = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=commit_pr_tasks,
+            )
+            for commit_sha in commit_shas:
+                if commit_sha not in cache.commit_prs:
+                    cache.commit_prs[commit_sha] = collect_unique_numbers(commit_pr_rows[commit_sha])
 
-        issue_payloads: dict[int, dict[str, Any]] = {}
-        for number in sorted(linked_issues):
-            issue_payloads[number] = self.github_api.get_issue(owner, repo_name, number)
+            commit_to_prs = {
+                commit_sha: cache.commit_prs[commit_sha]
+                for commit_sha in commit_shas
+            }
+
+            ordered_pr_numbers: list[int] = []
+            seen_pr_numbers: set[int] = set()
+            for commit_sha in commit_shas:
+                for number in commit_to_prs.get(commit_sha, ()):
+                    if number in seen_pr_numbers:
+                        continue
+                    seen_pr_numbers.add(number)
+                    ordered_pr_numbers.append(number)
+
+            pr_fetch_tasks: dict[tuple[str, int], Any] = {}
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_payloads:
+                    pr_fetch_tasks[("payload", number)] = partial(
+                        self.github_api.get_pull_request,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.pr_linked_issues:
+                    pr_fetch_tasks[("linked_issues", number)] = partial(
+                        self.github_api.list_pull_request_linked_issue_numbers,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            pr_fetch_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=pr_fetch_tasks,
+            )
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_payloads:
+                    cache.pr_payloads[number] = pr_fetch_results[("payload", number)]
+                if number not in cache.pr_linked_issues:
+                    cache.pr_linked_issues[number] = tuple(pr_fetch_results[("linked_issues", number)])
+
+            pr_subresource_tasks: dict[tuple[str, int], Any] = {}
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_reviews:
+                    pr_subresource_tasks[("reviews", number)] = partial(
+                        self.github_api.list_pull_request_reviews,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.pr_review_comments:
+                    pr_subresource_tasks[("review_comments", number)] = partial(
+                        self.github_api.list_pull_request_review_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.issue_comments:
+                    pr_subresource_tasks[("issue_comments", number)] = partial(
+                        self.github_api.list_issue_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            pr_subresource_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=pr_subresource_tasks,
+            )
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_reviews:
+                    cache.pr_reviews[number] = tuple(pr_subresource_results[("reviews", number)])
+                if number not in cache.pr_review_comments:
+                    cache.pr_review_comments[number] = tuple(pr_subresource_results[("review_comments", number)])
+                if number not in cache.issue_comments:
+                    cache.issue_comments[number] = tuple(pr_subresource_results[("issue_comments", number)])
+
+            linked_issue_numbers = sorted(
+                {
+                    issue_number
+                    for number in ordered_pr_numbers
+                    for issue_number in cache.pr_linked_issues[number]
+                }
+            )
+
+            issue_fetch_tasks: dict[tuple[str, int], Any] = {}
+            for number in linked_issue_numbers:
+                if number not in cache.issue_payloads:
+                    issue_fetch_tasks[("payload", number)] = partial(
+                        self.github_api.get_issue,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.issue_comments:
+                    issue_fetch_tasks[("issue_comments", number)] = partial(
+                        self.github_api.list_issue_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            issue_fetch_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=issue_fetch_tasks,
+            )
+            for number in linked_issue_numbers:
+                if number not in cache.issue_payloads:
+                    cache.issue_payloads[number] = issue_fetch_results[("payload", number)]
+                if number not in cache.issue_comments:
+                    cache.issue_comments[number] = tuple(issue_fetch_results[("issue_comments", number)])
+
+        pr_payloads = {
+            number: cache.pr_payloads[number]
+            for number in ordered_pr_numbers
+        }
+        pr_to_issues = {
+            number: cache.pr_linked_issues[number]
+            for number in ordered_pr_numbers
+        }
+        issue_payloads = {
+            number: cache.issue_payloads[number]
+            for number in linked_issue_numbers
+        }
 
         latest_commit_by_pr: dict[int, str] = {}
         for commit_sha in commit_shas:
@@ -379,7 +506,8 @@ class GitHubIndexer:
         entity_links: dict[tuple[str, str, str], GitHubEntityLink] = {}
         observation_sources: dict[str, GitHubObservationSource] = {}
 
-        for number, pr in pr_payloads.items():
+        for number in ordered_pr_numbers:
+            pr = pr_payloads[number]
             pr_author_login = _author_login(pr)
             pr_body_text = _normalized_optional_text(pr.get("body"))
             pr_entity = _build_pull_request_entity(
@@ -414,7 +542,7 @@ class GitHubIndexer:
                     anchor_revision_id=latest_commit_by_pr.get(number),
                 ),
             )
-            for review in self.github_api.list_pull_request_reviews(owner, repo_name, number):
+            for review in cache.pr_reviews[number]:
                 review_author_login = _author_login(review)
                 review_body_text = _normalized_optional_text(review.get("body"))
                 _maybe_add_observation_source(
@@ -429,7 +557,7 @@ class GitHubIndexer:
                         anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
-            for comment in self.github_api.list_pull_request_review_comments(owner, repo_name, number):
+            for comment in cache.pr_review_comments[number]:
                 comment_author_login = _author_login(comment)
                 comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
@@ -444,7 +572,7 @@ class GitHubIndexer:
                         anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
-            for comment in self.github_api.list_issue_comments(owner, repo_name, number):
+            for comment in cache.issue_comments[number]:
                 comment_author_login = _author_login(comment)
                 comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
@@ -459,8 +587,8 @@ class GitHubIndexer:
                         anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
-
-        for number, issue in issue_payloads.items():
+        for number in linked_issue_numbers:
+            issue = issue_payloads[number]
             issue_author_login = _author_login(issue)
             issue_body_text = _normalized_optional_text(issue.get("body"))
             issue_entity = _build_issue_entity(
@@ -493,7 +621,7 @@ class GitHubIndexer:
                     payload=issue,
                 ),
             )
-            for comment in self.github_api.list_issue_comments(owner, repo_name, number):
+            for comment in cache.issue_comments[number]:
                 comment_author_login = _author_login(comment)
                 comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
@@ -540,6 +668,28 @@ class GitHubIndexer:
                 )
             ),
         )
+
+
+def _run_parallel_fetch_tasks(
+    *,
+    executor: ThreadPoolExecutor,
+    tasks: Mapping[Any, Any],
+) -> dict[Any, Any]:
+    if not tasks:
+        return {}
+    futures = {
+        executor.submit(task): key
+        for key, task in tasks.items()
+    }
+    results: dict[Any, Any] = {}
+    try:
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    except Exception:
+        for future in futures:
+            future.cancel()
+        raise
+    return results
 
 
 def _build_pull_request_entity(
