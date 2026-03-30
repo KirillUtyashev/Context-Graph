@@ -1,0 +1,340 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: No. The routing key did not change, so the required update was the exchange name to order_stream.
+   Model answer: **No.** For this rollout, the problem is the **exchange name** (`order_events` → `order_stream`), not the routing keys.
+
+What the indexed docs say:
+
+- **`docs/integration/events-migration.md`**: only the exchange name changed; routing keys for things like order creation stay the same (e.g. `order.created`).
+- **`docs/runbooks/order-stream-cutover.md`**: move consumers to `order_stream` **without** changing routing keys or payloads, and **keep routing key bindings unchanged**.
+
+So after 2026-03-12, a consumer that **only** changes the routing key and **does not** switch to `order_stream` would still be wrong: it would miss the canonical exchange and would have changed the one thing that was **not** supposed to change. The fix is to point bindings/subscriptions at **`order_stream`** and leave routing keys as they were.
+
+2. Required fact: No. The repo explicitly says to keep x-correlation-id; tracing augments it rather than replacing it.
+   Model answer: **No.** For v1.6.0 (2026-03-15), teams should **not** drop `x-correlation-id` just because OpenTelemetry was added.
+
+The indexed release notes say:
+
+- **If monitoring depended only on `x-correlation-id`, keep it; tracing augments it rather than replacing it.** (`docs/releases/2026-03-15-v1.6.0.md`)
+
+Related indexed context:
+
+- OpenTelemetry in this release is about **RabbitMQ publish/consume** context propagation, not removing HTTP correlation headers.
+- PR history text says to **keep** `x-correlation-id` because it **still helps logs when tracing is degraded** (`history/pull-requests/143-otel-rabbitmq-context.md`).
+- The investigation note distinguishes: `x-correlation-id` stays useful for **log correlation**; what was missing for a **proper trace tree** was OTel through RabbitMQ (`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`).
+
+**Summary:** Continue sending/using `x-correlation-id` for HTTP; add or rely on OpenTelemetry for distributed tracing (especially across RabbitMQ), as an addition—not a replacement for the correlation header.
+
+3. Required fact: docs/integration/pagination.md
+   Model answer: Here is what the indexed repo says, using only the context-graph MCP results.
+
+**Treat the published integration docs as the released external contract** when they disagree with Swagger about order pagination.
+
+**Why:**
+
+1. **ADR 004** (`docs/architecture/004-public-api-contract-sources.md`) says that for externally supported API behavior, Swagger annotations are only hints and **“if they conflict with the published integration docs they are not authoritative for external clients.”**
+
+2. The **pagination incident** (`docs/incidents/2026-03-18-pagination-contract-confusion.md`, dated 2026-03-18—i.e. the situation in effect on 2026-03-19) states that for external clients **cursor pagination is still canonical**, that the **page-based Swagger block should not be treated as the released contract**, and it ties that to an internal/admin-branch Swagger mismatch.
+
+So for a benchmark scoring “what external clients should implement,” **follow the integration docs**, not Swagger, when those two conflict.
+
+4. Required fact: The migration guide warns about the legacy internal order-events name, and the v1.6.0 release notes repeat that internal gap.
+   Model answer: Here is what the context-graph MCP search shows.
+
+**Primary answer:** The note that **internal** RabbitMQ setup can still use the hyphenated legacy name `` `order-events` `` for **DLQ topology constants**, and that those strings should be treated as **implementation leftovers, not the external contract** (i.e. integrations should follow **`order_stream`**), appears in **`docs/migrations/2026-03-12-order-stream-rollout.md`** (migration guide), at **line 25**.
+
+**Related artifact:** The same idea appears in **`history/issues/176-order-stream-exchange-rename.md`** at **line 23** (“Internal DLQ code may still reference the hyphenated legacy name `order-events`…”), with **`order_stream`** called out for new integrations nearby (e.g. line 28 in search results).
+
+**Release doc:** **`docs/releases/2026-03-15-v1.6.0.md`** is indexed only with a short header/snippet (title, date, “Highlights”); MCP did **not** surface any `order-events` / `order_stream` warning text in that file—so the warning the question describes is **not** attributed to the v1.6.0 release artifact in the indexed content.
+
+So the artifact that **still** carries that “internal may say `order-events`, externals use `order_stream`” warning is the **order-stream migration guide** (`docs/migrations/2026-03-12-order-stream-rollout.md`); the **issue history** file is a second place the same point appears.
+
+5. Required fact: Because Stripe verifies the original raw bytes, and parsing plus re-stringifying changes the payload that the signature was computed over.
+   Model answer: Here is a concise answer based only on what the context-graph MCP search returned.
+
+## Why parse-then-re-serialize breaks Stripe signature verification
+
+**Stripe signs the exact raw HTTP body.** The `stripe-signature` header is described in the repo as a **timestamp + HMAC** checked with `STRIPE_WEBHOOK_SECRET` (`docs/integration/webhooks.md`). Verification recomputes that HMAC over **whatever bytes the handler uses as the body**. Those bytes must be the **same bytes Stripe sent** when it computed the signature.
+
+**Parsing JSON and calling `JSON.stringify` (or any re-serialization) almost never reproduces those bytes.** The indexed docs state explicitly that for proxies or tests you must forward **raw bytes**, **not** a parsed JSON object re-serialized (`docs/integration/webhooks.md`). The staging incident note adds: **“Stripe signs the original raw bytes. The proxy changed the payload, so the service could no longer validate the `stripe-signature` header.”** (`docs/incidents/2026-03-05-stripe-signature-staging-incident.md`).
+
+So the failure is a **byte-level mismatch**: the signature is over Stripe’s original payload; a round-trip through a JavaScript object changes things like key order, spacing, and other serialization details, so the HMAC no longer matches.
+
+**What the order service expects:** the webhook route is wired so the body stays raw (`express.raw({ type: 'application/json' })`), with comments that **`express.json()` would “corrupt” the body** for verification and that the **raw body is needed for signature verification** (`src/routes/webhooks.ts`). The integration doc also says the endpoint **must receive the raw, unparsed request body** for verification to succeed (`docs/integration/webhooks.md`).
+
+**Bottom line:** Signature verification fails because it is cryptographic verification over **exact bytes**; parse → re-serialize replaces Stripe’s bytes with a **semantically similar but not identical** encoding, so verification fails even when the JSON “means” the same thing.
+
+6. Required fact: The issue reports async paths dropping the optional correlationId, orderService shows the later global fallback, and the auth docs explain that requests normally do carry x-correlation-id.
+   Model answer: Here is the evidence chain the indexed backend code supports, based only on context-graph MCP results.
+
+## 1. HTTP vs audit: two different paths
+
+**Middleware** normalizes the header on the request and echoes it on the response:
+
+- It takes `req.headers['x-correlation-id']` (or generates a UUID), then assigns `req.headers['x-correlation-id']` and `res.setHeader('x-correlation-id', ...)`.
+
+So “the request had `x-correlation-id`” only proves the **HTTP middleware path** saw it. It does not, by itself, populate audit documents.
+
+## 2. Audit rows only get whatever the service passes in
+
+`logOrderStateChange` writes `correlationId: params.correlationId` into `AuditLog.create(...)`, with `correlationId` optional on `AuditParams`. If that value is missing at call time, the stored audit row has no correlation ID.
+
+## 3. The explicit gap: optional parameter vs “middleware already set it”
+
+`updateOrderStatus` takes `correlationId?: string` and passes it through to `logOrderStateChange`. The file contains an inline explanation of the bug:
+
+- **Comment:** correlation ID “could be undefined **even when middleware sets it**.”
+- **Mechanism:** `safeCorrelationId = correlationId || (global as any).__CORRELATION_ID__`
+
+So the intended chain for audit is: **caller must pass** `correlationId` into the service (or the undocumented global must be set). Middleware putting the ID on `req` is **not** read inside `auditService` or, in the snippet, inside `updateOrderStatus` except via that parameter/global.
+
+A search for `__CORRELATION_ID__` finds **only** that fallback line—no other assignment—so if callers omit the argument, there is often **no** second source to fill the audit row.
+
+## 4. HTTP handler not wiring request → service (amplifies the gap)
+
+The `orderController` handler for `updateOrderStatus` is a **stub** that only returns `{ message: 'stub' }` and does not call `orderService.updateOrderStatus` or pass `req` / headers. So for that route, nothing in this snippet bridges `x-correlation-id` on the request to the audit writer—even though clients may still send the header (middleware could still run for the request depending on app wiring).
+
+---
+
+**Summary chain:**  
+`x-correlation-id` on the wire → middleware may set `req`/`res` → **audit still depends on `correlationId` being passed into `updateOrderStatus` → `logOrderStateChange`** (or the unused global). If that argument is omitted (and the global is unset), audit rows lack correlation IDs **even when** the header was present—matching the comment that this could happen “even when middleware sets it.” The stub controller illustrates how the HTTP layer can fail to pass the ID into the service layer at all.
+
+7. Required fact: The dispatcher marks 400 as non-retryable, and the worker treats non-retryable failures as dead immediately rather than scheduling backoff.
+   Model answer: Here is what the indexed backend code does.
+
+## Why HTTP 400 ends up **dead** (not retried forever)
+
+**1. The dispatcher does not treat 400 as retryable**
+
+In `dispatchWebhook`, only certain status codes are considered retryable (`408`, `429`, `500`, `502`, `503`, `504`). The comments say that most **4xx** responses mean the receiver rejected the request and that retrying would not help; `408` and `429` are exceptions.
+
+For any other non-success status (including **400**), the code returns a failure whose `errorMessage` starts with **`Non-retryable HTTP … - payload rejected`**.
+
+**2. The worker moves those jobs straight to `dead`**
+
+In `processWebhookBatch`, after a failed dispatch, a job is considered dead if either:
+
+- the completed attempt count has reached `maxAttempts`, **or**
+- `result.errorMessage` starts with **`"Non-retryable"`**.
+
+So for a **400**, the error message matches the second condition on the **first** failed attempt. The job is set to **`dead`** immediately; it is **not** rescheduled with backoff.
+
+**Summary:** Retries are **not** infinite for webhook delivery: retryable statuses are a fixed set, and **400** is explicitly treated as a **non-retryable** client/receiver rejection. The worker interprets that via the **`Non-retryable`** error prefix and marks the job **dead** without further automatic retries. (Docs also mention a **max attempts** cap for cases that *do* retry.)
+
+8. Required fact: Retries were scheduled using the stale attempt count, and the fix was applied in the worker logic in src/jobs/webhookWorker.ts as described by issue and PR #241.
+   Model answer: Here is what the context-graph MCP results show.
+
+## Why staging saw retries too fast
+
+The investigation doc (`docs/investigations/2026-03-20-webhook-retry-timeline.md`) says staging receivers saw **bursts of retries earlier than the backoff table predicted**. The concrete bug: **the next run was scheduled using a stale `attemptCount`** — i.e. the code advanced the count **after** using it for `nextAttemptDate`, so backoff was computed as if fewer attempts had completed than actually had, so delays stayed **too small** and retries looked “too fast.” The worker even notes this was **discovered because staging retries were coming in too fast** (`src/jobs/webhookWorker.ts` around the fix comments).
+
+## Where the fix was applied
+
+The fix is in **`src/jobs/webhookWorker.ts`** (notably in `processWebhookBatch`): compute **`completedAttemptCount = job.attemptCount + 1` first**, then use that for **`nextAttemptDate(completedAttemptCount)`**, dead-letter / max-attempt checks, and persisting `attemptCount`, with comments that the old order was wrong (`// FIX: was doing job.attemptCount + 1 AFTER using it for nextAttemptDate` and `// use completedAttemptCount for backoff so the delay actually grows`).
+
+Release **`docs/releases/2026-03-21-v1.6.1.md`** summarizes it as: webhook retry scheduling now uses **completed attempt counts** for **both backoff and dead-letter** decisions.
+
+9. Required fact: Use the admin retry endpoint, which sets the job back to pending and nextRunAt to now but intentionally does not reset attemptCount.
+   Model answer: Here’s what the indexed **order-management-v2** backend shows.
+
+## Replay without wiping retry history
+
+Use the **manual retry admin API**:
+
+**`POST /webhooks/jobs/:id/retry`**
+
+(Authenticated like the other webhook admin routes.)
+
+That handler only:
+
+- Sets **`status`** to **`pending`**
+- Sets **`nextRunAt`** to **now** so the worker picks it up on the next cycle  
+
+It **does not** reset **`attemptCount`**. The code explicitly keeps **`attemptCount`** so there is an audit trail of how many attempts already happened.
+
+So operations should **replay dead/failed jobs via this retry endpoint**, not by deleting/recreating jobs or any flow that would reset stored attempt metadata.
+
+**Supporting context from docs:** the runbook states that manual retry does **not** reset `attemptCount` because operations wants retry history preserved for debugging, and points to the same **`POST /webhooks/jobs/:id/retry`** step plus **`GET /webhooks/jobs`** / **`GET /webhooks/stats`** for inspection.
+
+**Frontend integration:** call the backend’s **`POST /webhooks/jobs/:id/retry`** (with the same auth the admin routes use); the preserved **`attemptCount`** (and related fields on the job document) stay available for timelines and debugging.
+
+10. Required fact: The repo treats observability as best-effort so business logic is not blocked; docs/features/audit-logging.md explains the tradeoff and src/services/auditService.ts catches and logs errors instead of throwing.
+   Model answer: Here’s what the indexed backend code shows.
+
+### Why it’s intentionally non-fatal
+
+Audit logging is wrapped so it **never throws**, because **observability must not break business logic**. That’s stated explicitly next to the error handling in `logOrderStateChange`.
+
+### Where it’s enforced
+
+The behavior is enforced in **`src/services/auditService.ts`**, in **`logOrderStateChange`**: the `AuditLog.create(...)` work runs in a **`try`**, and the **`catch`** only logs with `logger.error`—it does **not** rethrow.
+
+The call graph shows **`updateOrderStatus`** in **`src/services/orderService.ts`** **`await`s** `logOrderStateChange` after persisting the order. Because **`logOrderStateChange` swallows errors**, a failed audit write does not fail that flow (the order save has already completed).
+
+Relevant snippet from the graph (module `order-management-v2.src.services.auditService`):
+
+```12:34:src/services/auditService.ts
+export const logOrderStateChange = async (params: AuditParams) => {
+  try {
+    // Hack: stringify states defensively — we once had an enum mismatch that passed objects here
+    const previous = params.previousState ? String(params.previousState) : null;
+    const next = String(params.newState);
+
+    await AuditLog.create({
+      orderId: params.orderId,
+      previousState: previous,
+      newState: next,
+      changedBy: params.changedBy,
+      correlationId: params.correlationId,
+    });
+
+  } catch (err) {
+    // IMPORTANT: Never throw from audit logging.
+    // Observability must never break business logic.
+    logger.error('Audit logging failed', {
+      error: err,
+      orderId: params.orderId,
+    });
+  }
+};
+```
+
+**Summary:** Non-fatality is a deliberate choice so audit/observability failures cannot abort or mask successful domain operations. It’s implemented only in **`logOrderStateChange`** (`auditService.ts`) via **catch-and-log, no rethrow**; **`updateOrderStatus`** is the indexed caller that awaits it.
+
+11. Required fact: The RabbitMQ setup code still uses legacy hyphenated DLQ constants, and the migration guide plus PR review say those leftovers are internal implementation details rather than the external contract.
+   Model answer: Here is what the context-graph retrieval shows, without using the repo on disk.
+
+### Why `order-events-dlx` can still appear after the public exchange rename
+
+**1. Rollout / issue docs say the rename scope and DLQ are different**
+
+- **`docs/migrations/2026-03-12-order-stream-rollout.md`** (line 25): Internal RabbitMQ setup still uses the hyphenated legacy name `order-events` for **DLQ topology constants**; that should be treated as **implementation leftovers**, not the **external contract**.
+- **`history/issues/176-order-stream-exchange-rename.md`** (line 23): **Internal DLQ code** may still reference the hyphenated legacy name `order-events` **until topology constants are centralized**.
+- **`history/reviews/176-order-stream-rollout-review.md`** (line 13): It was **explicitly acceptable** for this work to keep internal code using `order-events` for **DLQ topology**, as long as release notes mark it as an **internal legacy constant**, not the **public integration contract**.
+- **`docs/integration/events-migration.md`** (lines 7–8, 20): The migration is described as changing the **exchange name** (`order_events` → `order_stream`); other aspects (topic type, durability, routing keys) are unchanged—so the **renamed piece is the public stream exchange**, not necessarily every internal Rabbit name.
+
+**2. Code still defines DLX by a fixed legacy string**
+
+From **`get_code_snippet`** on `order-management-v2.src.events.rabbitmqSetup.setupRabbitMQ`, **`src/events/rabbitmqSetup.ts`** sets `const DLX = 'order-events-dlx'` and uses it for `assertExchange(DLX, ...)` and `'x-dead-letter-exchange': DLX`. So **`order-events-dlx` remains a separate, hardcoded dead-letter exchange name** alongside the main exchange constant (`order-events` in that snippet), which matches the docs calling DLQ names **legacy topology constants** not updated in the same pass as the public **`order_stream`** rename.
+
+**Bottom line:** Evidence from the migration doc, issue #176 notes, PR review, and `rabbitmqSetup.ts` together explain it: the **public exchange** was renamed for integrators; **DLQ/DLX** stayed on **legacy hyphenated `order-events` / `order-events-dlx` constants** until centralization, by intentional scope—not as the external contract.
+
+12. Required fact: The WebhookJob model defines a 30-day TTL index for status=dead, the retry strategy doc mentions dead-job cleanup by Mongo TTL, and the v1.6.1 release notes restate that dead jobs still age out automatically.
+   Model answer: Here is what the context-graph MCP results support.
+
+## Strongest evidence: MongoDB TTL on `WebhookJob`
+
+In **`src/models/WebhookJob.ts`** the schema defines a **TTL index** aimed only at **`dead`** jobs:
+
+- A comment states that **dead jobs are auto-purged after 30 days** (MCP match at line 50).
+- The index uses **`expireAfterSeconds: 60 * 60 * 24 * 30`** (30 days) with **`partialFilterExpression: { status: "dead" }`** (MCP match at line 53).
+- A separate MCP hit on the same file shows the TTL index is on **`{ updatedAt: 1 }`** (line 52), i.e. MongoDB’s TTL mechanism removes matching documents after that field is older than the configured interval (for `dead` rows only).
+
+That is the concrete mechanism: **MongoDB’s built-in TTL deletes `dead` `WebhookJob` documents after a 30-day window**, so they do not grow without bound forever.
+
+## Supporting flow (why “dead” is the relevant state)
+
+- **`src/jobs/webhookWorker.ts`** sets `status: "dead"` (MCP line 64) when a job is moved to the dead state.
+- **`src/webhooks/dispatcher.ts`** logs moving to **dead** on non-retryable errors (MCP line 52).
+
+So the lifecycle is: jobs can become **`dead`**, and **only those** are covered by the TTL partial index.
+
+## Documentation (same story)
+
+- **`docs/webhooks/retry-strategy.md`** (line 5): dead jobs cleaned up by **Mongo TTL after 30 days**.
+- **`docs/releases/2026-03-21-v1.6.1.md`** (line 12): dead jobs **age out via the 30-day TTL index**.
+
+**Bottom line for an audit or design review:** cite **`WebhookJob.ts`** (TTL index on `updatedAt`, 30 days, `status: "dead"`) as the implementation proof, plus the retry-strategy doc for product-facing wording. The worker/dispatcher lines show **`dead`** is the terminal status that TTL applies to.
+
+13. Required fact: ADR 004 defines docs/integration/* as the canonical external contract, the pagination incident and issue document the drift, the PR and review clarify the fix, and the Swagger block in src/routes/orders.ts is explicitly treated as non-authoritative for external clients.
+   Model answer: Here is the **artifact chain** the MCP index supports (only from `search_code` / `search_code_graph` / `get_code_snippet` results).
+
+### 1. ADR 004 — general rule (integration docs vs Swagger vs runbooks)
+
+**`docs/architecture/004-public-api-contract-sources.md`** (“ADR 004: Sources of Truth for Public API Contracts”) ties the pieces together:
+
+- **`docs/integration/*` is the canonical contract** (search hit at line 17).
+- **Swagger**: if it conflicts with published integration docs, it is **not authoritative for external clients** (line 19).
+- **Runbooks**: **operational guidance, not client contracts** (line 20 from the earlier `runbook` search).
+
+That is the top-level “trust” ordering: **integration docs > Swagger for external contract truth; runbooks are out of band for client contracts.**
+
+### 2. Orders API doc — points list behavior at `pagination.md`
+
+**`docs/integration/orders-api.md`** (line 66) tells readers to use **`pagination.md`** for list-endpoint query parameters — so **`pagination.md` is the concrete pagination contract doc under the canonical `docs/integration/*` tree.**
+
+### 3. Incident + release notes — pagination-specific application
+
+- **`docs/incidents/2026-03-18-pagination-contract-confusion.md`**: contrasts **`docs/integration/pagination.md`** (`cursor`, `nextCursor`, `hasMore`) with **Swagger on `src/routes/orders.ts`** (`page`, `limit`, `total`), and states that **for external clients, cursor pagination is still canonical** and the page-based Swagger block should not be treated as the released contract.
+- **`docs/releases/2026-03-15-v1.6.0.md`**: notes **public pagination docs and Swagger comments are not fully reconciled**.
+- **`docs/releases/2026-03-21-v1.6.1.md`**: **clarifies cursor pagination remains the public `/api/orders` contract despite Swagger drift.**
+
+Together, the **proof chain** is: **ADR 004 establishes that `docs/integration/*` (and thus `pagination.md` once linked from `orders-api.md`) wins over Swagger and runbooks for external clients; the incident and release notes apply that rule to orders pagination specifically.**
+
+14. Required fact: The issue, migration guide, rollout PR, review notes, runbook, and existing events docs all show that only the exchange name changed to order_stream while order.created remained the routing key, so changing the routing key would not fix the migration.
+   Model answer: Here is a concise answer based only on what the context-graph MCP tools returned.
+
+## Why “only change the routing key” does not finish the migration
+
+The indexed docs agree the migration is about **which exchange** traffic uses (`order_events` → `order_stream`), not about inventing a new routing key. Together, these artifacts justify that:
+
+### 1. `docs/integration/events-migration.md`
+
+It states that **only the exchange name changed** and that **routing keys stay the same** (e.g. order creation remains `order.created`). So a routing-key–only change does not match what was actually migrated.
+
+### 2. `docs/runbooks/order-stream-cutover.md`
+
+It tells teams to **move consumers from `order_events` to `order_stream` without changing routing keys or payloads**, and to **keep routing key bindings unchanged** while the consumer still binds to `order.created`. That frames the cutover as **re-pointing bindings to the new exchange**, not swapping the routing key in isolation.
+
+### 3. `docs/migrations/2026-03-12-order-stream-rollout.md`
+
+It says to **update bindings, publishers, and IaC** that still reference **`order_events`**. That is the real breadth of work: anything still wired to the old exchange name—including infra and publishers—not merely a routing key tweak.
+
+### 4. Supporting clarity (optional but aligned)
+
+- **`history/reviews/176-order-stream-rollout-review.md`** — asks for explicit wording that **only the exchange name** changes so teams do not assume they must change routing keys or durability.
+- **`conversation_transcript.md`** — gold answers describe the config change as **exchange name** `order_events` → `order_stream` and breakage when consumers still use **`order_events`**, which a routing-key-only change would not fix.
+
+**Bottom line for downstream:** cite **`events-migration.md`** (what did/didn’t change), **`order-stream-cutover.md`** (operational steps: new exchange, same routing keys), and **`2026-03-12-order-stream-rollout.md`** (bindings, publishers, IaC must drop `order_events`). Together they show the migration is **exchange cutover + binding/IaC/publisher updates**, not a routing-key substitution by itself.
+
+15. Required fact: The trace-gap investigation, issue #142, tracing notes, PR #143, v1.6.0 release notes, and auth docs show that x-correlation-id is still needed for log correlation while OpenTelemetry adds full cross-service trace context.
+   Model answer: Here are the **artifacts to cite** (from context-graph `search_code` only), and what each supports:
+
+### Primary citations (directly answer “why keep `x-correlation-id` after RabbitMQ tracing?”)
+
+1. **`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`**  
+   States that **`x-correlation-id` stayed useful for log correlation** while **not** replacing a proper distributed trace tree, and that **OpenTelemetry propagation through RabbitMQ headers** was the missing piece for traces.
+
+2. **`docs/releases/2026-03-15-v1.6.0.md`**  
+   Explicit release guidance: **if monitoring relied on `x-correlation-id`, keep it** — **tracing augments it rather than replacing it**.
+
+3. **`history/pull-requests/143-otel-rabbitmq-context.md`**  
+   Records the decision to **keep the existing `x-correlation-id`** because it **helps logs when tracing is degraded**.
+
+### Supporting context (problem framing + operations)
+
+4. **`history/issues/142-rabbitmq-tracing-context-loss.md`**  
+   Frames why HTTP-only correlation IDs were insufficient **once work leaves the process** (motivates adding OTel on RabbitMQ without implying correlation IDs are obsolete).
+
+5. **`docs/guides/tracing-implementation-notes.md`**  
+   Contrasts **Winston / `req.headers['x-correlation-id']`** for single-service HTTP with **blindness after RabbitMQ**, and how **OTel** maps the full pipeline — useful background for why **both** mechanisms coexist.
+
+6. **`docs/runbooks/webhook-dead-letter-replay.md`**  
+   Operational: **carry forward `x-correlation-id`** for traceability during replay.
+
+### Optional (contract / generic integration)
+
+7. **`docs/integration/auth.md`**  
+   Documents **every request gets `x-correlation-id`**, echoed in responses, logged — general **cross-service troubleshooting** rationale.
+
+**Code-level artifacts** (`src/middlewares/correlationId.ts`, `src/webhooks/dispatcher.ts`, `WebhookJob`, etc.) show **implementation**, but the **documented “why still necessary”** story is strongest in **items 1–3**, with **4–6** as supporting narrative and runbook evidence.

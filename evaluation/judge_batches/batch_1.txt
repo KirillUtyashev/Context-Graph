@@ -1,0 +1,214 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: 8 attempts.
+   Model answer: The default is **8** attempts.
+
+That value is defined in two places that stay aligned:
+
+- The `WebhookJob` schema sets `maxAttempts` with `default: 8` (with a short comment that this matches the backoff strategy).
+- When enqueueing, `enqueueWebhook` uses `options.maxAttempts ?? 8` if no override is passed.
+
+So unless a caller passes a different `maxAttempts`, outbound webhook jobs use a maximum of **8** attempts.
+
+2. Required fact: 30 days.
+   Model answer: **30 days.**
+
+The `WebhookJob` model defines a MongoDB TTL index on `updatedAt` with `expireAfterSeconds: 60 * 60 * 24 * 30` and `partialFilterExpression: { status: "dead" }`, so only **dead** jobs are removed, roughly 30 days after their `updatedAt` (when MongoDB’s TTL task runs).
+
+```50:54:src/models/WebhookJob.ts
+// ttl index - dead jobs get auto-purged after 30 days, we dont want mongo filling up with garbage
+WebhookJobSchema.index(
+  { updatedAt: 1 },
+  { expireAfterSeconds: 60 * 60 * 24 * 30, partialFilterExpression: { status: "dead" } }
+);
+```
+
+3. Required fact: Every 5 seconds.
+   Model answer: The webhook worker polls **every 5 seconds** (`5000` ms).
+
+That comes from `POLL_INTERVAL_MS` in `src/jobs/webhookWorker.ts`, which is passed to `setTimeout` in `scheduleNextPoll()` so each poll cycle runs, then the next one is scheduled after that delay:
+
+```6:7:src/jobs/webhookWorker.ts
+const POLL_INTERVAL_MS = 5_000;
+const BATCH_SIZE = 25;
+```
+
+```103:112:src/jobs/webhookWorker.ts
+function scheduleNextPoll(): void {
+  pollTimer = setTimeout(async () => {
+    try {
+      await processWebhookBatch();
+    } catch (err) {
+      logger.error("Webhook worker poll cycle threw", { error: (err as Error).message });
+    } finally {
+      if (isRunning) scheduleNextPoll();
+    }
+  }, POLL_INTERVAL_MS);
+}
+```
+
+So runnable jobs (those with `nextRunAt` in the past, per `processWebhookBatch`) are considered up to **once every five seconds**, not continuously.
+
+4. Required fact: 25 jobs.
+   Model answer: **25** — In `src/jobs/webhookWorker.ts`, `BATCH_SIZE` is set to `25`, and each `processWebhookBatch` run loads at most that many jobs with `.limit(BATCH_SIZE)` before handling them in a loop.
+
+5. Required fact: 408, 429, 500, 502, 503, and 504.
+   Model answer: In `src/webhooks/dispatcher.ts`, the outbound webhook dispatcher treats these HTTP status codes as **retryable**:
+
+**408, 429, 500, 502, 503, 504**
+
+They are defined in `RETRYABLE_STATUS_CODES` and used so that non-2xx responses in that set return `success: false` with a generic error (no “Non-retryable” prefix), which the worker treats as retryable. Other non-2xx responses (for example most 4xx) are treated as non-retryable.
+
+Separately, **thrown errors** (timeouts, DNS, network issues) are also treated as retryable in the `catch` block, but those are not tied to an HTTP status from the response.
+
+6. Required fact: order_stream
+   Model answer: **`order_stream`**
+
+The migration docs state that after the cutover, downstream integrations should use the **`order_stream`** exchange (replacing **`order_events`**). That is also called out in the v1.6.0 release notes as the canonical exchange for downstream integrations.
+
+7. Required fact: Because ALBs were dropping long-lived gRPC streams during scale-in events, while HTTP/1.1 payloads were more resilient in this infrastructure.
+   Model answer: The tracing guide (`docs/guides/tracing-implementation-notes.md`) says **OTLP over HTTP** was chosen instead of the gRPC exporter because of a real incident: **AWS Application Load Balancers were dropping long-lived gRPC streams during scale-in**. In that setup, **HTTP/1.1 OTLP payloads proved more reliable**. The tradeoff called out there is **slightly more payload overhead** in exchange for **not losing trace spans under peak load** when ALBs scale.
+
+8. Required fact: attemptCount is preserved.
+   Model answer: When ops manually retries a dead webhook job (`POST /webhooks/jobs/:id/retry`), **`attemptCount` is intentionally not reset.**
+
+The handler sets `status` to `pending` and `nextRunAt` to now, but leaves `attemptCount` unchanged so retry history stays visible for auditing (`src/routes/webhookAdmin.ts` lines 47–50). The runbook says the same: manual retry does not reset `attemptCount` so operations keeps the retry history.
+
+9. Required fact: The migration guide and the PR/review material both state that only the exchange name changed and order.created stayed the same.
+   Model answer: Here is what the repo actually contains.
+
+## Artifacts that explicitly say `order.created` was not changed
+
+These are **documentation and history records**, not runtime tests or code diffs that assert the routing key.
+
+1. **`docs/migrations/2026-03-12-order-stream-rollout.md`** — Under **What Did Not Change**, it states: *Routing key `order.created` is unchanged*.
+
+2. **`docs/integration/events-migration.md`** — Under **What Did Not Change**, it states the routing key for order creation events *remains `order.created`* (only the exchange name changed).
+
+3. **`docs/runbooks/order-stream-cutover.md`** — The goal is to move exchanges *without changing routing keys or payloads*; preconditions assume binding to `order.created`; steps say to *keep routing key bindings unchanged*; **Do Not Change** includes *Routing keys*.
+
+4. **`history/issues/176-order-stream-exchange-rename.md`** — Requirement: *Preserve routing keys during the rename.*
+
+5. **`history/pull-requests/176-order-stream-rollout.md`** — Scope: *Preserve the `order.created` routing key.*
+
+6. **`history/reviews/176-order-stream-rollout-review.md`** — Author response to the review: *`order.created` is unchanged* (along with exchange type and durability).
+
+Nothing in the search results showed **code** (e.g. constants or tests) that compares old vs new routing keys; the explicit, named proof in this repo is these **written migration/runbook/issue/PR/review** artifacts.
+
+10. Required fact: Because v1.6.0 made order_stream the canonical exchange, so consumers still using order_events would miss new traffic even though the routing key remained order.created.
+   Model answer: Here’s what the repo says.
+
+**Why traffic stops:** From **v1.6.0**, **`order_stream` is the canonical RabbitMQ exchange** for these integrations. The migration only renames the exchange; publishers were updated to use **`order_stream`**, not **`order_events`**.
+
+So if a consumer **still declares/binds to `order_events`**, it is attached to the **old** exchange. **New order-created (and other) messages are published to `order_stream`**, so nothing new arrives on `order_events`.
+
+Relevant lines:
+
+```7:16:docs/integration/events-migration.md
+- T1 (before migration): exchange name `order_events`
+- T2 (after migration): exchange name `order_stream`
+...
+Consumers and publishers still configured for `order_events` will not receive new traffic after the migration. Any integration built from older documentation must be updated to `order_stream`.
+```
+
+```18:20:docs/integration/events-migration.md
+## What Did Not Change
+
+Only the exchange name changed. The exchange type remains `topic`, durability remains `true`, and the routing key for order creation events remains `order.created`.
+```
+
+```7:12:docs/releases/2026-03-15-v1.6.0.md
+- `order_stream` is now the canonical exchange for downstream integrations.
+...
+## Upgrade Notes
+- Consumers using `order_events` should migrate immediately.
+```
+
+**Short answer:** Binding to `order_events` after the cutover means you’re consuming from an exchange the service **no longer publishes new traffic to**; you need to bind to **`order_stream`** (same topic type, durability, and `order.created` routing key).
+
+11. Required fact: Because Stripe signs the raw byte stream, so JSON normalization changes the payload and invalidates stripe-signature verification.
+   Model answer: Here’s what this repo documents:
+
+**Because Stripe’s `stripe-signature` is computed over the exact raw request bytes Stripe sent, not over “logically equivalent” JSON.** Signature verification replays the same HMAC using the webhook secret and the body buffer. If a proxy parses JSON and calls `JSON.stringify` again, you almost always get a **different byte sequence** (key order, whitespace, number formatting, Unicode escapes, etc.), so the computed signature no longer matches the header—even when the parsed object is the same.
+
+The integration guide states this explicitly:
+
+```9:15:docs/integration/webhooks.md
+### ⚠️ Critical: Raw Body Requirement
+
+The Stripe webhook endpoint **must receive the raw, unparsed request body** for signature verification to succeed. This is a hard requirement from Stripe's SDK.
+
+The route is registered in the application **before** `express.json()` middleware, which means `express.json()` does NOT process this route. If you are writing integration tests or a proxy that forwards webhook events, you must send the raw bytes — not a parsed JSON object re-serialized.
+
+Sending a parsed-and-re-stringified body (even if the JSON content is identical) will cause signature verification to fail with a `400` error:
+```
+
+The staging incident summary adds that **authenticity is about byte-level fidelity**, not semantic JSON equality:
+
+```13:21:docs/incidents/2026-03-05-stripe-signature-staging-incident.md
+Stripe signs the original raw bytes. The proxy changed the payload, so the service could no longer validate the `stripe-signature` header.
+...
+Webhook authenticity depends on transport-level fidelity, not just equivalent JSON content.
+```
+
+So: forward the **raw body stream/buffer** unchanged and pass through the `stripe-signature` header; do not parse and re-serialize in the middle.
+
+12. Required fact: The external client should follow the cursor-based contract in docs/integration/pagination.md, because the Swagger page-based block is documented drift from an internal admin flow.
+   Model answer: Here’s what the repo says.
+
+**Use the cursor-based contract** from `docs/integration/pagination.md`: query params `limit` and `cursor` (from the previous response’s `nextCursor`), and responses with `data`, `nextCursor`, and `hasMore`.
+
+Swagger (and related comments) that mention **`page`**, **`limit`**, and **`total`** are **not** what external clients should treat as the released API. The incident note states explicitly that **cursor pagination remains canonical for external clients**, and the page-based Swagger material came from an internal admin branch and **should not be treated as the public contract** (`docs/incidents/2026-03-18-pagination-contract-confusion.md`). The v1.6.0 release notes also call out that public pagination docs and Swagger are not fully aligned yet.
+
+13. Required fact: The dispatcher treats 429 as retryable, so the worker marks the job failed and reschedules it with backoff unless it has already exhausted maxAttempts.
+   Model answer: Here’s what this repo does for **outbound** webhooks (the code lives in the order-management service, not a separate “frontend-only” app).
+
+## What happens on HTTP 429
+
+1. **`dispatchWebhook`** (`src/webhooks/dispatcher.ts`) treats **429 as retryable** (same bucket as 408 and 5xx). It does **not** treat it as a permanent failure: it returns `success: false` with `errorMessage` like `HTTP 429` and logs a warning: *"Webhook got retryable error status"*.
+
+2. **`processWebhookBatch`** (`src/jobs/webhookWorker.ts`) then:
+   - Increments the completed attempt count (`attemptCount + 1`).
+   - Unless the job is **dead**, it **reschedules** the job: `status` → **`failed`**, stores `lastError`, bumps `attemptCount`, and sets **`nextRunAt`** using **`nextAttemptDate`** (exponential backoff with **full jitter** — see `src/webhooks/backoff.ts`).
+   - The worker only moves a job to **`dead`** if **`attemptCount` reaches `maxAttempts`** (default **8** on the model) or the error is explicitly **non-retryable** (messages starting with `"Non-retryable"` — 429 does not).
+
+3. On a later poll (every **5 seconds**), jobs with `status` **`pending`** or **`failed`** and `nextRunAt` in the past are picked up and tried again.
+
+So: **429 → logged as retryable → job stays in the retry loop with backoff until success or max attempts, then `dead` (or manual replay via the admin webhook routes described in the docs).** The system does **not** honor `Retry-After` in code; scheduling is driven only by the internal backoff.
+
+14. Required fact: Only the exchange name changed from order_events to order_stream; the routing key, exchange type, durability, and payload shape stayed the same.
+   Model answer: Here is what this repo’s migration docs say.
+
+## What changed
+
+- **Only the RabbitMQ exchange name:** `order_events` → `order_stream` (see `docs/migrations/2026-03-12-order-stream-rollout.md` and `docs/integration/events-migration.md`).
+- **Operational impact:** Anything still bound to or publishing on `order_events` will not get new traffic after cutover; those bindings/configs must point at `order_stream`.
+
+## What stayed the same
+
+- **Exchange type:** still `topic`
+- **Durability:** still `true`
+- **Routing key:** still `order.created` for the documented order-creation flow
+- **Event payload shape:** unchanged
+- **Cutover intent:** same routing keys and payloads; only the exchange name in configuration changes (`docs/runbooks/order-stream-cutover.md`).
+
+**Note:** `docs/integration/events.md` still lists the old exchange name `order_events` in its table — the migration guides state the canonical name after migration is `order_stream`. The migration doc also mentions that some **internal** RabbitMQ code may still use a hyphenated legacy name (`order-events`) for DLQ-related constants; that is called out as internal, not as the external integration contract.
+
+15. Required fact: Correlation IDs help logs, but they do not automatically propagate full distributed trace context across publish and consume boundaries, which is why the repo added OpenTelemetry header propagation.
+   Model answer: Here’s what this repo says:
+
+**`x-correlation-id` is only a shared label for logs.** It works well when everything is still tied to one HTTP request and Winston logs, but it does **not** carry **OpenTelemetry trace context** (trace/span IDs and parent links).
+
+**Across RabbitMQ, that gap matters:** Without injecting and extracting OTel context on publish/consume, traces **break at the HTTP boundary**. Operators saw the inbound webhook span while RabbitMQ work looked like a **separate, orphaned trace**, so you could not rebuild a **single distributed trace tree** or **timing** for flows like Stripe webhook → RabbitMQ → downstream consumer.
+
+The docs state explicitly that correlation ID stayed useful for **log correlation**, but the missing piece for **proper tracing** was **OpenTelemetry propagation through RabbitMQ message headers**, not the correlation ID alone (`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`, `docs/guides/tracing-implementation-notes.md`, `history/issues/142-rabbitmq-tracing-context-loss.md`).

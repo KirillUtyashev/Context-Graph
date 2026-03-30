@@ -1,0 +1,302 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: Because the failure can come from binding to the wrong exchange after the order_stream migration: the routing key order.created stayed the same, but consumers still using order_events or internal legacy names would miss traffic now published to order_stream.
+   Model answer: Here is a concise answer from **codebase-memory-mcp** only.
+
+## Why a correct routing key might still mean **no** order events
+
+**1. Wrong exchange (most important doc vs code signal)**  
+The runbook and migration notes say downstream should move to the **`order_stream`** exchange and that consumers still on **`order_events`** will not see new traffic after migration (`workspace.docs.integration.events-migration`, `workspace.docs.runbooks.order-stream-cutover`).  
+Integration docs still describe **`order_events`** (`workspace.docs.integration.events`).  
+The RabbitMQ setup code asserts a **`topic`** exchange named **`order-events`** (hyphenated) (`workspace.src.events.rabbitmqSetup.setupRabbitMQ`).  
+
+So if the consumer’s routing key is correct but it is bound to a **different exchange name** than the one the service actually publishes to, it will receive **nothing**, even when the key string matches what you expect.
+
+**2. Events may never be published**  
+`workspace.docs.integration.events` states that publishing is **fire-and-forget**: if RabbitMQ is unavailable (or the channel is not ready), the event can be **dropped** with only logging—order handling can still succeed. In that case there is **no message** for any routing key to match.
+
+**3. Broker / binding reliability**  
+`setupRabbitMQ` documents a **50ms delay** before asserting the main queue because, on a **legacy RabbitMQ 3.8.x** cluster, **bindings right after exchange creation can silently fail**. That can cause **routing** to misbehave independent of whether the routing key string is “correct” on paper.
+
+**4. Topic matching vs “correct key”**  
+The main queue is bound with pattern **`order.*`** (`setupRabbitMQ`). A consumer must use a binding compatible with **topic** rules and the **same** exchange; a key that looks right in isolation is not enough if the **exchange or binding pattern** does not match how messages are published.
+
+**5. Downstream is not the only consumer**  
+Nothing in the indexed snippets guarantees **per-consumer** delivery; if another worker consumes from the **same queue**, your service might see **no** messages even though the key is right (classic shared-queue behavior).
+
+---
+
+**Bottom line from indexed sources:** the usual “routing key is correct but I get nothing” explanations here are **exchange name / migration mismatch**, **silent publish drops**, and **binding/race issues on the broker**—not necessarily an error in the routing key string alone.
+
+2. Required fact: The strongest chain is the public-contract ADR, pagination issue, pagination incident, PR #188, its review thread, the public pagination doc, and the conflicting route annotations; together they show cursor pagination remained canonical while the Swagger block was drift.
+   Model answer: Here is the **artifact chain** the index supports (only from codebase-memory-mcp):
+
+### 1. Which source wins (governance)
+**ADR 004** (`workspace.docs.architecture.004-public-api-contract-sources`) says that for externally supported behavior, **`docs/integration/*` is the canonical contract**, and **Swagger is not authoritative** when it disagrees with those docs.
+
+### 2. Canonical public contract (cursor)
+**`docs/integration/pagination.md`** (`workspace.docs.integration.pagination`) defines **cursor-based** listing: query params `cursor` / `limit`, and response fields **`nextCursor`** and **`hasMore`** (not a `page` / `totalPages` envelope in that doc).
+
+### 3. Explicit reconciliation of the conflict (incident)
+**`docs/incidents/2026-03-18-pagination-contract-confusion.md`** (`workspace.docs.incidents.2026-03-18-pagination-contract-confusion`) **Evidence** ties:
+- integration doc → `cursor`, `nextCursor`, `hasMore`
+- **Swagger comments on `src/routes/orders.ts`** → `page`, `limit`, approximate **`total`**
+
+**Decision** states: for external clients, **cursor pagination is still canonical**; the **page-based Swagger block** should **not** be treated as the released contract.
+
+### 4. What Swagger actually advertised (page-shaped)
+- **Route JSDoc** (`workspace.src.routes`): `GET /api/orders` documents query params **`page`** and **`limit`** and response schema **`#/components/schemas/PaginatedOrders`**.
+- **Shared schema** (`workspace.src.config.swagger.options`): **`PaginatedOrders`** uses a **`pagination` object** with **`page`**, **`limit`**, **`total`**, **`totalPages`**.
+
+Together, **ADR 004 → `docs/integration/pagination.md` → incident decision** is the chain that **asserts** the **public** contract stayed **cursor-based**, while **Swagger (`orders` route + `PaginatedOrders`)** is the **page-based** surface called out as misleading.
+
+**Note from the same index:** `workspace.src.controllers.orderController.listOrders` currently responds with a **page-shaped** `pagination: { page, limit, total, totalPages }` object, so the **documented** “cursor remains canonical” story is carried by **integration + ADR + incident**, not by that handler’s response shape in the snippet you have.
+
+3. Required fact: Because x-correlation-id handles log correlation for the request, but the trace gap investigation, issue #142, tracing notes, PR #143, and publisher code show that full end-to-end tracing requires propagating OpenTelemetry context in RabbitMQ headers, which correlation IDs alone do not provide.
+   Model answer: Here’s a concise answer based only on what **codebase-memory-mcp** returned.
+
+## Why request-level correlation can look fine while RabbitMQ breaks the trace
+
+**They solve different problems.**  
+HTTP `x-correlation-id` is set in middleware and used for **logs and request-level correlation**. That path can succeed for inbound HTTP even when **distributed tracing** across RabbitMQ does not.
+
+**Correlation ID ≠ trace tree.**  
+The investigation notes say that **`x-correlation-id` stayed useful for log correlation but did not restore a proper distributed trace tree**. The gap was **OpenTelemetry propagation through RabbitMQ message headers**, not the presence of a correlation ID on the HTTP side.
+
+**RabbitMQ needs OTel context in headers.**  
+The tracing guide says correlation IDs were enough for **single-service HTTP**, but the app was **“completely blind once the message enters RabbitMQ”** without **OTel context propagation** to tie **Stripe webhook → RabbitMQ → downstream** into one trace.
+
+**Implementation gaps specific to this repo (per investigation).**  
+Operators could see the inbound webhook span but RabbitMQ work looked **orphaned** because:
+
+- Trace context was **not injected into AMQP headers on every publish path**.
+- A **callback-based amqplib path** **lost the active OTel context**, so publish/consume did not carry the same trace as the HTTP handler even when HTTP correlation looked good.
+
+**Summary:** Successful **request-level** correlation (headers + logs) can coexist with **broken end-to-end traces** because traces require **consistent OTel inject/extract** on **all** RabbitMQ publish/consume paths; `x-correlation-id` alone does not rebuild the trace hierarchy in your backend, and missing or dropped OTel context on some AMQP paths explains the gap.
+
+4. Required fact: Because the artifacts show two different failure modes: raw-body corruption causes explicit webhook signature errors and 400 responses, while missing metadata.orderId lets the webhook succeed but leaves the order stuck in PENDING because it cannot be linked back to the order.
+   Model answer: Here’s a concise answer based only on what codebase-memory-mcp returned.
+
+## Why distinguish them?
+
+**They are different failure modes that both leave an order `PENDING`, but they imply different fixes.**
+
+1. **Signature verification failure**  
+   Integration docs tie **HTTP 400** to **invalid / failed webhook signature verification** (`error-handling.md`). The webhooks doc says the handler **must** get the **raw** body; if the body is parsed/re-serialized or otherwise wrong, verification fails with a 400-style webhook error (e.g. signature mismatch message in `webhooks.md`). In that situation the event is **not** treated as a valid Stripe webhook, so the **`payment_intent.succeeded` path that moves an order to `PAID` does not run reliably** from the server’s point of view. Debugging should focus on **raw body**, **`stripe-signature`**, **`STRIPE_WEBHOOK_SECRET`**, proxies/tests—not on order metadata.
+
+2. **Missing `PaymentIntent` metadata**  
+   `webhooks.md` states that on `payment_intent.succeeded` the service updates the order to **`PAID` using `orderId` from `paymentIntent.metadata`**, and that **without** that metadata the handler **cannot find the order**, so status **stays `PENDING` indefinitely**. Here the webhook can be **verified and processed**, but the **link from Stripe’s payment to your order is missing**. The fix is on the **client/payment creation**: attach `metadata.orderId` (the id from `POST /api/orders`) when creating the `PaymentIntent`.
+
+**Summary:** Signature problems point to **webhook delivery/verification plumbing** (nothing trustworthy reaches the handler). Missing metadata points to **payment creation** (event arrives but **no `orderId` to update**). `order-statuses.md` also notes `PENDING` can appear briefly even after payment due to **eventual consistency**, so knowing whether the issue is **verification vs. metadata** avoids misreading that as “still paying” when the real bug is config vs. transport.
+
+5. Required fact: Because the issue, PR #254, review notes, audit feature doc, audit service, and orderService hotfix all frame it as a defensive propagation improvement while explicitly preserving the best-effort, non-blocking audit model.
+   Model answer: Here is what **codebase-memory-mcp** shows, without reading files directly.
+
+### What the “audit correlation” fix actually did
+
+In `updateOrderStatus`, the code documents a **correlation ID bugfix**: `correlationId` could still be `undefined` even when middleware set it, so the fix adds `safeCorrelationId = correlationId || (global as any).__CORRELATION_ID__` before calling `logOrderStateChange`. That only improves **whether the correlation ID is present on the audit row**, not whether the write **must** succeed.
+
+### What the audit “guarantee model” is (unchanged)
+
+`docs/features/audit-logging.md` still defines the model as:
+
+- Logs are **write-only**, but failures are **non-blocking**.
+- A stated tradeoff: **no strict guarantee of log write (best-effort)**.
+
+`logOrderStateChange` matches that: it wraps `AuditLog.create` in **try/catch**, logs errors, and **never throws** (“Observability must never break business logic”).
+
+### Why the hotfix did not change the guarantee model
+
+The hotfix is scoped to **correlation propagation** into `logOrderStateChange`. It does **not** make audit writes blocking, does **not** add a stronger durability guarantee, and does **not** change the documented best-effort / non-blocking policy. So the **guarantee model** of audit logging (best-effort, non-blocking) stayed the same by design; only **correlation completeness** on successful best-effort writes was addressed.
+
+6. Required fact: Because the worker rescheduled retries using the stale stored attemptCount instead of the completed attempt number, so backoff lagged behind the real attempt progression until the completedAttemptCount fix shipped in v1.6.1.
+   Model answer: Here is what the indexed codebase (investigation doc, release notes, and `processWebhookBatch`) says.
+
+## Why retries looked “too fast” in staging before v1.6.1
+
+**Root cause:** The worker scheduled the **next run** using the **old** `attemptCount` on the job document (the value **before** the attempt that had just finished). Backoff should use how many attempts have **actually completed** after a failed delivery.
+
+So the **next retry delay was one step too low** on the backoff table (e.g. first failure was treated like attempt 0 for scheduling instead of the first completed failure → attempt 1). That made retries land **sooner** than the documented backoff curve.
+
+**Why it showed up in staging:** Receivers compared **`X-Attempt-Number`** (which correctly reflected `attemptCount + 1` in the dispatcher) with the **reschedule delay** and saw they **did not match**—the investigation calls out that mismatch; the bug was **not** the jitter formula but **when** an attempt was considered complete for scheduling.
+
+**v1.6.1:** Release notes state that **v1.6.1** fixed webhook retry scheduling so **completed attempt counts** drive **both** backoff and dead-letter logic, aligning behavior with the backoff table.
+
+The worker’s own comment in `processWebhookBatch` states the prior bug: using `attemptCount` for `nextAttemptDate` **before** bumping to the completed count made **attempt 0 schedule like attempt 1** in the wrong sense—all delays **one slot off**, which matches “retries coming in too fast” relative to the intended table.
+
+7. Required fact: The retry investigation says the mismatch came from when an attempt was treated as completed, issue and PR #241 describe the stale-count bug, the worker code shows completedAttemptCount, and backoff.ts preserves the jitter formula rather than changing it.
+   Model answer: Here is what the **codebase-memory** index shows, based only on those snippets.
+
+### Explicit conclusion (not jitter)
+
+The investigation module’s **Conclusion** section states directly that the problem was **not** the jitter formula: the issue was **when** the worker considered an attempt finished (`workspace.docs.investigations.2026-03-20-webhook-retry-timeline.Conclusion`).
+
+### Timeline evidence (stale counts vs. what ops saw)
+
+The same doc’s **Timeline Reconstruction** explains the observable mismatch:
+
+1. A job failed on the first delivery attempt.  
+2. The worker recorded the failure.  
+3. The **next retry time was computed from a stale stored `attemptCount`**.  
+4. The dispatcher still showed the human-visible attempt as **`attemptCount + 1`**.  
+5. Ops compared that header to the reschedule delay and saw they **did not line up**.
+
+That story is about **bookkeeping and ordering** (stored count vs. displayed count vs. schedule), not about how jitter is computed.
+
+### Code-level evidence (ordering of attempt count)
+
+`workspace.src.jobs.webhookWorker.processWebhookBatch` includes comments that the bug was using **`job.attemptCount + 1` after** it had already been used for scheduling, so **attempt 0 was scheduled as if it were attempt 1** (“all delays were one slot off”), with staging showing retries **too fast**. The fix described there is to derive **`completedAttemptCount`** and use it consistently for reschedule (`nextAttemptDate(completedAttemptCount)`), success updates, and dead-letter—again pointing at **which attempt index drives backoff**, not at changing the jitter math.
+
+### Release note alignment
+
+`workspace.docs.releases.2026-03-21-v1.6.1.Fixes` summarizes the fix as making **completed attempt counts** drive **both** backoff and dead-letter decisions—i.e. correcting **attempt accounting**, not replacing the jitter formula.
+
+**Summary:** The indexed docs explicitly exclude the jitter formula; the timeline and worker comments tie the bug to **stale/wrong-phase `attemptCount` use** and **header vs. delay mismatch**, while the fix narrative centers on **completed attempt count** driving scheduling and terminal states.
+
+8. Required fact: Issue/PR/review #233 plus the webhook docs describe the missing metadata.orderId path where delivery can succeed but the order stays PENDING, while issue #87 and the staging incident describe the distinct bad-signature path that returns an explicit webhook error.
+   Model answer: Here is what **codebase-memory-mcp** supports about how those two issues differ, in terms of **where things break** and **which artifacts belong to each path**.
+
+## PaymentIntent metadata-linking
+
+Indexed content describes this as a **client / integration contract** problem: the Stripe `PaymentIntent` must carry the order id in **`metadata.orderId`** (from `POST /api/orders`). The webhook uses that field on `payment_intent.succeeded` to move the order to **PAID**. If it is missing, the handler **cannot resolve the order**, so the order can stay **`PENDING`** even though payment succeeded.
+
+**Artifact chain (data / domain):**  
+create order → include returned **`_id`** in **`PaymentIntent.metadata.orderId`** → **`payment_intent.succeeded`** → read **`orderId` from `paymentIntent.metadata`** → update order status.
+
+Relevant indexed doc: `workspace.docs.integration.webhooks` (`docs/integration/webhooks.md`), especially the table row for `payment_intent.succeeded` and the “Linking Payments to Orders” section.
+
+## Stripe signature-verification
+
+Indexed content describes this as a **transport / byte-fidelity** problem: Stripe signs the **original raw body bytes**. Anything that **parses JSON and re-serializes** the payload (e.g. a **proxy**) changes the bytes, so verification of the **`stripe-signature`** header fails. The incident note adds: proxy parsed `application/json` and re-serialized before forwarding; mitigation included bypassing that transform for `/api/webhooks/stripe` and relying on **`express.raw({ type: 'application/json' })`** for the route.
+
+**Artifact chain (HTTP / crypto):**  
+request to **`POST /api/webhooks/stripe`** → **unchanged raw body** + **`stripe-signature`** header → verification against **`STRIPE_WEBHOOK_SECRET`** → only then does handler logic run. Failure here is **`400` / signature mismatch**, not “missing metadata.”
+
+Relevant indexed artifacts: `workspace.docs.integration.webhooks` (raw body requirement, error message), `workspace.docs.incidents.2026-03-05-stripe-signature-staging-incident` (proxy trigger, root cause, mitigation), and `workspace.src.routes.webhooks` (`express.raw` on `/stripe`).
+
+## How to tell them apart (one line)
+
+- **Metadata-linking:** signature can succeed; failure is **missing `orderId` in `paymentIntent.metadata`** when creating the PaymentIntent (domain link between Stripe and your order).  
+- **Signature verification:** failure is **before** order lookup — **body bytes** no longer match what Stripe signed (proxy/middleware), so **`stripe-signature` verification** fails.
+
+Both can leave orders stuck in **`PENDING`** in symptoms, but the indexed incident text ties the **signature** case to **webhook verification / proxy body handling**; the indexed integration doc ties **metadata** to **PaymentIntent creation** and **`paymentIntent.metadata`**.
+
+9. Required fact: Because the missing metadata.orderId bug is a linkage failure, not a delivery failure: the webhook can be received successfully, but without the orderId it cannot map the payment back to an order and the order stays PENDING.
+   Model answer: Here is a concise answer based only on what **codebase-memory-mcp** returned.
+
+## Why Stripe can show success while the order stays `PENDING` with no signature error
+
+**1. Payment success and order status are not the same step**  
+Integration docs describe `PENDING` as “payment not yet confirmed” and `PAID` as “payment confirmed via Stripe webhook.” They also state explicitly that **an order can stay `PENDING` briefly even after the customer has finished paying**, because status is updated asynchronously (e.g. poll or subscribe to updates rather than treating the create response as final).
+
+**2. The webhook path that moves `PENDING → PAID` may never run correctly for that payment**  
+Docs say `payment_intent.succeeded` should set the order to `PAID` using **`orderId` from `paymentIntent.metadata`**. If that metadata is missing or wrong, **the handler cannot tie the event to the order**, and the status **can remain `PENDING` indefinitely** — with no need for a signature failure.
+
+**3. “No signature error” fits the indexed handler**  
+The indexed `handleStripeWebhook` implementation only checks that a `stripe-signature` header exists and then returns `{ received: true }`; it notes that **real verification would use the Stripe SDK** but that is still a **TODO**. With that pattern, **cryptographic signature mismatch errors from the SDK would not appear**, because that verification is not shown as implemented in the snippet you get from the graph.
+
+**4. When signature *would* fail (and you’d see errors)**  
+Separate docs describe failures when the **raw body** is altered (e.g. re-serialized JSON through a proxy). That scenario is tied to **signature verification failing** — the opposite of “no signature error.” The staging incident note points at **payload modification** breaking verification, which would produce errors, not silence.
+
+**Bottom line from this repo’s docs + indexed code:** Stripe can succeed in its own system while the order stays `PENDING` because confirmation is **asynchronous** and depends on a **correct webhook-driven update** (including **`orderId` in metadata**). Lack of signature errors is consistent with **stubbed or non-crypto verification** in the indexed handler and/or with **never reaching a failing verification path** (e.g. header present, handler returns 200 without updating the order).
+
+10. Required fact: Because the issue, PR #254, and its review explicitly frame the change as a defensive correlation-propagation patch, while the audit feature doc and audit service keep audit writes best-effort and non-blocking rather than required for business success.
+   Model answer: Here is what the indexed codebase supports.
+
+## Why the audit correlation hotfix helps traceability
+
+The change is in `updateOrderStatus`: a **BUGFIX** notes that **`correlationId` could still be `undefined` even when middleware set it**. The fix is to set  
+`safeCorrelationId = correlationId || (global as any).__CORRELATION_ID__`  
+and pass that into `logOrderStateChange`. That way audit rows get a **`correlationId` more reliably**, so logs can be tied to a request/trace (the feature doc says correlation ID is for **tracing across services**). That is **linking and lookup** (traceability), not a guarantee that the audit write and the order update succeed or fail together.
+
+## Why this does not make audit logging “transactional”
+
+Audit logging is explicitly **best-effort and non-blocking**: `logOrderStateChange` **swallows errors** and **must not throw**, so business logic (e.g. saving the order) is not rolled back if audit fails. The design doc calls out tradeoffs: **no strict guarantee of log write**, failures are **non-blocking**.  
+
+So the hotfix only improves **which identifier gets stored** when a row is written; it does **not** put the order update and the audit insert in one atomic transaction. Transactional audit would mean coupling those writes (and likely different failure semantics), which this stack deliberately avoids.
+
+**Summary:** The hotfix improves **correlation ID propagation** into audit records (better tracing); **transactional** audit would require **atomic coupling** with the business write, which conflicts with the **non-blocking, best-effort** audit design.
+
+11. Required fact: Because the drift issue, incident, PR #188, review thread, and ADR 004 all say the Swagger block came from an internal admin flow, while docs/integration/pagination.md remains the authoritative external contract.
+   Model answer: Here is what the indexed docs say, and why Swagger’s page-based block should be ignored for **external** pagination debugging.
+
+## Canonical contract is integration docs, not Swagger when they disagree
+
+ADR 004 says that for externally supported API behavior, **`docs/integration/*` is the canonical contract**, and that **Swagger is only a hint**: if it conflicts with the published integration docs, it is **not** authoritative for external clients.
+
+```17:20:docs/architecture/004-public-api-contract-sources.md
+For externally supported API behavior:
+1. `docs/integration/*` is the canonical contract.
+...
+3. Swagger annotations are useful hints, but if they conflict with the published integration docs they are not authoritative for external clients.
+```
+
+## Why the Swagger “page” block is misleading here
+
+An incident record explains the mismatch: integration docs describe **cursor** pagination (`cursor`, `nextCursor`, `hasMore`), while **Swagger comments on the orders route** describe **`page`**, **`limit`**, and approximate **`total`**. The recorded **decision** is that for external clients, **cursor pagination remains canonical**, and the **page-based Swagger text came from an internal admin branch** and **must not** be treated as the released contract.
+
+```13:15:docs/incidents/2026-03-18-pagination-contract-confusion.md
+## Decision
+For external clients, cursor pagination is still canonical. The page-based swagger block came from an internal admin branch and should not be treated as the released contract.
+```
+
+So an engineer debugging **external** clients should **trust `docs/integration/pagination.md` (and related integration guides)** for the real contract—**cursor-based** parameters and response fields—and treat the **page-based Swagger block** as **non-canonical** drift, not the shipped behavior for public integrations.
+
+12. Required fact: Because the migration changed the exchange name, not the routing key. The issue, PR, review, migration guide, release notes, and cutover runbook all show that a consumer still bound to order_events or a copied legacy internal name will miss traffic that now goes to order_stream.
+   Model answer: Here is what the indexed material supports.
+
+## Why a “correct” routing key can still miss `order-created` events
+
+From **`docs/integration/events-migration`** (via CBM):
+
+1. **Wrong exchange** — Traffic moved from **`order_events`** (before) to **`order_stream`** (after). The doc states explicitly that consumers still using the old exchange **do not get new messages** after the migration. In RabbitMQ, the routing key only matters **after** you are on the correct exchange: a queue must be bound to **the exchange the publisher actually publishes to**. If the binding is still on `order_events` while the service publishes to `order_stream`, you will see **no** new `order.created` messages even if the routing key string is correct.
+
+2. **What the doc says did not change** — Exchange type (`topic`), durability, and the routing key for order creation (**`order.created`**) stayed the same; **only the exchange name changed**. So “we have the right routing key” is not sufficient if the **exchange** in the consumer config wasn’t updated to **`order_stream`**.
+
+**Bottom line:** Missing events after the migration, despite using `order.created`, is explained by **still consuming from / binding to the pre-migration exchange** (`order_events`) instead of the current one (`order_stream`).
+
+13. Required fact: Because correlation IDs only preserved request-level log traceability. The investigation, issue #142, tracing notes, PR #143, and publisher code show that end-to-end distributed traces across RabbitMQ required OpenTelemetry context injection into message headers.
+   Model answer: Here is what the indexed investigation doc says (from `get_code_snippet` on `workspace.docs.investigations.2026-03-14-rabbitmq-trace-gap`):
+
+**Why correlation IDs alone were not enough**
+
+- **Different job than tracing:** HTTP already carried `x-correlation-id`, and that still helped **tie logs together**, but it did **not** rebuild a **single distributed trace** (parent/child spans) across the webhook → RabbitMQ hop.
+- **Where the gap was:** Trace context was **not injected into RabbitMQ message headers on every code path**, and **one callback-style `amqplib` path dropped the active trace context**. So downstream RabbitMQ work showed up as an **orphaned trace** next to the inbound Stripe webhook span.
+- **Conclusion:** The investigation says the fix is **OpenTelemetry propagation through RabbitMQ headers**, not only propagating a correlation ID string.
+
+So: **correlation IDs ≠ trace propagation**; without OTel context in (every) publish path, you get log correlation but not a proper trace tree.
+
+14. Required fact: Because the replay workflow is designed as an operational retry, not as a semantic reset. The runbook, admin route, PR/review #241, and WebhookJob model preserve attempt history so operators can replay a job without erasing provenance needed for debugging.
+   Model answer: Here is what the indexed backend code shows.
+
+## Why `attemptCount` is kept on manual replay
+
+Manual replay is implemented on **`POST /webhooks/jobs/:id/retry`** in the webhook admin router. After loading the job, the handler only:
+
+- sets **`status`** to `"pending"`
+- sets **`nextRunAt`** to now  
+
+and it **does not** clear **`attemptCount`**. The implementation states the reason explicitly:
+
+> **intentionally NOT resetting attemptCount so we have audit trail of how many times it's been tried**
+
+So the design choice is **auditability**: the job document keeps a running count of how many delivery attempts have completed, and manual retry is treated as “queue it again,” not “start a brand-new delivery with a clean slate.”
+
+## What this means for “delivery history”
+
+The `IWebhookJob` model exposes fields such as **`attemptCount`**, **`lastError`**, **`lastAttemptAt`**, etc.—there is no separate “delivery history” store in what was retrieved; that history is effectively **the current fields on the same job**. The manual retry path does not reset those fields (only status/next run), so **`attemptCount` in particular stays** so operators still see **how many tries have already happened** after a manual replay.
+
+The worker updates **`attemptCount`**, **`lastError`**, **`status`**, and **`nextRunAt`** (and related fields) when it processes each attempt; manual retry only re-queues without wiping the prior attempt count, per the comment above.
+
+15. Required fact: Because Stripe verifies the original raw bytes, not a parsed JSON object. The proxy can re-serialize the body, changing the payload that stripe-signature covers, which is why the route keeps express.raw and the PR/review call out raw-body guardrails.
+   Model answer: From the indexed incident note (`workspace.docs.incidents.2026-03-05-stripe-signature-staging-incident`), Stripe signs the **original raw request body bytes**. If an edge proxy (or similar) **parses JSON and re-serializes** it before forwarding, the byte sequence usually **no longer matches** what Stripe signed—even when the decoded JSON is the same. Verification uses that signed payload together with the `stripe-signature` header, so any change in **transport-level fidelity** (whitespace, key order, number formatting, encoding) breaks the check. The doc’s takeaway is that authenticity depends on **byte-for-byte fidelity**, not only on equivalent JSON content.
