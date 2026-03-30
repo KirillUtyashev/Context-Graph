@@ -1,0 +1,13 @@
+1. HIT
+2. HIT
+3. HIT
+4. HIT
+5. HIT
+6. HIT
+7. HIT
+8. MISS
+9. HIT
+10. HIT
+11. HIT
+12. HIT
+13. HIT

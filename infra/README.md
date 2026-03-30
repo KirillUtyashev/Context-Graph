@@ -15,38 +15,31 @@ This directory provisions AWS infrastructure for the Context Graph.
 - Neptune (Gremlin) inside the VPC
   - For storing the graph itself
 - EC2 `t3.micro` MCP server instance
-  - Public ingress on port `8000` (course-project-simple)
+  - Public ingress on port `8000`
   - Managed via SSM (no SSH keys needed)
 - 2 AWS Lambda functions with Lambda Function URLs (no API Gateway)
   - `augment`: GitHub webhook receiver / augmentation entrypoint
   - `retrieve`: Called by the tool to traverse the graph
   - `bedrock-proxy`: Public internet endpoint that calls Bedrock with HTTP Basic Auth
-    - Mostly for manual calling
 
 ## Lambda source code location + deployment
 
-Lambda source lives outside `infra/`:
-
-- `lambda_augment/`
-- `lambda_retrieve/`
-- `lambda_bedrock_proxy/`
-
-Terraform packages these directories when you run `terraform apply`.
-
-We also include a GitHub Actions workflow (`.github/workflows/deploy-lambdas.yml`) that can redeploy Lambda code on push (defaults to `dev`), or via manual dispatch for `prod`.
+The Terraform stacks still contain legacy lambda references. This repo no longer ships a matching
+top-level lambda source tree or deploy workflow, so lambda deployment should be treated as a
+follow-up cleanup/migration task rather than a working source of truth.
 
 ## MCP server code location + deployment
 
 The MCP server app code lives outside `infra/`:
 
-- `mcp_server/` (FastAPI app)
+- `mcp_server/` (standalone MCP app)
 
 Terraform only provisions the EC2 instance + systemd unit + SSM permissions.
 
 Deployment happens via GitHub Actions + SSM:
 
 - `.github/workflows/deploy-mcp-server.yml`
-  - On push to `main` touching `mcp_server/**`: deploys **dev**
+  - On push to `main` touching `mcp_server/**` or `context_graph/**`: deploys **dev**
   - Manual dispatch can deploy **prod**
 
 ## Remote Terraform state (one-time bootstrap)
@@ -165,5 +158,5 @@ curl -u "<user>:<pass>" \
 
 ## Notes
 
-- Neptune is VPC-only, so we query it from the EC2 MCP instance or from VPC-attached Lambdas.
-- Aurora is private, so we connect to it from the EC2 MCP instance (or later via a dedicated bastion)
+- Neptune is VPC-only, so queries run from the EC2 MCP instance or from VPC-attached Lambdas.
+- Aurora is private, accessible from the EC2 MCP instance.

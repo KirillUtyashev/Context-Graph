@@ -1,0 +1,284 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: The webhooks doc and issue #233 describe the missing metadata linkage problem, while the staging incident, issue #87, and error-handling doc describe a distinct signature-failure path that returns a webhook error.
+   Model answer: Here is what **codebase-memory-mcp** returns; it is enough to keep **missing `metadata.orderId`** separate from **Stripe signature / verification** problems.
+
+### 1. `docs/integration/webhooks.md` (`workspace.docs.integration.webhooks`)
+
+This single doc draws the line in two places:
+
+- **Signature pipeline:** It says the endpoint must get the **raw, unparsed body**. If something parses and re-serializes JSON, verification fails with a **400** and an error like:  
+  `Webhook Error: No signatures found matching the expected signature for payload`.  
+  It also documents the **`stripe-signature`** header and verification against **`STRIPE_WEBHOOK_SECRET`**.
+
+- **Missing `metadata.orderId`:** Under “Linking Payments to Orders” it requires `metadata.orderId` on the PaymentIntent. **Without it**, the handler **cannot find the order** and status stays **`PENDING` indefinitely** — a **business/linking** outcome, not the signature error above.
+
+Together, those sections tie **signature failures** to **raw body + header verification**, and **missing order id** to **order lookup / stuck PENDING**.
+
+### 2. `src/controllers/webhookController.ts` — `handleStripeWebhook` (`workspace.src.controllers.webhookController.handleStripeWebhook`)
+
+The handler checks **`stripe-signature` first** and returns **400** with **`Missing stripe-signature header`** if it is absent. That is an **HTTP/header** failure mode, separate from “we verified the event but have no `orderId` in metadata” (which the integration doc describes as a later, application-level issue).
+
+### 3. (Optional reinforcement) `docs/incidents/2026-03-05-stripe-signature-staging-incident.md`
+
+The incident text says signature broke because a **proxy changed the raw payload** before the service — i.e. **transport / raw-byte fidelity**, not missing **`metadata.orderId`**.
+
+---
+
+**Short answer:** The pair that most clearly **defines** the distinction is **`docs/integration/webhooks.md`** (signature vs metadata sections) plus **`handleStripeWebhook`** (early `stripe-signature` check). The **Stripe signature incident** doc adds a third artifact that **reinforces** signature issues as raw-body/proxy problems, not metadata gaps.
+
+2. Required fact: The auth doc introduces x-correlation-id, the trace-gap investigation and tracing PR show why correlation context matters across RabbitMQ, the audit hotfix preserves it for audit rows, and the replay runbook tells operators to carry the original correlation ID during manual retries.
+   Model answer: Here is an **artifact chain** that codebase-memory-mcp supports, tying **audit**, **tracing**, and **webhook delivery / retries (“replay”)** to **correlation context** (not only business payloads).
+
+### 1. Correlation context is established on the HTTP path  
+`workspace.src.middlewares.correlationId.correlationIdMiddleware` reads `x-correlation-id` or generates one, sets it on the request and response. That is the shared **correlation context** for inbound HTTP.
+
+### 2. Audit persists that context with business state  
+`workspace.src.services.orderService.updateOrderStatus` passes `correlationId` (with a documented fallback) into `workspace.src.services.auditService.logOrderStateChange`, which writes `correlationId` into `AuditLog.create` together with order state fields. So audit rows are explicitly **correlation-linked**, not only “what changed” in the domain.
+
+### 3. Tracing docs argue logs-only correlation is insufficient for full traces  
+`workspace.docs.guides.tracing-implementation-notes` contrasts Winston correlation IDs on HTTP with **OpenTelemetry context propagation** across async boundaries (e.g. Stripe → RabbitMQ → other services).  
+`workspace.docs.investigations.2026-03-14-rabbitmq-trace-gap` states that **`x-correlation-id` helps log correlation** but does **not** rebuild a proper distributed trace tree without **OTel propagation** (e.g. through message headers). That supports the idea that **observability needs preserved context propagation**, not only business/event data.
+
+### 4. Webhook jobs store correlation and reuse it on every dispatch / retry  
+`workspace.src.models.WebhookJob.IWebhookJob` includes `correlationId` (“so we can trace it through logs”).  
+`workspace.src.webhooks.webhookService.enqueueWebhook` persists `correlationId` on the job.  
+`workspace.src.jobs.webhookWorker.processWebhookBatch` reloads jobs and calls `workspace.src.webhooks.dispatcher.dispatchWebhook`, which puts `correlationId` in logging context and sends **`X-Correlation-Id`** on the outbound HTTP call—so **retries** still carry the same correlation identity, not a fresh one derived only from `payload`.
+
+**Summary:** The chain is **middleware (HTTP correlation) → audit (`AuditLog.correlationId`) → tracing docs (correlation vs OTel context across queues) → webhook model + enqueue + worker + dispatcher (persisted `correlationId` through retries and outbound headers)**. Together, those artifacts show all three areas **thread or document correlation-style context**; tracing text in particular separates **log correlation IDs** from **full trace propagation**, which is why “only business data” is not enough for end-to-end tracing.
+
+3. Required fact: After ADR 004 and PR #188, the repo explicitly formalized that docs/integration/pagination.md is the canonical external source and the Swagger block is non-authoritative drift.
+   Model answer: Here is what **codebase-memory** shows about how the **canonical external pagination contract** is framed after the contract-source ADR and the clarification work.
+
+## What actually “changed”
+
+The indexed content does **not** show `docs/integration/pagination.md` switching to a different pagination scheme. That file still describes **cursor** pagination (`cursor`, `nextCursor`, `hasMore`, etc.), and the incident explicitly says **cursor pagination remains canonical for external clients**.
+
+What **did** change is **which artifacts define the external contract and how conflicts are resolved**:
+
+1. **`docs/architecture/004-public-api-contract-sources.md` (ADR 004)**  
+   - States that **`docs/integration/*` is the canonical contract** for externally supported API behavior.  
+   - Says **Swagger is only a hint** and is **not** authoritative vs integration docs when they conflict; runbooks are not client contracts; release notes can supersede older integration guidance when they announce a migration.  
+   - So the “definition” of the external contract **moved under a explicit source-of-truth rule** rather than being implied by whichever file a reader opened first.
+
+2. **`docs/incidents/2026-03-18-pagination-contract-confusion.md` (clarification)**  
+   - **Evidence**: contrasts **`docs/integration/pagination.md`** (cursor / `nextCursor` / `hasMore`) with **Swagger on `src/routes/orders.ts`** (`page`, `limit`, approximate `total`).  
+   - **Decision**: for **external** clients, **cursor pagination stays canonical**; the page-based Swagger block is attributed to an **internal/admin** context and **must not** be treated as the released contract.  
+   - This is the artifact that **records the clarification** after the conflict.
+
+3. **`docs/integration/pagination.md`**  
+   - This is the **concrete pagination contract** (parameters and response shape) that ADR 004 points to as part of **`docs/integration/*`**. In the index it matches the duplicate under `Eval Files/pagination.md`; CBM does not expose git history, so we cannot assert file edits from CBM alone—only that it is the **canonical integration** description of cursor pagination.
+
+## Short answer
+
+The artifacts that show how the **repo’s story about the canonical external pagination contract** evolved after ADR + clarification are:
+
+| Artifact | Role |
+|----------|------|
+| **`docs/architecture/004-public-api-contract-sources.md`** | Defines **hierarchy**: integration docs = canonical external contract; Swagger/runbooks positioned relative to that. |
+| **`docs/incidents/2026-03-18-pagination-contract-confusion.md`** | **Clarification**: documents cursor vs page **conflict** and fixes **external** expectation on **cursor**; references integration doc vs `orders` route Swagger. |
+| **`docs/integration/pagination.md`** | The **canonical integration** text for cursor pagination under the new ADR rule (same content as indexed `Eval Files/pagination.md`). |
+
+**`src/routes/orders.ts`** appears in the incident as the **non-canonical** Swagger side of the story; the snippet returned by CBM for that file only shows the **POST** `/api/orders` Swagger block (lines 1–51), not the list/pagination block the incident cites—so CBM does not fully display that conflicting comment in the returned snippet.
+
+4. Required fact: The tracing investigation, issue #142, tracing notes, PR #143, publisher code, and v1.6.0 release notes show the update from correlation-ID-only observability to RabbitMQ OpenTelemetry propagation while still keeping correlation IDs.
+   Model answer: Here is what **codebase-memory-mcp** shows.
+
+## Artifact chain
+
+The shift from **correlation-ID-only** tracing to **explicit RabbitMQ trace context** (OpenTelemetry on message headers) is documented as this sequence:
+
+1. **`history/issues/142-rabbitmq-tracing-context-loss.md` (Issue #142)** — Problem: traces stop at HTTP; `x-correlation-id` is not enough once work leaves the process; RabbitMQ publishes lacked OTel propagation; one amqplib callback dropped the active context. Plan: initialize the OTel Node SDK, inject on publish, extract on consume, keep correlation ID where useful.
+
+2. **`history/pull-requests/143-otel-rabbitmq-context.md` (PR #143)** — Merged 2026-03-01: OTel Node SDK, inject active trace context into RabbitMQ publish headers, extract on the consumer, OTLP HTTP choice documented; reviewer note to **keep** `x-correlation-id` for logs.
+
+3. **`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`** — Ties the story together: inbound Stripe span vs orphaned RabbitMQ work; `x-correlation-id` for logs but not a full trace tree; missing piece = **OTel propagation through RabbitMQ headers**. **Related artifacts** it lists: Issue #142, PR #143, `src/events/publisher.ts`, and the tracing implementation notes.
+
+4. **`docs/guides/tracing-implementation-notes.md`** — Rationale: Winston correlation IDs were fine for single-service HTTP, but the team was **blind after RabbitMQ**; OTel propagation covers **Stripe webhook → RabbitMQ → downstream** as one flow.
+
+So the chain that **captures that narrative** is: **Issue #142 → PR #143 → the 2026-03-14 investigation (plus cross-links to `publisher.ts` and tracing notes)**. The investigation doc is the explicit “index” that names Issue #142, PR #143, and the code/docs that complete the picture.
+
+5. Required fact: The retry investigation, issue #241, PR and review, worker code, and v1.6.1 release notes document the change from stale attemptCount scheduling to completedAttemptCount scheduling.
+   Model answer: Here is the **artifact chain** the index ties together for the move from **stale `attemptCount` retry scheduling** to **completed-attempt scheduling** (only from codebase-memory-mcp output).
+
+### 1. Problem narrative — investigation doc  
+**`docs/investigations/2026-03-20-webhook-retry-timeline.md`** (`workspace.docs.investigations.2026-03-20-webhook-retry-timeline`) describes the bug: the next retry was computed from a **stale stored `attemptCount`**, while the dispatcher exposed the human-visible attempt as **`attemptCount + 1`**, so ops saw a mismatch. It concludes the issue was **when** the worker treated an attempt as completed, and points to **`src/jobs/webhookWorker.ts`**, **`src/webhooks/dispatcher.ts`**, and **`docs/releases/2026-03-21-v1.6.1.md`**.
+
+### 2. Code change — worker  
+**`processWebhookBatch`** in **`src/jobs/webhookWorker.ts`** (`workspace.src.jobs.webhookWorker.processWebhookBatch`) implements the fix: define **`completedAttemptCount = job.attemptCount + 1`** and use it for success/dead-letter updates, **`nextAttemptDate(completedAttemptCount)`** for backoff, and logging—inline comments say the old behavior used **`+ 1` after** using the count for scheduling, which made delays one slot off.
+
+### 3. Consistency check — dispatcher  
+**`dispatchWebhook`** in **`src/webhooks/dispatcher.ts`** uses **`job.attemptCount + 1`** for **`X-Attempt-Number`** and logging—matching the investigation’s “header vs delay” story.
+
+### 4. Packaged record — release notes  
+**`docs/releases/2026-03-21-v1.6.1.md`** — section **`Fixes`** (`workspace.docs.releases.2026-03-21-v1.6.1.Fixes`) states that webhook retry scheduling was fixed so **completed attempt counts** drive **backoff and dead-letter** decisions; **`Operational Notes`** mentions admin manual retries and **`attemptCount`**.
+
+**In order:** investigation → worker fix (`completedAttemptCount` / `nextAttemptDate`) → dispatcher alignment → release **`2026-03-21-v1.6.1`**. That is the chain the repository uses to document and implement the stale-attempt → completed-attempt scheduling update.
+
+6. Required fact: The rename issue records the three-name confusion, the migration guide and PR rollout establish order_stream as canonical, the review and release notes acknowledge internal leftovers, and rabbitmqSetup.ts still contains the legacy hyphenated constants.
+   Model answer: Here is what **codebase-memory** returns as the artifact chain that describes that evolution.
+
+## Artifact chain
+
+1. **`history/issues/176-order-stream-exchange-rename.md`** (Issue **#176**)  
+   - Frames the problem: three names in play — `order_events`, `order-events`, and `order_stream` — and the decision to align with `<domain>_stream` → **`order_stream`**.  
+   - **Rollout notes** call out doc phases (T1: docs said `order_events`; T2: docs say `order_stream`) and state that **internal DLQ code may still use the hyphenated legacy name `order-events`** until topology constants are centralized.
+
+2. **`history/pull-requests/176-order-stream-rollout.md`** (PR **#176**, merged **2026-03-12**)  
+   - Declares **`order_stream` as the canonical exchange** for new consumers (replacing `order_events` in the integration contract).  
+   - **Non-goals:** explicitly **does not** rewrite every internal reference to the **legacy hyphenated DLQ topology**.
+
+3. **`docs/migrations/2026-03-12-order-stream-rollout.md`** (migration guide)  
+   - **Before → after:** exchange name **`order_events` → `order_stream`**, with routing keys, type, durability, and payload unchanged.  
+   - **“Warning About Legacy Internal Names”:** some internal RabbitMQ setup still uses **`order-events`** for **DLQ topology constants**; those are **implementation leftovers**, not the external contract.
+
+Together, **Issue #176 → PR #176 → `docs/migrations/2026-03-12-order-stream-rollout.md`** is the documented chain from ambiguous naming to **`order_stream` as the public/canonical name**, while **keeping internal legacy constants** (especially **`order-events`** for DLQ topology) until/unless centralized refactors happen.
+
+7. Required fact: Issue #254, PR #254, its review thread, and src/services/orderService.ts show the move to a defensive fallback using the async correlation context while keeping audit writes best-effort per the feature doc.
+   Model answer: Here is what **codebase-memory-mcp** shows for this behavior.
+
+## Primary artifact
+
+**`src/services/orderService.ts`** — the **`updateOrderStatus`** function (`workspace.src.services.orderService.updateOrderStatus`).
+
+That is where the change is recorded in code: a **`BUGFIX`** comment says correlation used to be unreliable (middleware may set it, but the value can still be missing here), and the **explicit defensive fallback** is:
+
+- `const safeCorrelationId = correlationId || (global as any).__CORRELATION_ID__;`
+- passing **`safeCorrelationId`** (not the raw `correlationId`) into **`logOrderStateChange`**.
+
+The module snippet is indexed under `workspace.src.services.orderService` and matches the same logic.
+
+## Related but different “defensive” behavior
+
+**`src/services/auditService.ts`** — **`logOrderStateChange`** (`workspace.src.services.auditService.logOrderStateChange`) uses defensive **stringification** of state values. That is about audit **payload** safety, not the correlation-id propagation change in `orderService`.
+
+## What does *not* show this migration in the index
+
+From **`search_code`** / **`get_code_snippet`**:
+
+- **`docs/features/audit-logging.md`** — describes audit logging and correlation IDs in general, not the implicit → explicit `orderService` change.
+- **`tests/unit/orderService.spec.ts`** — covers **`OrderService.createOrder`** / totals, not correlation or `updateOrderStatus`.
+- **`orderController.updateOrderStatus`** — stub response; no correlation handling.
+
+**Summary:** The only indexed artifact that clearly shows the move from implicit reliance on `correlationId` to an **explicit** `safeCorrelationId` fallback in **`orderService`** is **`src/services/orderService.ts`** (inside **`updateOrderStatus`**).
+
+8. Required fact: The original events doc advertised order_events, but the events-migration doc, migration guide, rollout PR, and v1.6.0 release notes supersede it with order_stream for new integrations.
+   Model answer: Here is what **codebase-memory** shows.
+
+## Artifact chain
+
+**1. ADR 004 — “Sources of Truth for Public API Contracts”** (`docs/architecture/004-public-api-contract-sources.md`)
+
+- Treats **`docs/integration/*` as the canonical contract** for external behavior.
+- Says **release notes may supersede older integration guidance** when they **explicitly announce a migration or behavioral change**.
+- Mentions **reconciling conflicting artifacts** instead of trusting a single snippet.
+
+**2. Older events documentation** — `docs/integration/events.md`
+
+- Documents the RabbitMQ exchange as **`order_events`** (topic, durable, routing key `order.created`, etc.).
+
+**3. Migrated contract / supersession** — `docs/integration/events-migration.md`
+
+- Defines the timeline: **T1** = exchange **`order_events`** (before migration); **T2** = **`order_stream`** (after migration).
+- States explicitly that **T2 supersedes T1** and that **new integrations should use `order_stream`**.
+- Says integrations built from **older documentation** must be updated to **`order_stream`**; only the **exchange name** changed (type, durability, `order.created` routing key unchanged).
+
+So the chain that captures the move from the **old** events doc to the **migrated** contract is: **`docs/integration/events.md` (T1 / `order_events`) → `docs/integration/events-migration.md` (T2 supersedes T1; canonical exchange `order_stream`)**, framed by **ADR 004** as how integration docs relate to superseding migration-style artifacts.
+
+9. Required fact: By 2026-03-16 external consumers should use order_stream, and RabbitMQ OpenTelemetry propagation had already been added in v1.6.0.
+   Model answer: Here is what the codebase-memory index supports for **as of 2026-03-16** (the day after release **v1.6.0**, dated **2026-03-15**):
+
+### Canonical exchange (external / downstream consumers)
+**`order_stream`** is documented as the canonical exchange for downstream integrations. The same release notes say consumers on **`order_events`** should migrate.
+
+### Tracing already in place by then
+**OpenTelemetry context propagation for RabbitMQ publish and consume** is called out in that release. The indexed `src/utils/tracing.ts` also shows **OpenTelemetry** wired up (Node SDK, OTLP trace exporter, auto-instrumentations), which aligns with that tracing story.
+
+**Sources (from CBM only):** `workspace.docs.releases.2026-03-15-v1.6.0` (full release module) and `workspace.src.utils.tracing`.
+
+10. Required fact: The worker was still effectively using stale attemptCount scheduling behavior, and the v1.6.1 completed-attempt fix had not shipped yet.
+   Model answer: Here is what the indexed material supports (from `docs/investigations/2026-03-20-webhook-retry-timeline.md`, `docs/releases/2026-03-21-v1.6.1.md`, and the referenced worker/dispatcher snippets).
+
+### What was still in effect on 2026-03-20
+
+Staging was seeing **retries sooner than the backoff table suggested** because **the next run was computed from a stale stored `attemptCount`** after a failed delivery: the worker had **not yet treated the in-flight attempt as “completed”** when deciding reschedule timing, so the backoff tier was wrong. The investigation explicitly says **the jitter/backoff formula was not the root cause**—it was **when the attempt was considered complete** for scheduling.
+
+At the same time, the **dispatcher exposed the human-visible attempt as `attemptCount + 1`** (e.g. `X-Attempt-Number`), so **ops could compare that header to the actual delay and see a mismatch**.
+
+### Which fix had not shipped yet
+
+**Release v1.6.1 (dated 2026-03-21)** had **not** shipped on 2026-03-20. That release lists the fix: **webhook retry scheduling so that completed attempt counts drive both backoff and dead-letter decisions**—i.e. the correction aligned **scheduling/dead-letter logic** with the **completed** attempt count (matching the investigation’s conclusion and the worker comments in the index about using `completedAttemptCount` for `nextAttemptDate` and dead checks).
+
+11. Required fact: Trace continuity across RabbitMQ was still missing, because correlation IDs existed but full OpenTelemetry propagation through message headers was not yet fully in place.
+   Model answer: From **codebase-memory** (investigation `docs/investigations/2026-03-14-rabbitmq-trace-gap.md`, dated 2026-03-14):
+
+Even though HTTP requests already carried **`x-correlation-id`**, the remaining tracing gap was that **downstream RabbitMQ work showed up as an orphaned trace**: you could see the inbound Stripe webhook span, but the RabbitMQ side did not join into one coherent **distributed trace tree**.
+
+The doc says **`x-correlation-id` stayed useful for log correlation**, but it **did not** replace proper trace linkage. The missing behavior was **OpenTelemetry propagation through RabbitMQ message headers**—including that **trace context was not injected on every publish path**, and **one callback-based `amqplib` path dropped the active context**.
+
+12. Required fact: They should follow the migration guide and then the v1.6.0 release notes, using order_stream externally even if older docs or internal code still mention order_events or order-events.
+   Model answer: Here is what the indexed docs say, using only **codebase-memory-mcp** results.
+
+## Guidance when older docs and internal code disagree (2026-03-12 → 2026-03-18)
+
+**Treat the external contract as T2, not legacy names in code or old PDFs.**
+
+1. **Exchange name**  
+   After the migration effective **2026-03-12**, the canonical exchange is **`order_stream`**, not **`order_events`**. Integration docs describe T1 as `order_events` and T2 as `order_stream`, and state that **T2 supersedes T1** and that **new integrations should use `order_stream`**. Anything still aimed at `order_events` will not get new traffic after the migration.
+
+2. **When internal code still shows other names**  
+   The migration guide explicitly warns that **some internal RabbitMQ setup still uses the hyphenated legacy name `order-events` for DLQ topology**. Integrators should treat those as **implementation leftovers, not the external contract**—i.e. **do not** bind or publish to `order-events` just because it appears in internal code.
+
+3. **What stayed the same**  
+   Only the exchange name changed: **type stays `topic`**, **durable `true`**, routing key **`order.created`** unchanged, payload shape unchanged.
+
+**Net for a careful external integrator:** Prefer **current published integration/migration docs** over stale docs; use **`order_stream`**. If internal code or constants show **`order-events`**, **ignore them for your integration** and follow **`order_stream`** plus the unchanged routing key and types above.
+
+13. Required fact: ADR 004 plus PR #188's clarification mean docs/integration/pagination.md governs external behavior, not the page-based Swagger annotations.
+   Model answer: Here is what the indexed repo says.
+
+## Answer for external clients (as of 2026-03-19)
+
+**Use the hierarchy in ADR 004:** for externally supported API behavior, **`docs/integration/*` is the canonical contract.** Swagger is only a hint; **if it disagrees with the published integration docs, Swagger is not authoritative for external clients.** Release notes can override older integration guidance only when they explicitly announce a migration or behavior change. Runbooks are not client contracts.
+
+The **2026-03-18 pagination incident** applies that rule: **cursor pagination from the integration docs stays canonical**; the **page/limit-style Swagger text should not be treated as the released public contract** (it was described as coming from an internal/admin path).
+
+So when Swagger and docs conflict on pagination, **external clients should follow `docs/integration/` (and, if relevant, newer release notes that explicitly change behavior), not Swagger.**
+
+14. Required fact: It should know that v1.6.1 fixed retry scheduling to use completed attempt counts, and that the repository had clarified cursor pagination as the canonical public contract despite Swagger drift.
+   Model answer: Here is what **codebase-memory-mcp** surfaces as the two things a retrieval system should treat as **recent, authoritative** for **retries** and **pagination** as of **2026-03-21**:
+
+### 1. Webhook retries (release **v1.6.1**, dated **2026-03-21**)
+- **Change:** Webhook **retry scheduling** was fixed so that **completed attempt counts** drive **both backoff and dead-letter** behavior (not stale or misaligned counts).
+- **Context in the index:** The **2026-03-20** investigation describes the issue: retries could be scheduled from a **stale stored `attemptCount`** while the dispatcher still showed a different human-visible attempt number, which made backoff look wrong even though the jitter math was fine.
+
+### 2. `/api/orders` pagination (clarified in **v1.6.1**, with an **2026-03-18** incident)
+- **Change:** **Cursor pagination** (`cursor`, `nextCursor`, `hasMore` per integration docs) remains the **public contract** for **`/api/orders`**, even though **Swagger** had drifted toward **page/limit/total**-style wording from an internal/admin path.
+- **Decision to encode in retrieval:** For **external clients**, treat **cursor-based pagination as canonical**; do not treat the **page-based Swagger** block as the released API contract.
+
+Together, a RAG/retrieval layer should **prefer** `docs/releases/2026-03-21-v1.6.1.md` and the linked **retry investigation** and **pagination incident** over older or conflicting snippets (e.g. Swagger-only text for orders pagination).
+
+15. Required fact: Because the worker scheduled the next retry using the stale stored attemptCount instead of the just-completed attempt number, so the reschedule delay lagged behind the human-visible attempt progression until the completedAttemptCount fix shipped in v1.6.1.
+   Model answer: Here is what the indexed docs say (via codebase-memory-mcp only).
+
+## Why retries looked “too fast” in staging before v1.6.1
+
+From the investigation note `docs/investigations/2026-03-20-webhook-retry-timeline.md`:
+
+1. After a **failed first delivery**, the worker recorded the failure, but the **next retry time was derived from a stale `attemptCount`** — so the scheduler did not advance the attempt count the way the backoff table assumed.
+
+2. The **dispatcher still exposed the visible attempt as `attemptCount + 1`**, while the **reschedule delay** followed the old count. That mismatch made it look like retries arrived **earlier than** the documented backoff (bursts “too soon” vs. what ops expected from headers vs. delay).
+
+3. The write-up says the issue was **not** the jitter formula; it was **when the worker considered an attempt finished** and how that interacted with counting for the next run.
+
+The **v1.6.1** release note (`docs/releases/2026-03-21-v1.6.1.md`, Fixes) states that webhook retry scheduling was fixed so that **completed attempt counts consistently drive backoff and dead-letter behavior** — i.e. aligning scheduling with the real attempt progression that was wrong before that release.

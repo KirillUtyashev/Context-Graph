@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import inspect
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from context_graph.models import GraphSnapshot
-from context_graph.storage.backend import BackendDriver, MutationPlan, merge_mutation_plans
+from context_graph.models.graph import GraphSnapshot
+from context_graph.models.profiles import ProfileDeactivation, ProfileRecord
+from context_graph.backend import (
+    BackendDriver,
+    MutationPlan,
+    run_backend_coroutine_sync,
+)
 
 from .canonicalization import canonical_claim_key
-from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
+from .claim_planner import ClaimMutationPlanner, ClaimPlanningSession
+from .evidence_planner import EvidenceMutationPlanner
 from .models import EvidenceRecord, Observation, PersistedEvidenceFact, PersistedEvidenceRecord
-from .services import FactConflictResolutionService, _run_coroutine_sync
-from .validation import ClaimValidationResult, ValidatedClaimBundle
+from .services import (
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionService,
+    FactConflictResolutionService,
+)
+from .validation import ClaimValidationResult
 
 _CURRENT_EVIDENCE_QUERY = """
 MATCH (e:BackendRecord)-[:ABOUT]->(matched_about:BackendRecord)
@@ -40,6 +52,10 @@ class FactInvalidationPlanResult:
 
     plan: MutationPlan
     invalidated_count: int = 0
+    invalidated_claim_ids: tuple[str, ...] = ()
+    claim_ids: tuple[str, ...] = ()
+    profiles: tuple[ProfileRecord, ...] = ()
+    profile_deactivations: tuple[ProfileDeactivation, ...] = ()
 
 
 class CurrentEvidenceReader:
@@ -57,18 +73,24 @@ class CurrentEvidenceReader:
         excluded_fact_keys: Sequence[str] = (),
         limit: int = 10,
     ) -> tuple[PersistedEvidenceFact, ...]:
-        if self.backend_driver is None or not about_record_ids:
+        ordered_about_record_ids = tuple(dict.fromkeys(about_record_ids))
+        if self.backend_driver is None or not ordered_about_record_ids:
             return ()
+        about_record_id_set = set(ordered_about_record_ids)
+        query_coro = self.backend_driver.execute_query(
+            _CURRENT_EVIDENCE_QUERY,
+            repo_id=repo_id,
+            about_record_ids=list(ordered_about_record_ids),
+        )
         try:
-            rows = _run_coroutine_sync(
-                self.backend_driver.execute_query(
-                    _CURRENT_EVIDENCE_QUERY,
-                    repo_id=repo_id,
-                    about_record_ids=list(dict.fromkeys(about_record_ids)),
-                )
+            rows = run_backend_coroutine_sync(
+                query_coro,
+                loop=getattr(self.backend_driver, "_context_graph_loop", None),
             )
         except Exception:
+            _close_unstarted_coroutine(query_coro)
             return ()
+        _close_unstarted_coroutine(query_coro)
 
         excluded = set(excluded_fact_keys)
         records = [
@@ -78,7 +100,7 @@ class CurrentEvidenceReader:
             if record is not None
             and record.evidence.claim_kind == claim_kind
             and record.evidence.is_current
-            and set(record.about_record_ids).intersection(about_record_ids)
+            and any(record_id in about_record_id_set for record_id in record.about_record_ids)
             and record.evidence.fact_key not in excluded
         ]
         grouped: dict[str, list[PersistedEvidenceRecord]] = {}
@@ -98,13 +120,17 @@ class CurrentEvidenceReader:
 
 
 class EvidenceInvalidationPlanner:
-    """Resolve contradictions against persisted current evidence before insertion."""
+    """Compatibility wrapper around the claim-centric provenance planner."""
 
     def __init__(
         self,
         *,
         backend_driver: BackendDriver | None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        claim_mutation_planner: ClaimMutationPlanner | None = None,
+        claim_candidate_retriever=None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
+        claim_resolution_service: ClaimResolutionService | None = None,
         current_evidence_reader: CurrentEvidenceReader | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
     ) -> None:
@@ -112,6 +138,14 @@ class EvidenceInvalidationPlanner:
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
         self.current_evidence_reader = current_evidence_reader or CurrentEvidenceReader(
             backend_driver=backend_driver
+        )
+        self.claim_mutation_planner = claim_mutation_planner or ClaimMutationPlanner(
+            backend_driver=backend_driver,
+            evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=claim_candidate_retriever,
+            claim_profile_key_generation_service=claim_profile_key_generation_service,
+            claim_resolution_service=claim_resolution_service,
+            fact_conflict_resolution_service=fact_conflict_resolution_service,
         )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service
 
@@ -121,172 +155,25 @@ class EvidenceInvalidationPlanner:
         observation: Observation,
         validation: ClaimValidationResult,
         snapshot: GraphSnapshot | None = None,
+        session: ClaimPlanningSession | None = None,
     ) -> FactInvalidationPlanResult:
-        plans: list[MutationPlan] = []
-        invalidated_count = 0
-        for bundle in validation.validated_claims:
-            result = self.plan_validated_claim_bundle(
-                observation=observation,
-                bundle=bundle,
-                snapshot=snapshot,
-            )
-            plans.append(result.plan)
-            invalidated_count += result.invalidated_count
-        return FactInvalidationPlanResult(
-            plan=merge_mutation_plans(*plans),
-            invalidated_count=invalidated_count,
-        )
-
-    def plan_validated_claim_bundle(
-        self,
-        *,
-        observation: Observation,
-        bundle: ValidatedClaimBundle,
-        snapshot: GraphSnapshot | None = None,
-    ) -> FactInvalidationPlanResult:
-        prepared_records = self.evidence_planner.prepare_validated_claim_bundle(
+        result = self.claim_mutation_planner.plan_validated_claims(
             observation=observation,
-            bundle=bundle,
+            validation=validation,
             snapshot=snapshot,
+            session=session,
         )
-        if not prepared_records:
-            return FactInvalidationPlanResult(plan=MutationPlan(), invalidated_count=0)
-
-        new_fact_key = canonical_claim_key(
-            claim_kind=bundle.claim_kind,
-            claim_text=bundle.claim_text,
-        )
-        about_record_ids = tuple(
-            dict.fromkeys(
-                target_record_id
-                for prepared in prepared_records
-                for target_record_id in prepared.about_record_ids
-            )
-        )
-        current_facts = self.current_evidence_reader.load_current_facts(
-            repo_id=observation.repo_id,
-            claim_kind=bundle.claim_kind,
-            about_record_ids=about_record_ids,
-            excluded_fact_keys=(new_fact_key,),
-        )
-        contradicted_facts = self._resolve_contradicted_facts(
-            observation=observation,
-            bundle=bundle,
-            current_facts=current_facts,
-            about_record_ids=about_record_ids,
-            fact_key=new_fact_key,
-        )
-        new_fact_state = EvidenceFactState(
-            fact_key=new_fact_key,
-            claim_text=bundle.claim_text,
-            claim_kind=bundle.claim_kind,
-            claim_confidence=bundle.confidence,
-            claim_derivation_kind=bundle.derivation_kind,
-            observation_id=observation.observation_id,
-            observed_at=observation.observed_at,
-        )
-        if not contradicted_facts:
-            return FactInvalidationPlanResult(
-                plan=self.evidence_planner.plan_prepared_records(
-                    observation=observation,
-                    prepared_records=prepared_records,
-                    fact_state=new_fact_state,
-                ),
-                invalidated_count=0,
-            )
-
-        winner = _newest_fact(contradicted_facts)
-        if winner is not None and _is_strictly_newer(winner.observed_at, observation.observed_at):
-            losing_state = EvidenceFactState(
-                fact_key=new_fact_key,
-                claim_text=bundle.claim_text,
-                claim_kind=bundle.claim_kind,
-                claim_confidence=bundle.confidence,
-                claim_derivation_kind=bundle.derivation_kind,
-                observation_id=observation.observation_id,
-                observed_at=observation.observed_at,
-                is_current=False,
-                invalidated_at=winner.observed_at,
-                invalidated_by_fact_key=winner.fact_key,
-                invalidated_by_observation_id=winner.observation_id,
-            )
-            return FactInvalidationPlanResult(
-                plan=self.evidence_planner.plan_prepared_records(
-                    observation=observation,
-                    prepared_records=prepared_records,
-                    fact_state=losing_state,
-                    superseded_by_record_ids=_evidence_ids(winner),
-                ),
-                invalidated_count=0,
-            )
-
-        new_plan = self.evidence_planner.plan_prepared_records(
-            observation=observation,
-            prepared_records=prepared_records,
-            fact_state=new_fact_state,
-            supersedes_record_ids=tuple(
-                evidence_id
-                for fact in contradicted_facts
-                for evidence_id in _evidence_ids(fact)
-            ),
-        )
-        invalidation_updates = [
-            self.evidence_planner.plan_existing_record_state_update(
-                record=record,
-                invalidated_at=observation.observed_at,
-                invalidated_by_fact_key=new_fact_key,
-                invalidated_by_observation_id=observation.observation_id,
-            )
-            for fact in contradicted_facts
-            for record in fact.evidence_records
-        ]
-        invalidated_count = sum(len(fact.evidence_records) for fact in contradicted_facts)
         return FactInvalidationPlanResult(
-            plan=merge_mutation_plans(new_plan, *invalidation_updates),
-            invalidated_count=invalidated_count,
+            plan=result.plan,
+            invalidated_count=result.invalidated_count,
+            invalidated_claim_ids=result.invalidated_claim_ids,
+            claim_ids=result.claim_ids,
+            profiles=result.profiles,
+            profile_deactivations=result.profile_deactivations,
         )
 
-    def _resolve_contradicted_facts(
-        self,
-        *,
-        observation: Observation,
-        bundle: ValidatedClaimBundle,
-        current_facts: Sequence[PersistedEvidenceFact],
-        about_record_ids: Sequence[str],
-        fact_key: str,
-    ) -> tuple[PersistedEvidenceFact, ...]:
-        if not current_facts or self.fact_conflict_resolution_service is None:
-            return ()
-        try:
-            resolution = self.fact_conflict_resolution_service.resolve(
-                repo_id=observation.repo_id,
-                new_fact={
-                    "fact_key": fact_key,
-                    "claim_text": bundle.claim_text,
-                    "claim_kind": bundle.claim_kind,
-                    "observed_at": observation.observed_at,
-                    "about_record_ids": list(about_record_ids),
-                },
-                current_facts=[
-                    {
-                        "candidate_id": fact.fact_key,
-                        "fact_key": fact.fact_key,
-                        "claim_text": fact.claim_text,
-                        "claim_kind": fact.claim_kind,
-                        "observed_at": fact.observed_at,
-                        "about_record_ids": list(fact.about_record_ids),
-                    }
-                    for fact in current_facts
-                ],
-            )
-        except Exception:
-            return ()
-        fact_by_id = {fact.fact_key: fact for fact in current_facts}
-        return tuple(
-            fact_by_id[candidate_id]
-            for candidate_id in resolution.contradicted_fact_ids
-            if candidate_id in fact_by_id
-        )
+    def begin_claim_session(self, *, repo_id: str) -> ClaimPlanningSession:
+        return self.claim_mutation_planner.begin_session(repo_id=repo_id)
 
 
 def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenceRecord | None:
@@ -317,12 +204,20 @@ def _parse_persisted_evidence_record(row: Mapping[str, Any]) -> PersistedEvidenc
             span_start=_int_or_none(properties.get("span_start")),
             span_end=_int_or_none(properties.get("span_end")),
             support_kind=_string_or_none(properties.get("support_kind")) or "",
+            support_source=_string_or_none(properties.get("support_source"))
+            or _string_or_none(metadata.get("support_source")),
             fact_key=_string_or_none(properties.get("fact_key")) or canonical_claim_key(
                 claim_kind=claim_kind,
                 claim_text=claim_text,
             ),
             claim_text=claim_text,
             claim_kind=claim_kind,
+            claim_subkind=_string_or_none(properties.get("claim_subkind"))
+            or _string_or_none(metadata.get("claim_subkind")),
+            assertion_status=_string_or_none(properties.get("assertion_status"))
+            or _string_or_none(metadata.get("assertion_status")),
+            claim_frame=_string_or_none(properties.get("claim_frame"))
+            or _string_or_none(metadata.get("claim_frame")),
             claim_confidence=_string_or_none(properties.get("claim_confidence"))
             or _string_or_none(metadata.get("claim_confidence")),
             claim_derivation_kind=_string_or_none(properties.get("claim_derivation_kind"))
@@ -360,9 +255,13 @@ def _build_evidence_record(
     span_start: int | None,
     span_end: int | None,
     support_kind: str,
+    support_source: str | None,
     fact_key: str | None,
     claim_text: str | None,
     claim_kind: str | None,
+    claim_subkind: str | None,
+    assertion_status: str | None,
+    claim_frame: str | None,
     claim_confidence: str | None,
     claim_derivation_kind: str | None,
     observation_id: str | None,
@@ -382,9 +281,13 @@ def _build_evidence_record(
         span_start=span_start,
         span_end=span_end,
         support_kind=support_kind,
+        support_source=support_source,
         fact_key=fact_key,
         claim_text=claim_text,
         claim_kind=claim_kind,
+        claim_subkind=claim_subkind,
+        assertion_status=assertion_status,
+        claim_frame=claim_frame,
         claim_confidence=claim_confidence,
         claim_derivation_kind=claim_derivation_kind,
         observation_id=observation_id,
@@ -505,3 +408,8 @@ def _int_or_none(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _close_unstarted_coroutine(value: object) -> None:
+    if inspect.iscoroutine(value) and inspect.getcoroutinestate(value) == inspect.CORO_CREATED:
+        value.close()

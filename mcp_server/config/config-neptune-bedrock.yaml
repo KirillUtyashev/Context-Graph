@@ -1,0 +1,28 @@
+# Context Graph MCP Server - Amazon Neptune + AWS Bedrock configuration
+
+server:
+  transport: http
+  host: 0.0.0.0
+  port: ${PORT:8000}
+
+llm:
+  provider: bedrock
+  model: "us.anthropic.claude-sonnet-4-6"
+  small_model: "us.anthropic.claude-sonnet-4-6"
+  max_tokens: 8192
+
+embedder:
+  provider: bedrock_titan
+  model: "amazon.titan-embed-text-v2:0"
+  dimensions: 1024
+
+database:
+  provider: neptune
+  providers:
+    neptune:
+      host: ${NEPTUNE_HOST}
+      aoss_host: ${AOSS_HOST}
+
+namespace:
+  group_id: ${NAMESPACE_GROUP_ID:order-management}
+  user_id: ${NAMESPACE_USER_ID:mcp_user}

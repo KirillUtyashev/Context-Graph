@@ -24,7 +24,7 @@ import httpx
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
-from context_graph.memory.prompts.models import Message
+from context_graph.prompts.models import Message
 from context_graph.runtime.tracing import NoOpTracer, Tracer
 from .cache import LLMCache
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize

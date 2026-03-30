@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 import re
 from typing import Iterable, Sequence
 
-from context_graph.models import CanonicalNode, GraphSnapshot
+from context_graph.models.graph import CanonicalNode, GraphSnapshot
 
 from .canonicalizer import CodeIdentityCanonicalizer, DEFAULT_CODE_IDENTITY_CANONICALIZER
 

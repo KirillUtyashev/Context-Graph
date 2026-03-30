@@ -210,9 +210,9 @@ resource "aws_iam_role_policy" "aurora_secret_read" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid    = "ReadAuroraSecret"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
+        Sid      = "ReadAuroraSecret"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
         Resource = [var.aurora_password_secret_arn]
       }
     ]
@@ -284,20 +284,20 @@ unit = textwrap.dedent('''
     Type=simple
     User=mcp
     Group=mcp
-    WorkingDirectory=/opt/mcp_server/current
+    WorkingDirectory=/opt/mcp_server/current/mcp_server_src
     Environment=PORT=${var.ingress_port}
     Environment=AWS_REGION=${data.aws_region.current.name}
     Environment=AWS_DEFAULT_REGION=${data.aws_region.current.name}
     Environment=RETRIEVE_LAMBDA_NAME=${var.name}-retrieve
     Environment=NEPTUNE_HOST=neptune-db://${var.neptune_endpoint}
-    Environment=CONFIG_PATH=/opt/mcp_server/current/config/config-neptune-bedrock.yaml
+    Environment=CONFIG_PATH=/opt/mcp_server/current/mcp_server_src/config/config-neptune-bedrock.yaml
     Environment=AURORA_ENDPOINT=${var.aurora_endpoint}
     Environment=AURORA_DB_NAME=${var.aurora_db_name}
     Environment=AURORA_USERNAME=${var.aurora_username}
     Environment=AURORA_PASSWORD_SECRET_ARN=${var.aurora_password_secret_arn}
     Environment=AOSS_HOST=${var.aoss_host}
     Environment=CONTEXT_GRAPH_LLM_PROVIDER=bedrock
-    ExecStart=/opt/mcp_server/venv/bin/python /opt/mcp_server/current/main.py
+    ExecStart=/opt/mcp_server/venv/bin/context-graph-mcp --transport http
     Restart=on-failure
     RestartSec=2
 
@@ -331,16 +331,17 @@ PYTHON_BIN="python3"; for py in python3.12 python3.11; do command -v $py &>/dev/
 echo "==> Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 $PYTHON_BIN -m venv /opt/mcp_server/venv
 /opt/mcp_server/venv/bin/pip install --upgrade pip --quiet
-GRAPHITI_SRC="/opt/mcp_server/current/graphiti_core_src"
-if [ -d "$${GRAPHITI_SRC}" ]; then
-  echo "==> Installing vendored graphiti-core[neptune]..."
-  /opt/mcp_server/venv/bin/pip install -e "$${GRAPHITI_SRC}[neptune]" --quiet
-  for SP in $(/opt/mcp_server/venv/bin/python -c "import site; [print(p) for p in site.getsitepackages()]"); do
-    echo "$${GRAPHITI_SRC}" > "$${SP}/_graphiti_core_src.pth" 2>/dev/null || true
-  done
+CONTEXT_GRAPH_PKG="/opt/mcp_server/current/context_graph_pkg"
+MCP_SERVER_SRC="/opt/mcp_server/current/mcp_server_src"
+if [[ ! -d "$${CONTEXT_GRAPH_PKG}" || ! -d "$${MCP_SERVER_SRC}" ]]; then
+  echo "ERROR: release is missing context_graph_pkg/ or mcp_server_src/" >&2
+  exit 1
 fi
-/opt/mcp_server/venv/bin/pip install -r /opt/mcp_server/current/requirements.txt --quiet
-/opt/mcp_server/venv/bin/python -c "from graphiti_core.driver.neptune_driver import NeptuneDriver; print('graphiti_core import OK')"
+/opt/mcp_server/venv/bin/pip install -e "$${CONTEXT_GRAPH_PKG}" -e "$${MCP_SERVER_SRC}" --quiet
+/opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
+/opt/mcp_server/venv/bin/python -c "from src.bootstrap import main; print('mcp_server bootstrap import OK')"
+/opt/mcp_server/venv/bin/context-graph-mcp --help >/dev/null
+echo "context-graph-mcp entrypoint OK"
 systemctl daemon-reload
 systemctl enable --now mcp-server.service
 systemctl restart mcp-server.service

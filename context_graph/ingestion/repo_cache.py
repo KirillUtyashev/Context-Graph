@@ -6,8 +6,8 @@ import shutil
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 from .models import ManagedRepo
-from ..metadata import RepoSourceState
 from ..models import utc_now_iso
+from context_graph.backend import RepoSourceState
 
 
 class RepoCacheManager:
@@ -61,7 +61,9 @@ class RepoCacheManager:
         request_work_root.mkdir(parents=True, exist_ok=True)
 
         self._ensure_clone(repo_ref, clone_path, auth_token=auth_token)
-        default_branch = repo_ref.default_branch or existing_state.default_branch if existing_state else None
+        default_branch = repo_ref.default_branch or (
+            existing_state.default_branch if existing_state else None
+        )
         if default_branch:
             self.prepare_default_branch(str(clone_path), default_branch)
         source_state = RepoSourceState(

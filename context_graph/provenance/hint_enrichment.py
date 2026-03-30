@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import re
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .models import EvidenceCandidate, Observation
 
@@ -42,6 +42,15 @@ _KNOWN_FILE_EXTENSIONS = frozenset(
         "yml",
     }
 )
+_OBSERVATION_METADATA_HINT_KEYS = frozenset(
+    {
+        "changed_files",
+        "commit_changed_files",
+        "file_path",
+        "path",
+        "paths",
+    }
+)
 _BACKTICK_PATTERN = re.compile(r"`([^`\n]+)`")
 _PATH_PATTERN = re.compile(r"(?<![\w/.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+")
 _DOTTED_IDENTIFIER_PATTERN = re.compile(r"(?<![\w.])(?:[A-Za-z_][A-Za-z0-9_]*\.)+[A-Za-z_][A-Za-z0-9_]*")
@@ -64,6 +73,9 @@ class HintKind(str, Enum):
 class HintSource(str, Enum):
     LLM_CLAIM_HINT = "llm_claim_hint"
     LLM_EVIDENCE_HINT = "llm_evidence_hint"
+    OBSERVATION_TITLE = "observation_title"
+    OBSERVATION_TEXT = "observation_text"
+    OBSERVATION_METADATA = "observation_metadata"
     CLAIM_TEXT = "claim_text"
     EVIDENCE_QUOTE_TEXT = "evidence_quote_text"
     EVIDENCE_SUMMARY_TEXT = "evidence_summary_text"
@@ -92,6 +104,25 @@ def collect_grounding_hints(
     if evidence is not None:
         collected.extend(_extract_hints_from_text(evidence.quote_text, HintSource.EVIDENCE_QUOTE_TEXT))
         collected.extend(_extract_hints_from_text(evidence.summary_text, HintSource.EVIDENCE_SUMMARY_TEXT))
+    deduped: list[EnrichedAboutHint] = []
+    seen: set[str] = set()
+    for hint in collected:
+        if hint.value in seen:
+            continue
+        seen.add(hint.value)
+        deduped.append(hint)
+    return tuple(deduped)
+
+
+def collect_observation_grounding_hints(
+    *,
+    observation: Observation,
+) -> tuple[EnrichedAboutHint, ...]:
+    collected: list[EnrichedAboutHint] = []
+    collected.extend(_extract_hints_from_text(observation.title or "", HintSource.OBSERVATION_TITLE))
+    collected.extend(_extract_hints_from_text(observation.text, HintSource.OBSERVATION_TEXT))
+    for metadata_value in _iter_observation_metadata_hint_values(observation.metadata):
+        collected.extend(_extract_hints_from_text(metadata_value, HintSource.OBSERVATION_METADATA))
     deduped: list[EnrichedAboutHint] = []
     seen: set[str] = set()
     for hint in collected:
@@ -168,6 +199,48 @@ def _extract_hints_from_text(text: str, source: HintSource) -> list[EnrichedAbou
     raw_matches.extend(match.group(1) for match in _KEYWORD_SYMBOL_PATTERN.finditer(text))
     raw_matches.extend(match.group(0) for match in _BASENAME_PATTERN.finditer(text))
     return _enriched_from_values(raw_matches, source)
+
+
+def _iter_metadata_hint_values(value: Any) -> tuple[str, ...]:
+    values: list[str] = []
+
+    def walk(item: Any) -> None:
+        if item is None:
+            return
+        if isinstance(item, str):
+            normalized = " ".join(item.split()).strip()
+            if normalized:
+                values.append(normalized)
+            return
+        if isinstance(item, Mapping):
+            for nested in item.values():
+                walk(nested)
+            return
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            for nested in item:
+                walk(nested)
+            return
+        normalized = " ".join(str(item).split()).strip()
+        if normalized:
+            values.append(normalized)
+
+    walk(value)
+    return tuple(values)
+
+
+def _iter_observation_metadata_hint_values(metadata: Mapping[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for key, value in metadata.items():
+        normalized_key = str(key).strip().lower()
+        if (
+            normalized_key not in _OBSERVATION_METADATA_HINT_KEYS
+            and not normalized_key.endswith("_path")
+            and not normalized_key.endswith("_paths")
+            and not normalized_key.endswith("_files")
+        ):
+            continue
+        values.extend(_iter_metadata_hint_values(value))
+    return tuple(values)
 
 
 def _looks_like_node_id(value: str) -> bool:

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
+from functools import partial
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from context_graph.models import GraphSnapshot
+from context_graph.models.graph import GraphSnapshot
+from context_graph.backend.profile_vector_services import ProfileVectorIndexer
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionCandidateRetriever,
+    ClaimResolutionService,
+    ClaimSemanticRetrievalService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
@@ -16,15 +25,24 @@ from context_graph.provenance import (
     ObservationKind,
     ObservationMutationPlanner,
 )
+from context_graph.provenance.observation_ingestion import (
+    ObservationIngestionItem,
+    ObservationIngestionService,
+)
+from context_graph.provenance.source_adapters import build_github_observations
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
-from context_graph.storage.backend import (
+from context_graph.query.parser import QueryParser
+from context_graph.backend import (
     BackendDriver,
     BackendSyncBridge,
+    MetadataStore,
     merge_mutation_plans,
     MutationPlan,
 )
 
 from .structural_planner import GitHubStructuralPlanner
+
+_GITHUB_BUNDLE_FETCH_MAX_WORKERS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +134,23 @@ class GitHubSyncResult:
     evidence_invalidated: int = 0
 
 
+@dataclass(slots=True)
+class _GitHubBundleFetchCache:
+    commit_prs: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    pr_payloads: dict[int, dict[str, Any]] = field(default_factory=dict)
+    pr_linked_issues: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    pr_reviews: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    pr_review_comments: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    issue_comments: dict[int, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    issue_payloads: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+
 class GitHubIndexer:
     def __init__(
         self,
         *,
         github_api: GitHubApiClient,
+        metadata_store: MetadataStore | None = None,
         backend_driver: BackendDriver | None,
         planner: GitHubStructuralPlanner | None = None,
         observation_planner: ObservationMutationPlanner | None = None,
@@ -129,10 +159,15 @@ class GitHubIndexer:
         evidence_service: EvidenceExtractionService | None = None,
         claim_validator: ClaimBundleValidator | None = None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
+        observation_ingestion_service: ObservationIngestionService | None = None,
     ) -> None:
         self.github_api = github_api
+        self.metadata_store = metadata_store
         self.backend_driver = backend_driver
         self.planner = planner or GitHubStructuralPlanner()
         self.observation_planner = observation_planner or ObservationMutationPlanner()
@@ -141,13 +176,49 @@ class GitHubIndexer:
         )
         self.claim_validator = claim_validator or ClaimBundleValidator()
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
+        self.claim_resolution_service = claim_resolution_service or (
+            ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        self.claim_profile_key_generation_service = claim_profile_key_generation_service or (
+            ClaimProfileKeyGenerationService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        semantic_claim_search_service = (
+            ClaimSemanticRetrievalService(
+                metadata_store=metadata_store,
+                vector_store=profile_indexer.vector_store,
+                embedding_provider=profile_indexer.embedding_provider,
+                query_parser=QueryParser(llm_client=llm_client),
+            )
+            if metadata_store is not None
+            and profile_indexer is not None
+            and hasattr(profile_indexer, "vector_store")
+            and hasattr(profile_indexer, "embedding_provider")
+            else None
+        )
+        self.claim_candidate_retriever = ClaimResolutionCandidateRetriever(
+            backend_driver=backend_driver,
+            semantic_claim_search_service=semantic_claim_search_service,
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=self.claim_candidate_retriever,
+            claim_profile_key_generation_service=self.claim_profile_key_generation_service,
+            claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
+        )
+        self.profile_indexer = profile_indexer
+        self.observation_ingestion_service = observation_ingestion_service or ObservationIngestionService(
+            metadata_store=metadata_store,
+            backend_driver=backend_driver,
+            observation_planner=self.observation_planner,
+            claim_extraction_service=self.claim_extraction_service,
+            claim_validator=self.claim_validator,
+            evidence_invalidation_planner=self.evidence_invalidation_planner,
+            profile_indexer=profile_indexer,
         )
 
     def sync_for_commits(
@@ -178,12 +249,27 @@ class GitHubIndexer:
             commit_shas=commit_shas,
         )
         structural_operations = self.planner.plan_bundle(bundle)
-        planned_observations = self.observation_planner.build_github_observations(bundle=bundle)
-        observation_operations = self.observation_planner.plan_observations(*planned_observations)
-        evidence_operations, claim_counts = self._plan_evidence_operations(
-            planned_observations=planned_observations,
+        planned_observations = build_github_observations(
+            planner=self.observation_planner,
+            bundle=bundle,
+        )
+        observation_ingestion_result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(
+                ObservationIngestionItem(
+                    planned_observation=planned,
+                    source_context={
+                        "pull_request_number": planned.observation.metadata.get("pull_request_number"),
+                        "issue_number": planned.observation.metadata.get("issue_number"),
+                    },
+                )
+                for planned in planned_observations
+            ),
             snapshot=snapshot,
         )
+        observation_operations = observation_ingestion_result.observation_plan
+        evidence_operations = observation_ingestion_result.evidence_plan
+        profiles = observation_ingestion_result.profiles
+        profile_deactivations = observation_ingestion_result.profile_deactivations
         operations = merge_mutation_plans(
             structural_operations,
             observation_operations,
@@ -195,6 +281,11 @@ class GitHubIndexer:
                 raise RuntimeError("GitHub structural sync execution requires a configured backend driver")
             bridge = BackendSyncBridge(self.backend_driver)
             operations_applied = bridge.apply(operations).operations_applied
+            if profiles or profile_deactivations:
+                self.observation_ingestion_service.persist_profiles(
+                    profiles,
+                    deactivations=profile_deactivations,
+                )
         counts: dict[str, int] = {}
         pull_requests: set[int] = set()
         issues: set[int] = set()
@@ -216,11 +307,11 @@ class GitHubIndexer:
             issue_numbers=tuple(sorted(issues)),
             observation_operations=observation_operations,
             evidence_operations=evidence_operations,
-            claim_candidates_extracted=claim_counts["extracted"],
-            claim_candidates_validated=claim_counts["validated"],
-            claim_candidates_rejected=claim_counts["rejected"],
-            claim_rejection_reasons=dict(claim_counts["reasons"]),
-            evidence_invalidated=claim_counts["invalidated"],
+            claim_candidates_extracted=observation_ingestion_result.claim_candidates_extracted,
+            claim_candidates_validated=observation_ingestion_result.claim_candidates_validated,
+            claim_candidates_rejected=observation_ingestion_result.claim_candidates_rejected,
+            claim_rejection_reasons=dict(observation_ingestion_result.claim_rejection_reasons),
+            evidence_invalidated=observation_ingestion_result.evidence_invalidated,
         )
 
     def _plan_evidence_operations(
@@ -229,65 +320,33 @@ class GitHubIndexer:
         planned_observations: Sequence[Any],
         snapshot: GraphSnapshot | None,
     ) -> tuple[MutationPlan, dict[str, object]]:
-        zero_counts: dict[str, object] = {
-            "extracted": 0,
-            "validated": 0,
-            "rejected": 0,
-            "reasons": {},
-            "invalidated": 0,
-        }
-        if self.claim_extraction_service is None:
-            return MutationPlan(), zero_counts
-
-        plans: list[MutationPlan] = []
-        extracted_count = 0
-        validated_count = 0
-        rejected_count = 0
-        invalidated_count = 0
-        rejection_reasons: dict[str, int] = {}
-        for planned in planned_observations:
-            try:
-                extraction = self.claim_extraction_service.extract(
-                    planned.observation,
+        result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(
+                ObservationIngestionItem(
+                    planned_observation=planned,
                     source_context={
-                        "source_kind": planned.source.source_kind,
-                        "source_record_type": planned.source.source_record_type,
-                        "source_id": planned.source.source_id,
-                        "source_display_name": planned.source.display_name,
-                        "observation_metadata": dict(planned.observation.metadata),
+                        "pull_request_number": planned.observation.metadata.get("pull_request_number"),
+                        "issue_number": planned.observation.metadata.get("issue_number"),
                     },
                 )
-            except Exception:
-                continue
-            validation = self.claim_validator.validate(
-                observation=planned.observation,
-                extraction=extraction,
-                snapshot=snapshot,
-            )
-            extracted_count += validation.extracted_count
-            validated_count += validation.validated_count
-            rejected_count += validation.rejected_count
-            rejection_reasons = _merge_reason_counts(
-                rejection_reasons,
-                validation.rejection_reason_counts,
-            )
-            invalidation_result = self.evidence_invalidation_planner.plan_validated_claims(
-                observation=planned.observation,
-                validation=validation,
-                snapshot=snapshot,
-            )
-            plans.append(invalidation_result.plan)
-            invalidated_count += invalidation_result.invalidated_count
+                for planned in planned_observations
+            ),
+            snapshot=snapshot,
+        )
         return (
-            merge_mutation_plans(*plans),
+            result.evidence_plan,
             {
-                "extracted": extracted_count,
-                "validated": validated_count,
-                "rejected": rejected_count,
-                "reasons": rejection_reasons,
-                "invalidated": invalidated_count,
+                "extracted": result.claim_candidates_extracted,
+                "validated": result.claim_candidates_validated,
+                "rejected": result.claim_candidates_rejected,
+                "reasons": result.claim_rejection_reasons,
+                "invalidated": result.evidence_invalidated,
+                "profiles": result.profiles,
             },
         )
+
+    def _persist_profiles(self, profiles: Sequence[Any], deactivations: Sequence[Any] = ()) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles, deactivations=deactivations)
 
     def _build_bundle(
         self,
@@ -298,31 +357,148 @@ class GitHubIndexer:
     ) -> GitHubProvenanceBundle:
         owner = repo_ref.owner
         repo_name = repo_ref.name
-        commit_to_prs: dict[str, tuple[int, ...]] = {}
-        pr_payloads: dict[int, dict[str, Any]] = {}
-        pr_to_issues: dict[int, tuple[int, ...]] = {}
-        linked_issues: set[int] = set()
+        cache = _GitHubBundleFetchCache()
 
+        with ThreadPoolExecutor(max_workers=_GITHUB_BUNDLE_FETCH_MAX_WORKERS) as executor:
+            commit_pr_tasks = {
+                commit_sha: partial(self.github_api.list_commit_pull_requests, owner, repo_name, commit_sha)
+                for commit_sha in commit_shas
+                if commit_sha not in cache.commit_prs
+            }
+            commit_pr_rows = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=commit_pr_tasks,
+            )
+            for commit_sha in commit_shas:
+                if commit_sha not in cache.commit_prs:
+                    cache.commit_prs[commit_sha] = collect_unique_numbers(commit_pr_rows[commit_sha])
+
+            commit_to_prs = {
+                commit_sha: cache.commit_prs[commit_sha]
+                for commit_sha in commit_shas
+            }
+
+            ordered_pr_numbers: list[int] = []
+            seen_pr_numbers: set[int] = set()
+            for commit_sha in commit_shas:
+                for number in commit_to_prs.get(commit_sha, ()):
+                    if number in seen_pr_numbers:
+                        continue
+                    seen_pr_numbers.add(number)
+                    ordered_pr_numbers.append(number)
+
+            pr_fetch_tasks: dict[tuple[str, int], Any] = {}
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_payloads:
+                    pr_fetch_tasks[("payload", number)] = partial(
+                        self.github_api.get_pull_request,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.pr_linked_issues:
+                    pr_fetch_tasks[("linked_issues", number)] = partial(
+                        self.github_api.list_pull_request_linked_issue_numbers,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            pr_fetch_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=pr_fetch_tasks,
+            )
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_payloads:
+                    cache.pr_payloads[number] = pr_fetch_results[("payload", number)]
+                if number not in cache.pr_linked_issues:
+                    cache.pr_linked_issues[number] = tuple(pr_fetch_results[("linked_issues", number)])
+
+            pr_subresource_tasks: dict[tuple[str, int], Any] = {}
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_reviews:
+                    pr_subresource_tasks[("reviews", number)] = partial(
+                        self.github_api.list_pull_request_reviews,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.pr_review_comments:
+                    pr_subresource_tasks[("review_comments", number)] = partial(
+                        self.github_api.list_pull_request_review_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.issue_comments:
+                    pr_subresource_tasks[("issue_comments", number)] = partial(
+                        self.github_api.list_issue_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            pr_subresource_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=pr_subresource_tasks,
+            )
+            for number in ordered_pr_numbers:
+                if number not in cache.pr_reviews:
+                    cache.pr_reviews[number] = tuple(pr_subresource_results[("reviews", number)])
+                if number not in cache.pr_review_comments:
+                    cache.pr_review_comments[number] = tuple(pr_subresource_results[("review_comments", number)])
+                if number not in cache.issue_comments:
+                    cache.issue_comments[number] = tuple(pr_subresource_results[("issue_comments", number)])
+
+            linked_issue_numbers = sorted(
+                {
+                    issue_number
+                    for number in ordered_pr_numbers
+                    for issue_number in cache.pr_linked_issues[number]
+                }
+            )
+
+            issue_fetch_tasks: dict[tuple[str, int], Any] = {}
+            for number in linked_issue_numbers:
+                if number not in cache.issue_payloads:
+                    issue_fetch_tasks[("payload", number)] = partial(
+                        self.github_api.get_issue,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+                if number not in cache.issue_comments:
+                    issue_fetch_tasks[("issue_comments", number)] = partial(
+                        self.github_api.list_issue_comments,
+                        owner,
+                        repo_name,
+                        number,
+                    )
+            issue_fetch_results = _run_parallel_fetch_tasks(
+                executor=executor,
+                tasks=issue_fetch_tasks,
+            )
+            for number in linked_issue_numbers:
+                if number not in cache.issue_payloads:
+                    cache.issue_payloads[number] = issue_fetch_results[("payload", number)]
+                if number not in cache.issue_comments:
+                    cache.issue_comments[number] = tuple(issue_fetch_results[("issue_comments", number)])
+
+        pr_payloads = {
+            number: cache.pr_payloads[number]
+            for number in ordered_pr_numbers
+        }
+        pr_to_issues = {
+            number: cache.pr_linked_issues[number]
+            for number in ordered_pr_numbers
+        }
+        issue_payloads = {
+            number: cache.issue_payloads[number]
+            for number in linked_issue_numbers
+        }
+
+        latest_commit_by_pr: dict[int, str] = {}
         for commit_sha in commit_shas:
-            commit_prs = self.github_api.list_commit_pull_requests(owner, repo_name, commit_sha)
-            numbers = collect_unique_numbers(commit_prs)
-            commit_to_prs[commit_sha] = numbers
-            for number in numbers:
-                if number in pr_payloads:
-                    continue
-                pr = self.github_api.get_pull_request(owner, repo_name, number)
-                pr_payloads[number] = pr
-                linked_numbers = self.github_api.list_pull_request_linked_issue_numbers(
-                    owner,
-                    repo_name,
-                    number,
-                )
-                pr_to_issues[number] = linked_numbers
-                linked_issues.update(linked_numbers)
-
-        issue_payloads: dict[int, dict[str, Any]] = {}
-        for number in sorted(linked_issues):
-            issue_payloads[number] = self.github_api.get_issue(owner, repo_name, number)
+            for pr_number in commit_to_prs.get(commit_sha, ()):
+                latest_commit_by_pr[pr_number] = commit_sha
 
         entities: dict[str, GitHubEntity] = {}
         project_links: dict[tuple[str, str], GitHubProjectLink] = {}
@@ -330,8 +506,16 @@ class GitHubIndexer:
         entity_links: dict[tuple[str, str, str], GitHubEntityLink] = {}
         observation_sources: dict[str, GitHubObservationSource] = {}
 
-        for number, pr in pr_payloads.items():
-            pr_entity = _build_pull_request_entity(repo_id=repo_id, repo_ref=repo_ref, payload=pr)
+        for number in ordered_pr_numbers:
+            pr = pr_payloads[number]
+            pr_author_login = _author_login(pr)
+            pr_body_text = _normalized_optional_text(pr.get("body"))
+            pr_entity = _build_pull_request_entity(
+                repo_id=repo_id,
+                repo_ref=repo_ref,
+                payload=pr,
+                author_login=pr_author_login,
+            )
             entities[pr_entity.node_id] = pr_entity
             project_links[("HAS_PULL_REQUEST", pr_entity.node_id)] = GitHubProjectLink(
                 target_node_id=pr_entity.node_id,
@@ -353,9 +537,14 @@ class GitHubIndexer:
                     repo_id=repo_id,
                     repo_ref=repo_ref,
                     payload=pr,
+                    author_login=pr_author_login,
+                    body_text=pr_body_text,
+                    anchor_revision_id=latest_commit_by_pr.get(number),
                 ),
             )
-            for review in self.github_api.list_pull_request_reviews(owner, repo_name, number):
+            for review in cache.pr_reviews[number]:
+                review_author_login = _author_login(review)
+                review_body_text = _normalized_optional_text(review.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_review_observation_source(
@@ -363,9 +552,14 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         pull_request_payload=pr,
                         payload=review,
+                        author_login=review_author_login,
+                        body_text=review_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
-            for comment in self.github_api.list_pull_request_review_comments(owner, repo_name, number):
+            for comment in cache.pr_review_comments[number]:
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_review_comment_observation_source(
@@ -373,11 +567,36 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         pull_request_payload=pr,
                         payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
                     ),
                 )
-
-        for number, issue in issue_payloads.items():
-            issue_entity = _build_issue_entity(repo_id=repo_id, repo_ref=repo_ref, payload=issue)
+            for comment in cache.issue_comments[number]:
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
+                _maybe_add_observation_source(
+                    observation_sources,
+                    _build_pull_request_issue_comment_observation_source(
+                        repo_id=repo_id,
+                        repo_ref=repo_ref,
+                        pull_request_payload=pr,
+                        payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
+                        anchor_revision_id=latest_commit_by_pr.get(number),
+                    ),
+                )
+        for number in linked_issue_numbers:
+            issue = issue_payloads[number]
+            issue_author_login = _author_login(issue)
+            issue_body_text = _normalized_optional_text(issue.get("body"))
+            issue_entity = _build_issue_entity(
+                repo_id=repo_id,
+                repo_ref=repo_ref,
+                payload=issue,
+                author_login=issue_author_login,
+            )
             entities[issue_entity.node_id] = issue_entity
             project_links[("HAS_ISSUE", issue_entity.node_id)] = GitHubProjectLink(
                 target_node_id=issue_entity.node_id,
@@ -390,9 +609,21 @@ class GitHubIndexer:
                     repo_id=repo_id,
                     repo_ref=repo_ref,
                     payload=issue,
+                    author_login=issue_author_login,
+                    body_text=issue_body_text,
                 ),
             )
-            for comment in self.github_api.list_issue_comments(owner, repo_name, number):
+            _maybe_add_observation_source(
+                observation_sources,
+                _build_issue_closed_observation_source(
+                    repo_id=repo_id,
+                    repo_ref=repo_ref,
+                    payload=issue,
+                ),
+            )
+            for comment in cache.issue_comments[number]:
+                comment_author_login = _author_login(comment)
+                comment_body_text = _normalized_optional_text(comment.get("body"))
                 _maybe_add_observation_source(
                     observation_sources,
                     _build_issue_comment_observation_source(
@@ -400,6 +631,8 @@ class GitHubIndexer:
                         repo_ref=repo_ref,
                         issue_payload=issue,
                         payload=comment,
+                        author_login=comment_author_login,
+                        body_text=comment_body_text,
                     ),
                 )
 
@@ -428,8 +661,35 @@ class GitHubIndexer:
             project_links=tuple(sorted(project_links.values(), key=lambda item: (item.relation_type, item.target_node_id))),
             commit_links=tuple(sorted(commit_links.values(), key=lambda item: (item.relation_type, item.commit_sha, item.target_node_id))),
             entity_links=tuple(sorted(entity_links.values(), key=lambda item: (item.relation_type, item.source_node_id, item.target_node_id))),
-            observation_sources=tuple(sorted(observation_sources.values(), key=lambda item: (item.observation_kind.value, item.external_id))),
+            observation_sources=tuple(
+                sorted(
+                    observation_sources.values(),
+                    key=_observation_source_sort_key,
+                )
+            ),
         )
+
+
+def _run_parallel_fetch_tasks(
+    *,
+    executor: ThreadPoolExecutor,
+    tasks: Mapping[Any, Any],
+) -> dict[Any, Any]:
+    if not tasks:
+        return {}
+    futures = {
+        executor.submit(task): key
+        for key, task in tasks.items()
+    }
+    results: dict[Any, Any] = {}
+    try:
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    except Exception:
+        for future in futures:
+            future.cancel()
+        raise
+    return results
 
 
 def _build_pull_request_entity(
@@ -437,6 +697,7 @@ def _build_pull_request_entity(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
 ) -> GitHubEntity:
     number = int(payload["number"])
     return GitHubEntity(
@@ -449,7 +710,7 @@ def _build_pull_request_entity(
         url=payload.get("html_url"),
         title=payload.get("title"),
         state=payload.get("state"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
         metadata={
@@ -468,10 +729,12 @@ def _build_pull_request_body_observation_source(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     number = int(payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     return GitHubObservationSource(
         observation_kind=ObservationKind.GITHUB_PR_BODY,
@@ -482,15 +745,16 @@ def _build_pull_request_body_observation_source(
         number=number,
         url=payload.get("html_url"),
         title=payload.get("title"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": number,
             "url": payload.get("html_url"),
             "state": payload.get("state"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -500,6 +764,7 @@ def _build_issue_entity(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
 ) -> GitHubEntity:
     number = int(payload["number"])
     return GitHubEntity(
@@ -512,7 +777,7 @@ def _build_issue_entity(
         url=payload.get("html_url"),
         title=payload.get("title"),
         state=payload.get("state"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
         metadata={
@@ -527,10 +792,11 @@ def _build_issue_body_observation_source(
     repo_id: str,
     repo_ref: GitHubRepoRef,
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     number = int(payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     return GitHubObservationSource(
         observation_kind=ObservationKind.GITHUB_ISSUE_BODY,
@@ -541,15 +807,59 @@ def _build_issue_body_observation_source(
         number=number,
         url=payload.get("html_url"),
         title=payload.get("title"),
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "issue_number": number,
             "url": payload.get("html_url"),
             "state": payload.get("state"),
+        },
+    )
+
+
+def _build_issue_closed_observation_source(
+    *,
+    repo_id: str,
+    repo_ref: GitHubRepoRef,
+    payload: Mapping[str, Any],
+) -> GitHubObservationSource | None:
+    number = int(payload["number"])
+    closed_at = payload.get("closed_at")
+    if not closed_at:
+        return None
+    closed_by = payload.get("closed_by")
+    closed_by_login = _mapping_login(closed_by) if isinstance(closed_by, Mapping) else None
+    issue_title = _normalized_optional_text(payload.get("title"))
+    title = f"Issue #{number} closed"
+    if issue_title:
+        title = f"{title}: {issue_title}"
+    state_reason = _normalized_optional_text(payload.get("state_reason"))
+    text = f"Issue #{number} was closed."
+    if state_reason:
+        text = f"{text} State reason: {state_reason}."
+    return GitHubObservationSource(
+        observation_kind=ObservationKind.GITHUB_ISSUE_CLOSED,
+        source_kind="issue",
+        source_id=_issue_node_id(repo_id, number),
+        source_record_type="github_issue",
+        external_id=f"{payload.get('id', number)}:closed",
+        number=number,
+        url=payload.get("html_url"),
+        title=title,
+        author_login=closed_by_login,
+        created_at=closed_at,
+        updated_at=closed_at,
+        text=text,
+        metadata={
+            "github_repo": repo_ref.canonical_repo,
+            "issue_number": number,
+            "url": payload.get("html_url"),
+            "closed_at": closed_at,
+            "closed_by": closed_by_login,
+            "state_reason": payload.get("state_reason"),
         },
     )
 
@@ -560,11 +870,13 @@ def _build_review_observation_source(
     repo_ref: GitHubRepoRef,
     pull_request_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     review_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     pr_title = pull_request_payload.get("title")
     title = f"Review on PR #{pull_number}"
@@ -579,10 +891,10 @@ def _build_review_observation_source(
         number=pull_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("submitted_at") or payload.get("created_at"),
         updated_at=payload.get("submitted_at") or payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": pull_number,
@@ -590,6 +902,7 @@ def _build_review_observation_source(
             "review_state": payload.get("state"),
             "commit_id": payload.get("commit_id"),
             "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -600,11 +913,13 @@ def _build_review_comment_observation_source(
     repo_ref: GitHubRepoRef,
     pull_request_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
+    anchor_revision_id: str | None = None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     pull_number = int(pull_request_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     pr_title = pull_request_payload.get("title")
     title = f"Review comment on PR #{pull_number}"
@@ -619,10 +934,10 @@ def _build_review_comment_observation_source(
         number=pull_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "pull_request_number": pull_number,
@@ -631,6 +946,7 @@ def _build_review_comment_observation_source(
             "commit_id": payload.get("commit_id"),
             "pull_request_review_id": payload.get("pull_request_review_id"),
             "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -641,11 +957,12 @@ def _build_issue_comment_observation_source(
     repo_ref: GitHubRepoRef,
     issue_payload: Mapping[str, Any],
     payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
 ) -> GitHubObservationSource | None:
     comment_id = int(payload["id"])
     issue_number = int(issue_payload["number"])
-    body = payload.get("body")
-    if not _has_text(body):
+    if not body_text:
         return None
     issue_title = issue_payload.get("title")
     title = f"Comment on issue #{issue_number}"
@@ -660,15 +977,56 @@ def _build_issue_comment_observation_source(
         number=issue_number,
         url=payload.get("html_url"),
         title=title,
-        author_login=_author_login(payload),
+        author_login=author_login,
         created_at=payload.get("created_at"),
         updated_at=payload.get("updated_at"),
-        text=body,
+        text=body_text,
         metadata={
             "github_repo": repo_ref.canonical_repo,
             "issue_number": issue_number,
             "comment_id": comment_id,
             "url": payload.get("html_url"),
+        },
+    )
+
+
+def _build_pull_request_issue_comment_observation_source(
+    *,
+    repo_id: str,
+    repo_ref: GitHubRepoRef,
+    pull_request_payload: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    author_login: str | None,
+    body_text: str | None,
+    anchor_revision_id: str | None = None,
+) -> GitHubObservationSource | None:
+    comment_id = int(payload["id"])
+    pull_number = int(pull_request_payload["number"])
+    if not body_text:
+        return None
+    pr_title = pull_request_payload.get("title")
+    title = f"Comment on PR #{pull_number}"
+    if pr_title:
+        title = f"{title}: {pr_title}"
+    return GitHubObservationSource(
+        observation_kind=ObservationKind.GITHUB_ISSUE_COMMENT,
+        source_kind="pull_request",
+        source_id=_pull_request_node_id(repo_id, pull_number),
+        source_record_type="github_pull_request",
+        external_id=str(comment_id),
+        number=pull_number,
+        url=payload.get("html_url"),
+        title=title,
+        author_login=author_login,
+        created_at=payload.get("created_at"),
+        updated_at=payload.get("updated_at"),
+        text=body_text,
+        metadata={
+            "github_repo": repo_ref.canonical_repo,
+            "pull_request_number": pull_number,
+            "comment_id": comment_id,
+            "url": payload.get("html_url"),
+            "anchor_revision_id": anchor_revision_id,
         },
     )
 
@@ -792,10 +1150,15 @@ def _issue_node_id(repo_id: str, number: int) -> str:
 
 def _author_login(payload: Mapping[str, Any]) -> str | None:
     user = payload.get("user")
-    if isinstance(user, Mapping):
-        login = user.get("login")
-        if isinstance(login, str):
-            return login
+    return _mapping_login(user) if isinstance(user, Mapping) else None
+
+
+def _mapping_login(payload: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    login = payload.get("login")
+    if isinstance(login, str):
+        return login
     return None
 
 
@@ -805,11 +1168,38 @@ def _maybe_add_observation_source(
 ) -> None:
     if source is None:
         return
-    sources[f"{source.observation_kind.value}:{source.external_id}"] = source
+    sources[f"{source.observation_kind}:{source.external_id}"] = source
 
 
 def _has_text(value: object) -> bool:
-    return bool(" ".join(str(value).split()).strip()) if value is not None else False
+    return _normalized_optional_text(value) is not None
+
+
+def _normalized_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).split()).strip()
+    return normalized or None
+
+
+def _observation_source_sort_key(source: GitHubObservationSource) -> tuple[bool, datetime, str, str]:
+    observed_at = _parse_datetime(source.updated_at or source.created_at)
+    return (
+        observed_at is None,
+        observed_at or datetime.max,
+        str(source.observation_kind),
+        source.external_id,
+    )
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
 
 
 def _merge_reason_counts(*reason_maps: Mapping[str, int]) -> dict[str, int]:

@@ -5,18 +5,20 @@ on:
     branches: ["main", "repo-indexing"]
     paths:
       - "context_graph/**"
+      - "mcp_server/**"
       - "tests/**"
-      - "vendor/codebase_memory_pipeline/**"
       - "pyproject.toml"
+      - "docker-compose.yml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
       - ".github/scripts/render_coverage_badge.py"
   pull_request:
     paths:
       - "context_graph/**"
+      - "mcp_server/**"
       - "tests/**"
-      - "vendor/codebase_memory_pipeline/**"
       - "pyproject.toml"
+      - "docker-compose.yml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
       - ".github/scripts/render_coverage_badge.py"
@@ -40,69 +42,50 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Run tests with coverage
+      - name: Install dependencies
+        run: uv sync --all-packages --dev --no-editable
+
+      - name: Run package tests with combined coverage
         shell: bash
         run: |
           set -euo pipefail
-          TEST_FILES=(
-            tests/test_backend.py
-            tests/test_context_graph.py
-            tests/test_provenance.py
-            tests/test_search_utils.py
-            tests/test_submodules_core.py
-            tests/test_submodules_backend.py
-            tests/test_submodules_code_identity.py
-            tests/test_submodules_ingestion.py
-            tests/test_ingestion_driver_and_factories.py
-            tests/test_profiles.py
-            tests/test_github_client_more.py
-            tests/test_metadata_store_more.py
-            tests/test_profile_vector_store_more.py
-            tests/test_next_pass_more.py
-            tests/test_entity_nodes_module.py
-          )
-          EXISTING_TEST_FILES=()
-          for test_file in "${TEST_FILES[@]}"; do
-            if [[ -f "$test_file" ]]; then
-              EXISTING_TEST_FILES+=("$test_file")
-            fi
-          done
-          if [[ ${#EXISTING_TEST_FILES[@]} -eq 0 ]]; then
-            echo "No maintained coverage tests were found." >&2
-            exit 1
-          fi
-          UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run --no-project \
-            --with pytest \
-            --with pytest-cov \
-            --with pydantic \
-            --with pydantic-settings \
-            --with pyyaml \
-            --with neo4j \
-            python -m pytest \
+          rm -f .coverage coverage.xml coverage-report.txt
+          uv run python -m pytest \
+            tests \
             --cov=context_graph \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            "${EXISTING_TEST_FILES[@]}" | tee coverage-report.txt
+            --cov-report=
+          PYTHONPATH=mcp_server uv run python -m pytest \
+            mcp_server/tests \
+            --cov=mcp_server/src \
+            --cov-append \
+            --cov-report=
+          uv run coverage xml -o coverage.xml
+          uv run coverage report | tee coverage-report.txt
+
+      - name: Verify standalone MCP package entrypoints
+        run: |
+          PYTHONPATH=mcp_server uv run python -m src --help
+          PYTHONPATH=mcp_server uv run python -c "from src.bootstrap import main; print(callable(main))"
 
       - name: Render coverage badge
         run: |
-          python .github/scripts/render_coverage_badge.py \
+          uv run python .github/scripts/render_coverage_badge.py \
             --coverage-xml coverage.xml \
             --output badges/coverage.svg
 
       - name: Build PR coverage comment
         if: github.event_name == 'pull_request'
         run: |
-          COVERAGE_PERCENT=$(python3 - <<'PY'
+          COVERAGE_PERCENT=$(python - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("coverage.xml").getroot()
           print(round(float(root.attrib.get("line-rate", "0")) * 100))
           PY
           )
           {
-            echo "## Test Coverage"
+            echo "## Combined Project Coverage"
             echo
-            echo "Coverage: ${COVERAGE_PERCENT}%"
+            echo "Coverage across \`context_graph\` and \`mcp_server/src\`: ${COVERAGE_PERCENT}%"
             echo
             echo '```text'
             cat coverage-report.txt
@@ -126,14 +109,3 @@ jobs:
           git add badges/coverage.svg
           git commit -m "chore: update coverage badge [skip ci]"
           git push
-
-  vendor-codebase-memory-tests:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run vendored codebase memory starter tests
-        working-directory: vendor/codebase_memory_pipeline
-        run: make test-starter

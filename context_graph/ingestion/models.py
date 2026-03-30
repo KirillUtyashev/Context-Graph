@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING
 from context_graph.ingestion.git.git_metadata import CommitInfo
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 
-from context_graph.storage.backend import MutationPlan
+from context_graph.backend import MutationPlan
 
-from ..metadata import RepoSourceState
 from ..models import GraphSnapshot, SnapshotApplyResult
+from context_graph.backend import RepoSourceState
 
 if TYPE_CHECKING:
     from context_graph.ingestion.git.github_indexer import GitHubSyncResult

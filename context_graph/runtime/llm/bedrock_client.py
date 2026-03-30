@@ -21,10 +21,9 @@ import typing
 from json import JSONDecodeError
 from typing import Any
 
-import boto3
 from pydantic import BaseModel, ValidationError
 
-from context_graph.memory.prompts.models import Message
+from context_graph.prompts.models import Message
 from .client import LLMClient
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
 from .errors import RateLimitError, RefusalError
@@ -90,6 +89,8 @@ class BedrockLLMClient(LLMClient):
             config.small_model = DEFAULT_SMALL_MODEL
 
         super().__init__(config, cache)
+
+        import boto3
 
         self._bedrock = boto3.client('bedrock-runtime', region_name=region_name)
 

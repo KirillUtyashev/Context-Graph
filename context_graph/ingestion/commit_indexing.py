@@ -2,26 +2,45 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
+from context_graph.backend.profile_vector_services import ProfileVectorIndexer
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,
+    ClaimProfileKeyGenerationService,
+    ClaimResolutionCandidateRetriever,
+    ClaimResolutionService,
+    ClaimSemanticRetrievalService,
     EvidenceInvalidationPlanner,
     EvidenceExtractionService,
     EvidenceMutationPlanner,
     FactConflictResolutionService,
     ObservationMutationPlanner,
 )
-from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
+from context_graph.provenance.observation_ingestion import (
+    ObservationIngestionItem,
+    ObservationIngestionService,
+)
+from context_graph.provenance.source_adapters import (
+    MarkdownObservationAdapter,
+    build_commit_observation,
+)
+from context_graph.query.parser import QueryParser
+from context_graph.backend import (
+    BackendDriver,
+    MetadataStore,
+    MutationPlan,
+    RepoIndexState,
+    merge_mutation_plans,
+)
 
 from .deterministic_planner import DeterministicMutationPlanner
 from .models import CommitIndexResult
 from .snapshot_builder import CodebaseMemorySnapshotProducer
 from .temporal import TemporalGraphWriter
-from ..metadata import MetadataStore, RepoIndexState
-from ..models import CanonicalNode, GraphSnapshot, SnapshotApplyResult
+from ..models.graph import CanonicalNode, GraphSnapshot, SnapshotApplyResult
 
 
 def default_repo_id(value: str) -> str:
@@ -106,8 +125,13 @@ class CommitIndexingService:
         evidence_service: EvidenceExtractionService | None = None,
         claim_validator: ClaimBundleValidator | None = None,
         evidence_planner: EvidenceMutationPlanner | None = None,
+        claim_resolution_service: ClaimResolutionService | None = None,
         fact_conflict_resolution_service: FactConflictResolutionService | None = None,
         evidence_invalidation_planner: EvidenceInvalidationPlanner | None = None,
+        claim_profile_key_generation_service: ClaimProfileKeyGenerationService | None = None,
+        profile_indexer: ProfileVectorIndexer | None = None,
+        observation_ingestion_service: ObservationIngestionService | None = None,
+        markdown_observation_adapter: MarkdownObservationAdapter | None = None,
     ) -> None:
         self.metadata_store = metadata_store
         self.backend_driver = backend_driver
@@ -120,14 +144,50 @@ class CommitIndexingService:
         )
         self.claim_validator = claim_validator or ClaimBundleValidator()
         self.evidence_planner = evidence_planner or EvidenceMutationPlanner()
+        self.claim_resolution_service = claim_resolution_service or (
+            ClaimResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        self.claim_profile_key_generation_service = claim_profile_key_generation_service or (
+            ClaimProfileKeyGenerationService(llm_client=llm_client) if llm_client is not None else None
+        )
         self.fact_conflict_resolution_service = fact_conflict_resolution_service or (
             FactConflictResolutionService(llm_client=llm_client) if llm_client is not None else None
+        )
+        semantic_claim_search_service = (
+            ClaimSemanticRetrievalService(
+                metadata_store=metadata_store,
+                vector_store=profile_indexer.vector_store,
+                embedding_provider=profile_indexer.embedding_provider,
+                query_parser=QueryParser(llm_client=llm_client),
+            )
+            if profile_indexer is not None
+            and hasattr(profile_indexer, "vector_store")
+            and hasattr(profile_indexer, "embedding_provider")
+            else None
+        )
+        self.claim_candidate_retriever = ClaimResolutionCandidateRetriever(
+            backend_driver=backend_driver,
+            semantic_claim_search_service=semantic_claim_search_service,
         )
         self.evidence_invalidation_planner = evidence_invalidation_planner or EvidenceInvalidationPlanner(
             backend_driver=backend_driver,
             evidence_planner=self.evidence_planner,
+            claim_candidate_retriever=self.claim_candidate_retriever,
+            claim_profile_key_generation_service=self.claim_profile_key_generation_service,
+            claim_resolution_service=self.claim_resolution_service,
             fact_conflict_resolution_service=self.fact_conflict_resolution_service,
         )
+        self.profile_indexer = profile_indexer
+        self.observation_ingestion_service = observation_ingestion_service or ObservationIngestionService(
+            metadata_store=metadata_store,
+            backend_driver=backend_driver,
+            observation_planner=self.observation_planner,
+            claim_extraction_service=self.claim_extraction_service,
+            claim_validator=self.claim_validator,
+            evidence_invalidation_planner=self.evidence_invalidation_planner,
+            profile_indexer=profile_indexer,
+        )
+        self.markdown_observation_adapter = markdown_observation_adapter or MarkdownObservationAdapter()
         self.writer = writer or TemporalGraphWriter(
             metadata_store=metadata_store,
             backend_driver=backend_driver,
@@ -231,24 +291,48 @@ class CommitIndexingService:
         """Replay an explicit chronological sequence of commits.
 
         This helper is used by hosted indexing when a caller asks for a target
-        commit plus a short ancestor window. Each commit is still indexed via
-        ``apply_commit`` so metadata state and temporal diffs remain consistent
-        between steps.
+        commit plus a short ancestor window. Each commit still goes through the
+        same indexing flow and metadata finalization as ``apply_commit``, but
+        the replay reuses one temporary worktree and the in-memory previous
+        snapshot between steps.
         """
 
         if not commit_shas:
             raise ValueError("commit_shas must not be empty")
-        results = [
-            self.apply_commit(
-                repo_path,
-                commit_sha=commit_sha,
-                repo_id=repo_id,
-                branch_hint=branch_hint,
-                limit=limit,
-                execute=execute,
-            )
-            for commit_sha in commit_shas
-        ]
+        resolved_repo_path = self.git_metadata.resolve_repo_root(repo_path)
+        resolved_repo_id = repo_id or default_repo_id(resolved_repo_path)
+        current_state = self.metadata_store.load_repo_index_state(resolved_repo_id)
+        previous_commit_sha = current_state.latest_commit_sha if current_state else None
+        previous_branch = current_state.latest_branch if current_state else None
+        previous_snapshot = self.metadata_store.load_latest_snapshot(resolved_repo_id)
+
+        results: list[CommitIndexResult] = []
+        first_commit_sha = commit_shas[0]
+        with self.git_metadata.temporary_worktree(resolved_repo_path, first_commit_sha) as worktree_path:
+            for index, commit_sha in enumerate(commit_shas):
+                commit = self.git_metadata.get_commit_info(
+                    resolved_repo_path,
+                    commit_sha,
+                    branch_hint=branch_hint,
+                )
+                if index > 0:
+                    self.git_metadata.hard_reset(worktree_path, commit.sha)
+                result = self._apply_commit_from_checkout(
+                    resolved_repo_path=resolved_repo_path,
+                    resolved_repo_id=resolved_repo_id,
+                    commit=commit,
+                    checkout_root=worktree_path,
+                    previous_snapshot=previous_snapshot,
+                    previous_commit_sha=previous_commit_sha,
+                    previous_branch=previous_branch,
+                    limit=limit,
+                    execute=execute,
+                )
+                results.append(result)
+                if not result.skipped:
+                    previous_snapshot = result.snapshot
+                    previous_commit_sha = commit.sha
+                    previous_branch = commit.branch
         if len(results) == 1:
             return results[0]
         return self._aggregate_commit_results(results)
@@ -350,74 +434,151 @@ class CommitIndexingService:
             branch_hint=branch_hint,
         )
         previous_commit_sha = current_state.latest_commit_sha if current_state else None
+        previous_snapshot = self.metadata_store.load_latest_snapshot(resolved_repo_id)
+        with self.git_metadata.temporary_worktree(resolved_repo_path, commit.sha) as worktree_path:
+            return self._apply_commit_from_checkout(
+                resolved_repo_path=resolved_repo_path,
+                resolved_repo_id=resolved_repo_id,
+                commit=commit,
+                checkout_root=worktree_path,
+                previous_snapshot=previous_snapshot,
+                previous_commit_sha=previous_commit_sha,
+                previous_branch=current_state.latest_branch if current_state else None,
+                limit=limit,
+                execute=execute,
+            )
+
+    def _build_skipped_commit_result(
+        self,
+        *,
+        resolved_repo_path: str,
+        resolved_repo_id: str,
+        commit: CommitInfo,
+        previous_commit_sha: str | None,
+    ) -> CommitIndexResult:
+        return CommitIndexResult(
+            repo_id=resolved_repo_id,
+            repo_path=resolved_repo_path,
+            commit=commit,
+            previous_commit_sha=previous_commit_sha,
+            branch=commit.branch,
+            skipped=True,
+            skip_reason="commit already indexed",
+            snapshot=None,
+            apply_result=None,
+            operations=MutationPlan(),
+            applied_commit_shas=(),
+        )
+
+    def _apply_commit_from_checkout(
+        self,
+        *,
+        resolved_repo_path: str,
+        resolved_repo_id: str,
+        commit: CommitInfo,
+        checkout_root: str,
+        previous_snapshot: GraphSnapshot | None,
+        previous_commit_sha: str | None,
+        previous_branch: str | None,
+        limit: int,
+        execute: bool,
+    ) -> CommitIndexResult:
         if previous_commit_sha == commit.sha:
-            return CommitIndexResult(
-                repo_id=resolved_repo_id,
-                repo_path=resolved_repo_path,
+            return self._build_skipped_commit_result(
+                resolved_repo_path=resolved_repo_path,
+                resolved_repo_id=resolved_repo_id,
                 commit=commit,
                 previous_commit_sha=previous_commit_sha,
-                branch=commit.branch,
-                skipped=True,
-                skip_reason="commit already indexed",
-                snapshot=None,
-                apply_result=None,
-                operations=MutationPlan(),
-                applied_commit_shas=(),
             )
 
         self._ensure_supported_lineage(
             resolved_repo_path,
             previous_commit_sha=previous_commit_sha,
-            previous_branch=current_state.latest_branch if current_state else None,
+            previous_branch=previous_branch,
             target_commit=commit,
         )
 
-        with self.git_metadata.temporary_worktree(resolved_repo_path, commit.sha) as worktree_path:
-            snapshot = self.snapshot_producer.build_snapshot(
-                worktree_path,
-                repo_id=resolved_repo_id,
-                revision_id=commit.sha,
-                limit=limit,
-            )
-
+        snapshot = self.snapshot_producer.build_snapshot(
+            checkout_root,
+            repo_id=resolved_repo_id,
+            revision_id=commit.sha,
+            limit=limit,
+        )
         normalized_snapshot = normalize_snapshot_for_commit(
             snapshot,
             repo_path=resolved_repo_path,
             commit=commit,
         )
-        structural_plan = self.writer.plan_snapshot(normalized_snapshot)
+        markdown_planned_observations = self.markdown_observation_adapter.build_observations(
+            planner=self.observation_planner,
+            snapshot=normalized_snapshot,
+            checkout_root=checkout_root,
+        )
+        plan_snapshot_against = getattr(self.writer, "plan_snapshot_against", None)
+        if callable(plan_snapshot_against):
+            structural_plan = plan_snapshot_against(
+                previous_snapshot=previous_snapshot,
+                snapshot=normalized_snapshot,
+            )
+        else:
+            structural_plan = self.writer.plan_snapshot(normalized_snapshot)
         commit_plan = self.planner.plan_commit_provenance(
             snapshot=structural_plan.snapshot,
             diff=structural_plan.diff,
             commit=commit,
             planning_state=structural_plan.state,
         )
-        planned_observation = self.observation_planner.build_commit_message_observation(
+        planned_observation = build_commit_observation(
+            planner=self.observation_planner,
             repo_id=structural_plan.snapshot.repo_id,
             commit=commit,
         )
-        observation_plan = (
-            self.observation_planner.plan_observations(planned_observation)
-            if planned_observation is not None
-            else MutationPlan()
+        observation_items = [
+            ObservationIngestionItem(
+                planned_observation=planned_observation,
+                source_context={
+                    "commit_sha": commit.sha,
+                    "changed_files": list(commit.changed_files),
+                },
+            )
+            for planned_observation in ((planned_observation,) if planned_observation is not None else ())
+        ]
+        observation_items.extend(
+            ObservationIngestionItem(
+                planned_observation=planned,
+                source_context={
+                    "document_path": planned.observation.metadata.get("document_path"),
+                },
+            )
+            for planned in markdown_planned_observations
         )
-        evidence_plan, claim_counts = self._plan_commit_evidence(
-            planned_observation=planned_observation,
+        observation_ingestion_result = self.observation_ingestion_service.plan_ingestion(
+            items=tuple(observation_items),
             snapshot=structural_plan.snapshot,
-            commit=commit,
         )
-        all_operations = self.planner.merge_plans(
-            structural_plan.plan,
-            commit_plan,
-            observation_plan,
-            evidence_plan,
-        )
+        observation_plan = observation_ingestion_result.observation_plan
+        evidence_plan = observation_ingestion_result.evidence_plan
+        profiles = observation_ingestion_result.profiles
+        profile_deactivations = observation_ingestion_result.profile_deactivations
+        all_operation_plans = [structural_plan.plan]
+        if not commit_plan.is_empty():
+            all_operation_plans.append(commit_plan)
+        if not observation_plan.is_empty():
+            all_operation_plans.append(observation_plan)
+        if not evidence_plan.is_empty():
+            all_operation_plans.append(evidence_plan)
+        all_operations = self.planner.merge_plans(*all_operation_plans)
         apply_result = self.writer.apply_planned_snapshot(
             structural_plan.snapshot,
             structural_plan.diff,
             all_operations,
             execute=execute,
         )
+        if execute and (profiles or profile_deactivations):
+            self.observation_ingestion_service.persist_profiles(
+                profiles,
+                deactivations=profile_deactivations,
+            )
         self.metadata_store.save_repo_index_state(
             RepoIndexState(
                 repo_id=structural_plan.snapshot.repo_id,
@@ -444,11 +605,11 @@ class CommitIndexingService:
             applied_commit_shas=(commit.sha,),
             observation_operations=observation_plan,
             evidence_operations=evidence_plan,
-            claim_candidates_extracted=claim_counts["extracted"],
-            claim_candidates_validated=claim_counts["validated"],
-            claim_candidates_rejected=claim_counts["rejected"],
-            claim_rejection_reasons=dict(claim_counts["reasons"]),
-            evidence_invalidated=claim_counts["invalidated"],
+            claim_candidates_extracted=observation_ingestion_result.claim_candidates_extracted,
+            claim_candidates_validated=observation_ingestion_result.claim_candidates_validated,
+            claim_candidates_rejected=observation_ingestion_result.claim_candidates_rejected,
+            claim_rejection_reasons=dict(observation_ingestion_result.claim_rejection_reasons),
+            evidence_invalidated=observation_ingestion_result.evidence_invalidated,
         )
 
     def _ensure_supported_lineage(
@@ -547,52 +708,41 @@ class CommitIndexingService:
         snapshot: GraphSnapshot,
         commit: CommitInfo,
     ) -> tuple[MutationPlan, dict[str, object]]:
-        zero_counts: dict[str, object] = {
-            "extracted": 0,
-            "validated": 0,
-            "rejected": 0,
-            "reasons": {},
-            "invalidated": 0,
-        }
-        if planned_observation is None or self.claim_extraction_service is None:
-            return MutationPlan(), zero_counts
-        try:
-            extraction = self.claim_extraction_service.extract(
-                planned_observation.observation,
-                source_context={
-                    "source_kind": planned_observation.source.source_kind,
-                    "source_record_type": planned_observation.source.source_record_type,
-                    "source_id": planned_observation.source.source_id,
-                    "source_display_name": planned_observation.source.display_name,
-                    "commit_sha": commit.sha,
-                    "branch": commit.branch,
-                    "changed_files": list(commit.changed_files),
-                    "parent_shas": list(commit.parent_shas),
-                },
-            )
-        except Exception:
-            return MutationPlan(), zero_counts
-        validation = self.claim_validator.validate(
-            observation=planned_observation.observation,
-            extraction=extraction,
-            snapshot=snapshot,
-        )
-        invalidation_result = self.evidence_invalidation_planner.plan_validated_claims(
-            observation=planned_observation.observation,
-            validation=validation,
+        if planned_observation is None:
+            return MutationPlan(), {
+                "extracted": 0,
+                "validated": 0,
+                "rejected": 0,
+                "reasons": {},
+                "invalidated": 0,
+                "profiles": (),
+            }
+        result = self.observation_ingestion_service.plan_ingestion(
+            items=(
+                ObservationIngestionItem(
+                    planned_observation=planned_observation,
+                    source_context={
+                        "commit_sha": commit.sha,
+                        "changed_files": list(commit.changed_files),
+                    },
+                ),
+            ),
             snapshot=snapshot,
         )
         return (
-            invalidation_result.plan,
+            result.evidence_plan,
             {
-                "extracted": validation.extracted_count,
-                "validated": validation.validated_count,
-                "rejected": validation.rejected_count,
-                "reasons": validation.rejection_reason_counts,
-                "invalidated": invalidation_result.invalidated_count,
+                "extracted": result.claim_candidates_extracted,
+                "validated": result.claim_candidates_validated,
+                "rejected": result.claim_candidates_rejected,
+                "reasons": result.claim_rejection_reasons,
+                "invalidated": result.evidence_invalidated,
+                "profiles": result.profiles,
             },
         )
 
+    def _persist_profiles(self, profiles: Sequence[Any], deactivations: Sequence[Any] = ()) -> None:
+        self.observation_ingestion_service.persist_profiles(profiles, deactivations=deactivations)
 
 def _merge_reason_counts(*reason_maps: dict[str, int]) -> dict[str, int]:
     counts: dict[str, int] = {}

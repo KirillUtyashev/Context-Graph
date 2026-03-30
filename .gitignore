@@ -33,7 +33,7 @@ evaluation/**/__pycache__/
 *.out
 
 # Vendored codebase pipeline build outputs
-vendor/codebase_memory_pipeline/build/
+codebase_memory_pipeline/build/
 
 # Test / coverage artifacts
 coverage.xml

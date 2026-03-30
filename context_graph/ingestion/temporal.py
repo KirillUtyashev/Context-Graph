@@ -5,9 +5,8 @@ from .deterministic_planner import (
     DeterministicMutationPlanner,
     DeterministicSnapshotPlan,
 )
-from ..metadata import MetadataStore
 from ..models import GraphSnapshot, SnapshotApplyResult, SnapshotDiff
-from ..storage.backend import BackendDriver, BackendSyncBridge, MutationPlan
+from context_graph.backend import BackendDriver, BackendSyncBridge, MetadataStore, MutationPlan
 
 
 class TemporalGraphWriter:
@@ -30,9 +29,19 @@ class TemporalGraphWriter:
         """Load the previous snapshot, diff it, and build a typed mutation plan."""
 
         previous = self.metadata_store.load_latest_snapshot(snapshot.repo_id)
-        diff = diff_snapshots(previous, snapshot)
+        return self.plan_snapshot_against(previous_snapshot=previous, snapshot=snapshot)
+
+    def plan_snapshot_against(
+        self,
+        *,
+        previous_snapshot: GraphSnapshot | None,
+        snapshot: GraphSnapshot,
+    ) -> DeterministicSnapshotPlan:
+        """Build a typed mutation plan against an explicit previous snapshot."""
+
+        diff = diff_snapshots(previous_snapshot, snapshot)
         return self.planner.plan_snapshot_diff(
-            previous_snapshot=previous,
+            previous_snapshot=previous_snapshot,
             snapshot=snapshot,
             diff=diff,
         )

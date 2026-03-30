@@ -16,8 +16,8 @@ from context_graph.code_identity import (
     SnapshotCodeResolver,
 )
 from context_graph.ingestion.git.git_metadata import CommitInfo
-from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
-from context_graph.storage.backend import (
+from context_graph.models.graph import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
+from context_graph.backend import (
     EdgeRecord,
     merge_mutation_plans,
     MutationPlan,
@@ -749,7 +749,12 @@ def _edge_version_record_id(edge_id: str, revision_id: str) -> str:
 
 
 def _search_text(*parts: Any) -> str:
-    return " ".join(part for part in (_normalized_text(value) for value in parts) if part)
+    normalized_parts: list[str] = []
+    for value in parts:
+        normalized = _normalized_text(value)
+        if normalized:
+            normalized_parts.append(normalized)
+    return " ".join(normalized_parts)
 
 
 def _normalized_text(value: Any) -> str:

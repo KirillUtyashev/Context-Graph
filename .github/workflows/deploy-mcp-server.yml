@@ -4,8 +4,10 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "vendor/graphiti/mcp_server/**"
-      - "vendor/graphiti/graphiti_core/**"
+      - "mcp_server/**"
+      - "context_graph/**"
+      - "scripts/deploy-mcp.sh"
+      - "infra/**"
   workflow_dispatch:
     inputs:
       env:
@@ -20,7 +22,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
-      - name: "Build deploy matrix (push: dev+prod, manual: selected env)"
+      - name: Build deploy matrix
         id: set
         shell: bash
         run: |
@@ -44,100 +46,17 @@ jobs:
       contents: read
     env:
       AWS_REGION: ca-central-1
-      PROJECT_NAME: context-graph
-      SERVICE_NAME: mcp-server
     steps:
       - uses: actions/checkout@v4
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          # GitHub repo secret like: arn:aws:iam::<account-id>:role/github-actions-oidc
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           role-session-name: gha-deploy-mcp-${{ github.run_id }}-${{ matrix.env }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Resolve instance id (by Name tag)
-        id: instance
+      - name: Deploy MCP server
         shell: bash
         run: |
           set -euo pipefail
-          env="${{ matrix.env }}"
-          name_tag="${PROJECT_NAME}-${env}-mcp"
-          instance_id="$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${name_tag}" "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)"
-          if [[ "${instance_id}" == "None" || -z "${instance_id}" ]]; then
-            echo "Could not find running instance with Name tag ${name_tag}" >&2
-            exit 1
-          fi
-          echo "id=${instance_id}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve artifacts bucket name
-        id: artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          env="${{ matrix.env }}"
-          account_id="$(aws sts get-caller-identity --query Account --output text)"
-          # Must match Terraform: "${project}-${env}-${account_id}-mcp-artifacts"
-          bucket="${PROJECT_NAME}-${env}-${account_id}-mcp-artifacts"
-          echo "bucket=${bucket}" >> "$GITHUB_OUTPUT"
-
-      - name: Build MCP server artifact (tar.gz)
-        shell: bash
-        run: |
-          set -euo pipefail
-          MCP_DIR="vendor/graphiti/mcp_server"
-          GRAPHITI_DIR="vendor/graphiti"
-          test -d "${MCP_DIR}"
-
-          STAGING_DIR="/tmp/mcp_server_staging"
-          mkdir -p "${STAGING_DIR}"
-          cp -a "${MCP_DIR}/." "${STAGING_DIR}/"
-
-          # Bundle graphiti-core source so EC2 can install it as an editable dep
-          mkdir -p "${STAGING_DIR}/graphiti_core_src"
-          rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
-            --exclude='mcp_server' --exclude='uv.lock' --exclude='.venv' \
-            "${GRAPHITI_DIR}/" "${STAGING_DIR}/graphiti_core_src/"
-
-          tar -czf /tmp/mcp_server.tar.gz -C "${STAGING_DIR}" .
-
-      - name: Upload artifact to S3
-        shell: bash
-        run: |
-          set -euo pipefail
-          bucket="${{ steps.artifacts.outputs.bucket }}"
-          sha="${GITHUB_SHA}"
-
-          aws s3 cp /tmp/mcp_server.tar.gz "s3://${bucket}/mcp-server/${sha}.tar.gz"
-          # Convenience pointer for quick manual deploys.
-          aws s3 cp /tmp/mcp_server.tar.gz "s3://${bucket}/mcp-server/latest.tar.gz"
-          # Upload the deploy script itself so EC2 gets the latest version
-          aws s3 cp scripts/deploy-mcp.sh "s3://${bucket}/mcp-server/deploy-mcp-server.sh" 2>/dev/null || true
-
-      - name: Deploy via SSM Run Command
-        shell: bash
-        run: |
-          set -euo pipefail
-          instance_id="${{ steps.instance.outputs.id }}"
-          sha="${GITHUB_SHA}"
-          bucket="${{ steps.artifacts.outputs.bucket }}"
-
-          command_id="$(aws ssm send-command \
-            --instance-ids "${instance_id}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy MCP server ${sha}" \
-            --parameters "commands=[
-              \"aws s3 cp s3://${bucket}/mcp-server/deploy-mcp-server.sh /usr/local/bin/deploy-mcp-server.sh || true\",
-              \"chmod +x /usr/local/bin/deploy-mcp-server.sh\",
-              \"/usr/local/bin/deploy-mcp-server.sh ${bucket} ${sha}\",
-              \"systemctl status mcp-server.service --no-pager -l | tail -n 50\"
-            ]" \
-            --query "Command.CommandId" \
-            --output text)"
-
-          echo "SSM command id: ${command_id}"
-          aws ssm wait command-executed --command-id "${command_id}" --instance-id "${instance_id}"
-
+          bash scripts/deploy-mcp.sh --env "${{ matrix.env }}"

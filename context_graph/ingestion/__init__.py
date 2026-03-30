@@ -1,3 +1,5 @@
+"""Git-aware codebase ingestion, snapshot building, and diffing."""
+
 from __future__ import annotations
 
 from importlib import import_module

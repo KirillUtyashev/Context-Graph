@@ -3,11 +3,22 @@ name = "context-graph"
 version = "0.1.0"
 requires-python = ">=3.10,<4"
 dependencies = [
-    # Local editable fork of graphiti-core with neptune + bedrock support
-    "graphiti-core[neptune]",
-    # Context-graph pipeline deps (previously in context_graph/requirements-local.txt)
+    # Graph backends
     "neo4j>=5.22,<6",
+    "langchain-aws>=0.2,<1",
+    "opensearch-py>=2.7,<3",
+    # Metadata backend
     "psycopg[binary]>=3.2,<4",
+    # AWS
+    "boto3>=1.39,<2",
+    # LLM / embeddings
+    "openai>=1.91,<2",
+    "tenacity>=9,<10",
+    # Runtime
+    "pydantic>=2.11,<3",
+    "numpy>=1,<3",
+    "httpx>=0.27,<1",
+    "python-dotenv>=1.0,<2",
 ]
 
 [dependency-groups]
@@ -16,10 +27,8 @@ dev = [
     "pytest-cov>=7,<8",
     "pydantic-settings>=2.10,<3",
     "pyyaml>=6,<7",
+    "ruff>=0.11,<1",
 ]
-
-[tool.uv.sources]
-graphiti-core = { path = "./vendor/graphiti", editable = true }
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -31,34 +40,25 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["context_graph"]
 
+[tool.uv.workspace]
+members = ["mcp_server"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["context_graph"]
-omit = [
-    "context_graph/cli.py",
-    "context_graph/episodes.py",
-    "context_graph/graph_read.py",
-    "context_graph/memory/**",
-    "context_graph/server/**",
-    "context_graph/runtime/embedding/**",
-    "context_graph/runtime/llm/bedrock_client.py",
-    "context_graph/runtime/llm/client.py",
-    "context_graph/runtime/llm/openai_base_client.py",
-    "context_graph/runtime/llm/openai_client.py",
-    "context_graph/runtime/providers/**",
-    "context_graph/storage/backend/__init__.py",
-    "context_graph/storage/backend/driver.py",
-    "context_graph/storage/backend/factory.py",
-    "context_graph/storage/backend/maintenance.py",
-    "context_graph/storage/backend/query_executor.py",
-    "context_graph/storage/backend/sync_bridge.py",
-    "context_graph/storage/backend/traversal.py",
-    "context_graph/ingestion/git/github_indexer.py",
-    "context_graph/ingestion/git/structural_planner.py",
-]
 
 [tool.coverage.report]
 show_missing = true
-skip_empty = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
+"tests/**/conftest.py" = ["F401"]
