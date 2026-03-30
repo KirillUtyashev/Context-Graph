@@ -629,6 +629,290 @@ class SmallModuleTests(unittest.TestCase):
                 mcp_config.DatabaseConfig(provider="unsupported")
             )
 
+        with self.assertRaises(TypeError):
+            with patch.object(
+                factories.DatabaseDriverFactory,
+                "create_backend_config",
+                return_value=object(),
+            ):
+                factories.DatabaseDriverFactory.create_config(neo4j_config)
+
+    def test_lazy_package_exports_and_backend_factories_cover_remaining_branches(self) -> None:
+        import context_graph as package
+
+        marker = object()
+        with patch.object(package, "import_module", return_value=SimpleNamespace(AuroraMetadataStore=marker)):
+            self.assertIs(package.__getattr__("AuroraMetadataStore"), marker)
+
+        with self.assertRaises(AttributeError):
+            package.__getattr__("DoesNotExist")
+        self.assertIn("AuroraMetadataStore", package.__dir__())
+
+        backend_factory = importlib.import_module("context_graph.backend.factory")
+        neo4j_config_module = importlib.import_module("context_graph.backend.neo4j.config")
+        neptune_config_module = importlib.import_module("context_graph.backend.neptune.config")
+        metadata_factory = importlib.import_module("context_graph.backend.metadata.factory")
+        metadata_config = importlib.import_module("context_graph.backend.metadata.config")
+
+        with patch(
+            "context_graph.backend.neo4j.driver.Neo4jBackendDriver",
+            side_effect=lambda config: ("neo4j", config),
+        ), patch(
+            "context_graph.backend.neptune.driver.NeptuneBackendDriver",
+            side_effect=lambda config: ("neptune", config),
+        ):
+            self.assertEqual(
+                backend_factory.create_driver(
+                    neo4j_config_module.Neo4jConfig(uri="bolt://db", user="neo4j", password="secret")
+                )[0],
+                "neo4j",
+            )
+            self.assertEqual(
+                backend_factory.create_driver(
+                    neptune_config_module.NeptuneConfig(host="https://neptune.example")
+                )[0],
+                "neptune",
+            )
+        with self.assertRaises(TypeError):
+            backend_factory.create_driver(object())
+
+        with patch.object(metadata_factory, "InMemoryMetadataStore", return_value=("memory", None)), patch.object(
+            metadata_factory,
+            "SQLiteMetadataStore",
+            side_effect=lambda path: ("sqlite", path),
+        ), patch.object(
+            metadata_factory,
+            "PostgresMetadataStore",
+            SimpleNamespace(from_dsn=lambda dsn: ("postgres", dsn)),
+        ):
+            self.assertEqual(
+                metadata_factory.create_metadata_store(metadata_config.InMemoryMetadataConfig())[0],
+                "memory",
+            )
+            self.assertEqual(
+                metadata_factory.create_metadata_store(
+                    metadata_config.SQLiteMetadataConfig(path="/tmp/metadata.sqlite")
+                ),
+                ("sqlite", "/tmp/metadata.sqlite"),
+            )
+            self.assertEqual(
+                metadata_factory.create_metadata_store(
+                    metadata_config.PostgresMetadataConfig(dsn="postgresql://demo")
+                ),
+                ("postgres", "postgresql://demo"),
+            )
+        with self.assertRaises(TypeError):
+            metadata_factory.create_metadata_store(object())
+
+    def test_snapshot_producer_and_ingestion_driver_delegate_to_services(self) -> None:
+        snapshot_builder = importlib.import_module("context_graph.ingestion.snapshot_builder")
+        ingestion_driver = importlib.import_module("context_graph.ingestion.driver")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = importlib.import_module("pathlib").Path(temp_dir)
+            producer = snapshot_builder.CodebaseMemorySnapshotProducer(root=root)
+
+            def fake_subprocess_run(command, cwd, check, **kwargs):
+                if command[0] == "make":
+                    producer.binary.parent.mkdir(parents=True, exist_ok=True)
+                    producer.binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                else:
+                    output_path = importlib.import_module("pathlib").Path(command[2])
+                    output_path.write_text('{"nodes": []}', encoding="utf-8")
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(snapshot_builder.subprocess, "run", side_effect=fake_subprocess_run):
+                producer.ensure_binary()
+                exported = producer.export_graph("/repo", repo_id="demo")
+            self.assertEqual(exported, {"nodes": []})
+
+            with patch.object(producer, "export_graph", return_value={"payload": "ok"}), patch.object(
+                snapshot_builder,
+                "build_snapshot_from_graph_export",
+                side_effect=lambda payload, repo_id, revision_id: {
+                    "payload": payload,
+                    "repo_id": repo_id,
+                    "revision_id": revision_id,
+                },
+            ):
+                built = producer.build_snapshot("/repo", repo_id="demo", revision_id="rev-1")
+            self.assertEqual(
+                built,
+                {"payload": {"payload": "ok"}, "repo_id": "demo", "revision_id": "rev-1"},
+            )
+
+        class FakeCommitIndexingService:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def apply_latest_commit(self, *args, **kwargs):
+                return ("latest", self.kwargs, args, kwargs)
+
+            def apply_commit(self, *args, **kwargs):
+                return ("commit", self.kwargs, args, kwargs)
+
+        class FakeHostedIndexingService:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def index(self, request):
+                return ("hosted", self.kwargs, request)
+
+        with patch.object(ingestion_driver, "CodebaseMemorySnapshotProducer", return_value="snapshot-producer"), patch.object(
+            ingestion_driver,
+            "GitMetadata",
+            return_value="git-metadata",
+        ), patch.object(
+            ingestion_driver,
+            "RepoCacheManager",
+            side_effect=lambda *, git_metadata: ("repo-cache", git_metadata),
+        ), patch.object(
+            ingestion_driver,
+            "DeterministicMutationPlanner",
+            return_value="planner",
+        ), patch.object(
+            ingestion_driver,
+            "GitHubRepoResolver",
+            side_effect=lambda **kwargs: ("resolver", kwargs),
+        ), patch.object(
+            ingestion_driver,
+            "CommitIndexingService",
+            side_effect=lambda **kwargs: FakeCommitIndexingService(**kwargs),
+        ), patch.object(
+            ingestion_driver,
+            "HostedIndexingService",
+            side_effect=lambda **kwargs: FakeHostedIndexingService(**kwargs),
+        ):
+            driver = ingestion_driver.IngestionDriver(metadata_store="metadata", backend_driver="backend")
+            latest = driver.apply_latest_commit(
+                "/repo",
+                repo_id="demo",
+                branch_hint="main",
+                limit=5,
+                execute=True,
+            )
+            commit = driver.apply_commit(
+                "/repo",
+                commit_sha="abc123",
+                repo_id="demo",
+                branch_hint="main",
+                limit=7,
+                execute=False,
+            )
+            hosted = driver.index_hosted("request")
+
+        self.assertEqual(driver.snapshot_producer, "snapshot-producer")
+        self.assertEqual(driver.git_metadata, "git-metadata")
+        self.assertEqual(driver.repo_cache, ("repo-cache", "git-metadata"))
+        self.assertEqual(driver.planner, "planner")
+        self.assertEqual(driver.repo_resolver[0], "resolver")
+        self.assertEqual(latest[0], "latest")
+        self.assertEqual(commit[0], "commit")
+        self.assertEqual(hosted[0], "hosted")
+
+    def test_profile_vector_search_maintenance_and_debug_helpers_cover_small_branches(self) -> None:
+        vector_factory = importlib.import_module("context_graph.backend.profile_vectors.factory")
+        vector_config = importlib.import_module("context_graph.backend.profile_vectors.config")
+        search_module = importlib.import_module("context_graph.backend.search")
+        backend_types = importlib.import_module("context_graph.backend.types")
+        maintenance = importlib.import_module("context_graph.backend.maintenance")
+        debug_module = importlib.import_module("context_graph.provenance.debug")
+
+        with patch.object(vector_factory, "InMemoryProfileVectorStore", return_value=("memory", None)), patch.object(
+            vector_factory,
+            "PgVectorProfileVectorStore",
+            side_effect=lambda connection, embedding_dim: ("pgvector", connection, embedding_dim),
+        ), patch.object(
+            vector_factory,
+            "create_profile_vector_store_from_metadata",
+            side_effect=lambda metadata_store, embedding_dim: ("from-metadata", metadata_store, embedding_dim),
+        ):
+            self.assertEqual(
+                vector_factory.create_profile_vector_store(
+                    vector_config.InMemoryProfileVectorConfig()
+                )[0],
+                "memory",
+            )
+            self.assertEqual(
+                vector_factory.create_profile_vector_store(
+                    vector_config.PgVectorProfileVectorConfig(embedding_dim=256),
+                    connection="conn",
+                ),
+                ("pgvector", "conn", 256),
+            )
+            self.assertEqual(
+                vector_factory.create_profile_vector_store(
+                    vector_config.PgVectorProfileVectorConfig(embedding_dim=128),
+                    metadata_store="metadata-store",
+                ),
+                ("from-metadata", "metadata-store", 128),
+            )
+        with self.assertRaises(RuntimeError):
+            vector_factory.create_profile_vector_store(
+                vector_config.PgVectorProfileVectorConfig(embedding_dim=64)
+            )
+        with self.assertRaises(TypeError):
+            vector_factory.create_profile_vector_store(object())
+
+        class FakePostgresMetadataStore:
+            def __init__(self) -> None:
+                self.connection = "pg-conn"
+
+        with patch.object(vector_factory, "PostgresMetadataStore", FakePostgresMetadataStore), patch.object(
+            vector_factory,
+            "PgVectorProfileVectorStore",
+            side_effect=lambda connection, embedding_dim: ("pgvector", connection, embedding_dim),
+        ):
+            self.assertEqual(
+                vector_factory.create_profile_vector_store_from_metadata(
+                    FakePostgresMetadataStore(),
+                    embedding_dim=512,
+                ),
+                ("pgvector", "pg-conn", 512),
+            )
+        with self.assertRaises(RuntimeError):
+            vector_factory.create_profile_vector_store_from_metadata(object())
+
+        search_module.validate_extra_filters({"repo_id": "demo"})
+        with self.assertRaises(ValueError):
+            search_module.validate_extra_filters({"repo-id": "demo"})
+
+        lexical_query = backend_types.SearchQuery(mode=backend_types.SearchMode.LEXICAL, text="jwt")
+        search_module.ensure_lexical_mode(lexical_query)
+        non_lexical_mode = next(
+            mode for mode in backend_types.SearchMode if mode is not backend_types.SearchMode.LEXICAL
+        )
+        with self.assertRaises(ValueError):
+            search_module.ensure_lexical_mode(
+                backend_types.SearchQuery(mode=non_lexical_mode, text="jwt")
+            )
+
+        self.assertEqual(
+            maintenance.ScopeResetResult(
+                repo_id="demo",
+                nodes_deleted=1,
+                edges_deleted=2,
+                search_documents_deleted=3,
+            ).total_deleted,
+            6,
+        )
+        self.assertEqual(
+            maintenance.RepoResetResult(
+                repo_id="demo",
+                nodes_deleted=4,
+                edges_deleted=5,
+                search_documents_deleted=6,
+            ).total_deleted,
+            15,
+        )
+
+        with patch.object(debug_module.logger, "isEnabledFor", return_value=True), patch.object(
+            debug_module.logger,
+            "debug",
+        ) as debug_mock:
+            debug_module.emit_provenance_debug("index", {"repo_id": "demo"})
+        debug_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -857,6 +857,10 @@ class _DbApiMetadataStore(MetadataStore):
         self.connection.commit()
         return deleted_counts
 
+    def close(self) -> None:
+        """Close the underlying database connection."""
+        self.connection.close()
+
 
 class SQLiteMetadataStore(_DbApiMetadataStore):
     """SQLite metadata store used in local development and tests."""
