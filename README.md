@@ -68,6 +68,7 @@ uv run --package context-graph-mcp context-graph-mcp \
 - [Provenance](docs/provenance.md)
 - [Backend](docs/backend.md)
 - [Ingestion Internals](docs/ingestion-internals.md)
+- [Benchmarking](evaluations/MCP_RUN_GUIDE.md)
 
 ## Testing
 
