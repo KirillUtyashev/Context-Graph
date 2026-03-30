@@ -1,0 +1,53 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: The completed attempt count.
+   Model answer: Here’s what the context-graph MCP results show.
+
+## Answer
+
+After the **v1.6.1** fix, **completed attempt count** drives both **dead-letter** decisions and **backoff** scheduling.
+
+The release note states: webhook retry scheduling was fixed so **completed attempt counts** drive **both** backoff and dead-letter decisions (`docs/releases/2026-03-21-v1.6.1.md`).
+
+In `webhookWorker.ts`, that is implemented as **`completedAttemptCount`**, defined as `job.attemptCount + 1` after `dispatchWebhook` returns (so it reflects the attempt that just finished, not a stale count used before incrementing).
+
+- **Dead-letter:** the job is marked dead when `completedAttemptCount >= job.maxAttempts` (or the error is non-retryable).
+- **Backoff:** the next run uses `nextAttemptDate(completedAttemptCount)` so the delay matches the number of **completed** failures.
+
+Comments in the same file describe the bug the fix addressed: previously `attemptCount + 1` was applied **after** using the count for `nextAttemptDate`, which shifted every backoff slot; the fix aligns scheduling with **completed** attempts.
+
+2. Required fact: The issue and incident docs say the Swagger block drifted from an internal admin branch, and the public integration doc remains the canonical external cursor-based contract.
+   Model answer: Here is what the context-graph **search_code** results show (no repo files were read directly).
+
+## Primary evidence (page-based Swagger vs `/api/orders`)
+
+**`docs/incidents/2026-03-18-pagination-contract-confusion.md`** — incident titled “Conflicting pagination guidance for `/api/orders`”. A matched line states that two schemes were advertised (cursor vs page-based), and explicitly:
+
+- For **external clients**, **cursor pagination is canonical**.
+- The **page-based Swagger block** came from an **internal admin branch** and **must not be treated as the released contract**.
+
+That is the clearest “do not trust that Swagger block” statement tied to `/api/orders` pagination.
+
+## Supporting evidence (Swagger not authoritative for externals)
+
+**`docs/architecture/004-public-api-contract-sources.md`** — a matched line says Swagger annotations are only hints and, **if they disagree with published integration docs, they are not authoritative for external clients**.
+
+## Supporting evidence (`/api/orders` vs Swagger drift)
+
+**`docs/releases/2026-03-21-v1.6.1.md`** — a release bullet says the team **clarified that cursor pagination remains the public `/api/orders` contract despite Swagger drift**.
+
+**`docs/releases/2026-03-15-v1.6.0.md`** — notes that **public pagination docs and Swagger comments were not fully reconciled** yet.
+
+---
+
+**Bottom line:** Repository evidence that externals should **not** rely on the page-based Swagger description for `/api/orders` is concentrated in **`docs/incidents/2026-03-18-pagination-contract-confusion.md`** (internal-admin origin + not the released contract), with **`docs/architecture/004-public-api-contract-sources.md`** and the **v1.6.0 / v1.6.1** release notes reinforcing that integration docs and cursor pagination define the public contract, not drifting Swagger.

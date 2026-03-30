@@ -1,0 +1,36 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: Because the replay workflow is designed as an operational retry, not as a semantic reset. The runbook, admin route, PR/review #241, and WebhookJob model preserve attempt history so operators can replay a job without erasing provenance needed for debugging.
+   Model answer: Here’s what the repo says.
+
+**Reason:** Manual replay (`POST /webhooks/jobs/:id/retry`) is written so **`attemptCount` is left unchanged on purpose** so you keep an **audit trail of how many times the webhook was already tried** before someone manually re-queued it.
+
+That’s stated directly in the admin route:
+
+```47:51:src/routes/webhookAdmin.ts
+  // reset the job - it'll get picked up on the next poll cycle
+  job.status    = "pending";
+  job.nextRunAt = new Date();
+  // intentionally NOT resetting attemptCount so we have audit trail of how many times it's been tried
+  await job.save();
+```
+
+The runbook aligns with that (“operations wants the retry history preserved”):
+
+```6:9:docs/runbooks/webhook-dead-letter-replay.md
+## Facts To Remember
+- The worker polls every 5 seconds.
+- Manual retry sets the job back to `pending` and `nextRunAt = now`.
+- Manual retry does **not** reset `attemptCount`; operations wants the retry history preserved.
+```
+
+So “preserving attempt count instead of resetting delivery history” is a **product/ops choice**: re-queue the job for another delivery, but **don’t wipe the counter** that records prior attempts. Only **`status`** and **`nextRunAt`** are reset for the replay; **`attemptCount`** (and anything else the handler doesn’t clear, e.g. `lastError` / `lastAttemptAt`) stays so support and ops can still see how many tries happened before the manual retry.

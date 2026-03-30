@@ -1,0 +1,1 @@
+You are a developer working on a frontend application that integrates with an order-management-service backend. You do not have access to the backend source code or documentation.

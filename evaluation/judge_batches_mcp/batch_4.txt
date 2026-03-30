@@ -1,0 +1,345 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: The retry investigation says the timing mismatch came from when an attempt was considered completed, issue #241 reports the symptom, PR #241 and its review describe the completed-attempt fix, the worker code shows completedAttemptCount, and backoff.ts preserves the jitter formula.
+   Model answer: Here is the artifact chain the indexed repo exposes, and how it points to **worker bookkeeping**, not the **jitter formula**.
+
+## Chain
+
+1. **`docs/investigations/2026-03-20-webhook-retry-timeline.md`** — ties observed behavior to a **timeline**, not to backoff math:
+   - **Symptom:** staging saw retries **earlier than the backoff table** (line 7 in search results).
+   - **Timeline Reconstruction** (lines 10–13): failure → worker marks attempt failed → **next run is computed from a stale stored `attemptCount`** → dispatcher still shows **`attemptCount + 1`** to callers. That is **inconsistent attempt accounting** between scheduling and visibility, which is bookkeeping in the worker/dispatcher path, not a change to `backoff.ts` jitter.
+   - **Conclusion** (line 17): explicitly states the bug was **not** the jitter formula; it was **when the worker treated an attempt as completed**.
+   - **Follow-ups** (lines 20–21): send you to `src/jobs/webhookWorker.ts` and `src/webhooks/dispatcher.ts` (where attempt completion / headers live), not primarily to the jitter implementation.
+
+2. **`docs/releases/2026-03-21-v1.6.1.md`** — aligns the **fix** with that story: webhook retry scheduling was corrected so **completed attempt counts** drive **backoff and dead-letter** decisions (line 7 in search results), which matches fixing **counting/completion** semantics rather than replacing the jitter formula.
+
+Together: **investigation doc (symptom → stale `attemptCount` vs `attemptCount + 1` → explicit “not jitter” conclusion → code pointers)** plus **release note (completed counts drive scheduling)** is the chain that shows the anomaly was **worker bookkeeping**, not **jitter math**.
+
+2. Required fact: ADR 004 says integration docs are canonical, PR #188 review warns runbooks are not API contracts, the incident and issue record the drift, and the public pagination doc provides the released contract.
+   Model answer: Here is what the indexed repo material supports.
+
+**ADR 004** — [`docs/architecture/004-public-api-contract-sources.md`](docs/architecture/004-public-api-contract-sources.md) — is the document that orders **public API contract** artifacts vs **non-contract** material. The MCP-indexed lines spell out this precedence:
+
+1. **`docs/integration/*`** is the **canonical contract** (including pagination behavior documented there).
+2. **Release notes** may **override older integration guidance** only when they **explicitly** announce a migration or behavior change.
+3. **Swagger / OpenAPI annotations** are **hints**; if they **conflict with published integration docs**, they are **not authoritative for external clients**.
+4. **Runbooks** are **operational guidance**, **not** client contracts.
+
+So when pagination docs disagree, the chain that separates “what external clients should implement” from “ops / hints” is: **integration docs → (conditional) release notes → swagger as non-authoritative on conflict → runbooks excluded from the contract.**
+
+That lines up with the pagination incident notes MCP returned: **`docs/integration/pagination.md`** describes cursor-based pagination as what external clients should treat as canonical, while a **page-based Swagger block** is called out as **not** the released public contract when it conflicts.
+
+The same ADR also notes that **drift between these sources** is exactly what led teams to implement the wrong pagination behavior, and that systems should **reconcile conflicting artifacts** rather than trusting the nearest snippet—consistent with using this precedence chain, not a single file in isolation.
+
+3. Required fact: The exchange rename issue identifies multiple naming variants, the migration guide warns about internal legacy names, the PR review calls out the leftover DLQ constants, the release notes mention the gap, and src/events/rabbitmqSetup.ts still contains the hyphenated internal topology constants.
+   Model answer: Here is the **artifact chain** the indexed repo describes for why **`order-events`-style hyphenated names can still show up after the public `order_stream` rollout** — based only on context-graph `search_code` results.
+
+## Chain (documentation → decision → code)
+
+1. **Migration / public contract** — `docs/migrations/2026-03-12-order-stream-rollout.md` states the **external** exchange is **`order_stream`**, but adds that **some internal RabbitMQ setup still uses the hyphenated legacy name `order-events` for DLQ topology constants**, and to treat those as **implementation leftovers, not the external contract**.
+
+2. **Release note** — `docs/releases/2026-03-15-v1.6.0.md` says **`order_stream` is the canonical exchange** for integrations, and separately that **internal DLQ setup still uses legacy hyphenated constants** on some paths.
+
+3. **Issue** — `history/issues/176-order-stream-exchange-rename.md` notes that **internal DLQ code may still reference `order-events` until topology constants are centralized**.
+
+4. **PR scope** — `history/pull-requests/176-order-stream-rollout.md` says the rollout **does not rewrite every internal reference** to the **legacy hyphenated DLQ topology**.
+
+5. **Review acceptance** — `history/reviews/176-order-stream-rollout-review.md` records that **internal code may still use `order-events` for the DLQ topology**, and that was **acceptable** for that PR **as long as** release notes treat it as an **internal legacy constant**, not the **public integration contract**.
+
+6. **Concrete code** — `src/events/rabbitmqSetup.ts` defines constants such as **`order-events`**, **`order-events-dlx`**, and DLQ wiring, i.e. the hyphenated names remain in **internal RabbitMQ/DLQ setup**, aligned with the docs above.
+
+7. **Architecture context** — `docs/architecture/003-rabbitmq-dlq.md` (ADR 003) describes the **domain-bound DLQ pattern** using names like **`order-events`** and **`order-events-dlx`**, which explains why that topology layer stayed on the older naming model in design docs.
+
+**Summary:** After the **`order_stream`** rollout, hyphenated names persist because the **order_stream change targeted the public event exchange contract**, while **DLQ/DLX internal topology** was **left partially on legacy hyphenated constants** by **explicit PR scope**, **documented** in migration/release/issue/PR/review artifacts, with **`rabbitmqSetup.ts`** (and ADR 003) as the **implementation** side of that split.
+
+4. Required fact: The runbook, admin route, PR #241 review, WebhookJob model, and v1.6.1 release notes show that manual retries set the job back to pending while preserving attempt history and dead-job retention for debugging.
+   Model answer: Here is what the context-graph retrieval supports.
+
+## Artifacts that back “manual retries are replayable without losing provenance”
+
+Together, these show **(a)** ops intent to keep delivery history on manual replay, **(b)** the admin API implementing that, and **(c)** downstream use of the same counter so “which attempt this is” stays consistent.
+
+1. **`docs/runbooks/webhook-dead-letter-replay.md`**  
+   - Frames the flow as **replaying dead webhook jobs** and calls out **`POST /webhooks/jobs/:id/retry`**.  
+   - States explicitly: **manual retry does not reset `attemptCount`** and that **operations wants retry history preserved** — that is the “provenance / audit trail of tries” claim in product language.
+
+2. **`docs/releases/2026-03-21-v1.6.1.md`**  
+   - Ties **manual retries from the webhook admin endpoint** to **still preserving historical `attemptCount`**, aligning release behavior with the runbook.
+
+3. **`src/routes/webhookAdmin.ts`**  
+   - Documents **`POST /webhooks/jobs/:id/retry`** as manually forcing a job back to pending.  
+   - Comments that **`attemptCount` is intentionally not reset** so there is an **audit trail of how many times it’s been tried** — the implementation justification for provenance on replay.
+
+4. **`src/webhooks/dispatcher.ts`**  
+   - Uses **`job.attemptCount + 1`** for logging context and the **`X-Attempt-Number`** header, so preserved `attemptCount` after a manual retry still drives **correct, monotonic attempt labeling** on the next delivery (replay without “resetting” the attempt story).
+
+5. **`src/models/WebhookJob.ts`**  
+   - **`attemptCount`** is a first-class persisted field on the job document — the stored fact that manual replay is supposed **not** to erase.
+
+6. **`src/jobs/webhookWorker.ts`** (with the investigation context in **`docs/investigations/2026-03-20-webhook-retry-timeline.md`**)  
+   - Shows **`completedAttemptCount`** / updates that keep **stored `attemptCount` aligned with completed attempts**, so backoff, dead-letter logic, and the dispatcher’s `attemptCount + 1` view stay coherent after automated *and* manual paths — i.e. replay stays **replayable** in the sense of consistent scheduling and visibility, not a wiped counter.
+
+**Supporting context (optional):** `docs/webhooks/retry-strategy.md` (attempt budget / TTL) and **`tests/unit/webhooks/dispatcher.spec.ts`** (dispatcher behavior vs `attemptCount`) reinforce that attempt numbering is part of the contract, but the **direct** “manual retry + provenance” story is the **runbook + release note + `webhookAdmin` comment + dispatcher headers/logs + `WebhookJob.attemptCount` + worker updates** set above.
+
+*Note: MCP `get_code_snippet` for `webhookAdmin.ts` only returned the file header; the retry-route and `attemptCount` lines above come from `search_code` matches in that same file.*
+
+5. Required fact: The audit issue, PR #254, PR review, audit feature doc, audit service, and orderService hotfix all say the change improved correlation propagation while keeping audit writes best-effort and non-blocking.
+   Model answer: Here is the **artifact chain** the indexed repo exposes, based only on MCP `search_code` / `get_code_snippet` results.
+
+### Primary chain (single place that states both ideas)
+
+1. **`docs/releases/2026-03-15-v1.6.0.md`** (Release **v1.6.0**, dated **2026-03-15**) — the highlights include: *“Audit logging continues to be **best-effort**, but **correlation ID propagation was tightened**.”*  
+   That is the direct line tying **stronger correlation propagation** to **audit still not being transactional** (best-effort ≠ required commit with the business transaction).
+
+### Supporting artifacts (same story, different angles)
+
+2. **`docs/features/audit-logging.md`** — documents audit as **best-effort** (*“No strict guarantee of log write (best-effort)”*), which is the “not transactional” side.
+
+3. **`src/services/auditService.ts`** (`logOrderStateChange`) — code path that **never throws** on audit failure (*“IMPORTANT: Never throw from audit logging”* / *“Observability must never break business logic”*), i.e. audit is not part of a required transactional outcome.
+
+4. **Correlation-propagation work chain** (RabbitMQ / tracing), cross-linked in **`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`** to **`history/issues/142-rabbitmq-tracing-context-loss.md`** and **`history/pull-requests/143-otel-rabbitmq-context.md`** — this is the “propagation improved” thread (OTel + `x-correlation-id` context across RabbitMQ), which **v1.6.0** then summarizes alongside unchanged **best-effort** audit.
+
+**Bottom line:** The clearest chain is **v1.6.0 release notes** plus **`audit-logging.md` (best-effort)** and **`auditService.ts` (never throw)**, with **#142 → investigation → #143** as the propagation-improvement thread referenced in the investigation doc.
+
+6. Required fact: ADR 004 states that contract sources have different authority levels, the pagination issue and incident show real drift, PR #188 and its review document the clarification, and the Swagger route block is the conflicting snippet that retrieval systems must correctly demote.
+   Model answer: Here is what the context-graph MCP results support.
+
+## Artifacts that explain it (together)
+
+1. **`docs/architecture/004-public-api-contract-sources.md` (ADR 004)**  
+   This is the main place that states the rule and the “why” in one breath: it names **what counts as the contract** (e.g. `docs/integration/*` as canonical; runbooks as **not** client contracts) and then says benchmarks should reward **reconciling conflicting artifacts** rather than **blindly trusting the closest snippet**. The indexed lines around **17, 20, and 23** are the ones that tie “multiple kinds of docs disagree” to “don’t pick the nearest match.”
+
+2. **Real conflicting-artifact examples (pagination / OpenAPI drift)**  
+   MCP shows these as concrete cases where **nearest snippet would be wrong** if it picked swagger or a non-canonical path:
+   - **`docs/incidents/2026-03-18-pagination-contract-confusion.md`** — external contract is still **cursor** pagination; a **page-based swagger** block came from an internal admin branch and must **not** be treated as the released contract.  
+   - **`docs/releases/2026-03-15-v1.6.0.md`** — notes public pagination docs and swagger comments **not fully reconciled**.  
+   - **`docs/releases/2026-03-21-v1.6.1.md`** — clarifies **cursor pagination** remains the public `/api/orders` contract **despite swagger drift**.  
+
+   Together with ADR 004, these explain **why** “trust the closest snippet” fails in this service: **canonical integration docs and swagger/release surfaces can disagree.**
+
+3. **`BENCHMARK_REFACTOR_SUMMARY.md`**  
+   Describes the **reduced public benchmark** outputs (e.g. `Eval Files/context_graph_retrieval_benchmark_v2.json`) and states the refactor **biased selection toward multi-artifact questions with higher hop counts**—i.e. the benchmark is intentionally **not** single-snippet retrieval.
+
+4. **`conversation_transcript.md`** (design rationale, not ADR text)  
+   Explains that **multi-hop temporal conflict** (e.g. one doc with old facts, another with **T2 supersedes T1**) **breaks naive retrieval** more than extra paraphrases, and describes **cross-doc questions** that **force reconciling** an original doc with a superseding migration—matching “reconcile conflicting artifacts” vs. one-hop nearest text.
+
+**Short synthesis:** ADR 004 plus the **pagination incident and release notes** justify *that* conflicting artifacts exist and that **proximity ≠ truth**; **`BENCHMARK_REFACTOR_SUMMARY.md`** and **`conversation_transcript.md`** explain *how* the public benchmark is shaped to reward **multi-artifact reconciliation** instead of **nearest-snippet** behavior.
+
+7. Required fact: The staging incident, issue #87, the webhooks integration guide, the webhook route, and the error-handling doc together show that Stripe signs raw bytes, so semantically equivalent but re-serialized JSON still fails signature verification.
+   Model answer: Here is the chain the indexed docs describe, based only on what the context-graph MCP returned.
+
+## Why a proxy can break Stripe webhooks even if the JSON “looks” the same
+
+**Chain:** Stripe computes the webhook signature over the **original raw HTTP body bytes** → your service checks that signature using the body it receives → a proxy that **`application/json`-parses and then re-serializes** the body before forwarding does **not** preserve those bytes, so verification fails.
+
+From the staging incident doc (via `search_code`):
+
+1. A proxy path **parsed** `application/json` and **re-serialized** the body before forwarding to the order service.  
+2. **“Stripe signs the original raw bytes.”** After that transform, the service could no longer validate the `stripe-signature` header.
+
+The integration webhook doc adds the operational rule (same MCP search): for tests or a proxy you must **send the raw bytes**, **not** a parsed JSON object that was re-serialized.
+
+**Why “same fields” is not enough:** signature verification is tied to the **exact byte sequence** of the body. Parse + stringify typically changes things like whitespace, key order, and sometimes numeric/string encoding—so the logical JSON can match while the **bytes** differ from what Stripe signed. That is the failure mode the repo documents.
+
+8. Required fact: The investigation, issue #142, tracing notes, PR #143, publisher code, and v1.6.0 release notes all indicate that correlation IDs helped logs but full trace continuity required OpenTelemetry header propagation through RabbitMQ.
+   Model answer: Here is what the context-graph MCP results support.
+
+## Artifact chain
+
+The answer that **distributed tracing gaps across RabbitMQ were not solved by correlation IDs alone** is supported by this **document → investigation → work-item → release** chain (plus code that implements the fix):
+
+1. **`docs/guides/tracing-implementation-notes.md`** — Explains that **`x-correlation-id` via Winston was enough for single-service HTTP**, but the system was **“completely blind once the message enters RabbitMQ”**, and that **OpenTelemetry context propagation** is what maps **Stripe Webhook → RabbitMQ → Inventory Service**.
+
+2. **`docs/investigations/2026-03-14-rabbitmq-trace-gap.md`** — Tightens the claim: HTTP already had **`x-correlation-id`**, but **trace context was not injected into message headers on every path**; concludes that **`x-correlation-id` stayed useful for logs but did not restore a proper distributed trace tree**, and that **OTel propagation through RabbitMQ headers** was the missing piece. It explicitly points to **Issue #142** and **PR #143**.
+
+3. **`history/issues/142-rabbitmq-tracing-context-loss.md`** — Records that **HTTP has `x-correlation-id`, but that ID is not enough once work leaves the process** (aligned with the RabbitMQ path).
+
+4. **`history/pull-requests/143-otel-rabbitmq-context.md`** — Describes the remediation: **inject active trace context into RabbitMQ publish headers** (and to **keep `x-correlation-id`** for logs when tracing is degraded).
+
+5. **`docs/releases/2026-03-15-v1.6.0.md`** — Release notes: **OpenTelemetry context propagation for RabbitMQ publish/consume**; notes that if monitoring **depended only on `x-correlation-id`**, keep it—**tracing augments rather than replaces it**.
+
+6. **Implementation artifacts (code)** — MCP hits show **`src/events/publisher.ts`** (`propagation.inject` into headers) and **`src/events/consumer.ts`** (`propagation.extract` from headers), which are the concrete mechanism the docs say correlation IDs alone did not provide.
+
+No indexed file in the repo names “artifact chain” or issue `3227`; the chain above is what the MCP index actually links for **RabbitMQ tracing gaps vs. correlation IDs**.
+
+9. Required fact: The migration guide, cutover runbook, rename issue, rollout PR, review notes, and events-migration doc all say the exchange name changed while routing keys and payload shape stayed the same.
+   Model answer: Here is what the context-graph search shows.
+
+## Artifacts
+
+**1. `docs/migrations/2026-03-12-order-stream-rollout.md`**  
+- Tells external teams to **update bindings, publishers, and IaC modules** that still reference `order_events`.  
+- States **“Only the exchange name changed.”** — i.e. the rename is the operational change; it does not imply a payload/schema change.
+
+**2. `docs/runbooks/order-stream-cutover.md`**  
+- **Goal:** move consumers from `order_events` to `order_stream` **without changing routing keys or payloads** (payloads are the concrete “message body” side; routing keys are the AMQP addressing side).  
+- **Precondition:** **“Consumer can update exchange configuration independently of message schema.”** — this is the direct rationale for touching **exchange/IaC/bindings** but **not** message schemas.  
+- **Step:** **“Keep routing key bindings unchanged”** (only the exchange name moves; binding semantics stay the same).
+
+**3. `docs/integration/events-migration.md`**  
+- **“Only the exchange name changed.** The exchange type remains `topic`, durability remains `true`, and the routing key for order creation events remains `order.created`.”** — reinforces that **integration work is wiring (exchange name + same keys), not a new event contract**, so **message schemas** do not need to be revised for this migration.
+
+Together, the **migration guide** names **IaC and bindings** as what must follow the new exchange; the **runbook** separates **exchange configuration** from **message schema** and forbids changing **payloads**; **events-migration** documents that **only the exchange name** changes while **type, durability, and routing keys** stay the same.
+
+10. Required fact: The WebhookJob TTL index, retry-strategy doc, replay runbook, and v1.6.1 release notes show that dead jobs remain available for replay and debugging before the 30-day TTL eventually purges them.
+   Model answer: Here is the **artifact chain** the MCP tools support (all from indexed `order-management-v2`):
+
+### 1. Worker: failure ends in an **update to `dead`**, not a delete
+
+In `processWebhookBatch`, when retries are exhausted the code **keeps the document** and only sets `status: "dead"` (plus error metadata). There is no `deleteOne` / removal path on that branch—so the record is **retained in MongoDB** after terminal failure.
+
+### 2. Model: **TTL applies only to `dead` rows**, after **30 days**
+
+`WebhookJob.ts` defines a TTL index on `updatedAt` with `partialFilterExpression: { status: "dead" }` and `expireAfterSeconds: 60 * 60 * 24 * 30`. The inline comment states that **dead jobs are auto-purged after 30 days**, not at failure time. That is the mechanism that proves **intentional retention for a period** before removal.
+
+Together, (1) + (2) are the core proof: **terminal failure → persisted `dead` row → delayed expiry**, not **failure → immediate delete**.
+
+### 3. Supporting artifacts (same intent, different layers)
+
+- **`docs/webhooks/retry-strategy.md`** (from `search_code`): explicitly ties **dead jobs** to **Mongo TTL cleanup after 30 days** and notes they **sit there** until then.
+- **`src/routes/webhookAdmin.ts`** (from `search_code`): **`POST /webhooks/jobs/:id/retry`** is described as forcing a **dead/failed** job back to **pending**, which only makes sense if **dead records stay queryable** for a while.
+- **`docs/runbooks/webhook-dead-letter-replay.md`**: runbook for **replaying dead webhook jobs**, consistent with retention for operations.
+
+**Bottom line:** The strongest proof chain is **`webhookWorker.processWebhookBatch` (sets `dead`, no delete) → `WebhookJobSchema` TTL on `updatedAt` for `status: "dead"` only (30-day lag before purge)**. The docs and admin retry route reinforce that this behavior is deliberate.
+
+11. Required fact: ADR 004 defines source authority, the migration guide states the external contract, the cutover runbook gives operational steps, the release notes mention legacy internal gaps, and rabbitmqSetup.ts is an example of internal leftover naming.
+   Model answer: Here is how the indexed repo describes that separation, based only on context-graph MCP results.
+
+## Anchor: ADR 004 — “sources of truth”
+
+**`docs/architecture/004-public-api-contract-sources.md`** (ADR 004) is the document that draws the lines:
+
+- **External client contract:** `docs/integration/*` is the **canonical contract** (search hit at line 17).
+- **What can override older integration text:** **Release notes** may supersede older integration guidance when they explicitly announce a migration or behavior change (line 18).
+- **Non-contract hints:** **Swagger** annotations are useful hints but **not authoritative for external clients** if they conflict with published integration docs (line 19).
+- **Operations vs clients:** **Runbooks are operational guidance, not client contracts** (line 20). The same file’s context also lists **runbooks** among artifact types (line 10).
+
+So the “chain” starts at ADR 004 and fans out into integration docs, time-bound supersession (releases/migrations), runbooks, and code.
+
+## Event-integration–specific chain
+
+1. **Published integration surface:** Under **`docs/integration/`**, including **`events-migration.md`**, which states it **records the RabbitMQ exchange migration for downstream integrations** (snippet from `get_code_snippet`). The transcript also ties **`events.md`** (older exchange/config) to **`events-migration.md`** (superseding T2 state) as documents you must **reconcile**.
+
+2. **Migration / rollout (contract vs old docs):** **`docs/migrations/2026-03-12-order-stream-rollout.md`** is the migration guide for **`order_events` → `order_stream`** (snippet). It explicitly says **internal RabbitMQ setup code** may still use the legacy hyphenated name **`order-events`** for **DLQ topology constants** and that those must be treated as **implementation leftovers, not as the external contract** (line 25 in search results).
+
+3. **Operational runbooks (not the client contract):** Per ADR 004, runbooks sit outside the client contract. For this event stream, MCP found **`docs/runbooks/order-stream-cutover.md`** (“**Runbook: Order Stream Cutover**”), whose goal is to **move consumers from `order_events` to `order_stream`** (snippet). Related ops context also appears in **`docs/architecture/003-rabbitmq-dlq.md`** (new **runbook** for monitoring `*-dlq` queues).
+
+4. **Reinforcement from change history:** **`history/pull-requests/176-order-stream-rollout.md`** and **`history/reviews/176-order-stream-rollout-review.md`** repeat the theme: integration contract updates target **`order_stream`**; **internal** `order-events` usage for DLQ is acceptable only as **internal legacy**, **not** the public integration contract.
+
+**Summary:** The repository explains separation as **ADR 004** defining **`docs/integration/*` + superseding releases/migrations** as the **external contract**, **`docs/runbooks/*`** (e.g. order stream cutover) and **DLQ architecture notes** as **operational** artifacts, and **`docs/migrations/2026-03-12-order-stream-rollout.md`** (plus PR/review notes) as the place that labels **hyphenated `order-events` in internal DLQ code** as **implementation leftovers**, distinct from what clients should follow.
+
+12. Required fact: The public contract ADR, pagination issue, incident, PR clarification, review thread, and route file together show that the annotations exist but are not the released external source of truth.
+   Model answer: Here is a concise answer based only on what the context-graph MCP tools returned.
+
+## Artifacts to combine
+
+1. **`docs/architecture/004-public-api-contract-sources.md` (ADR 004)**  
+   It frames **multiple** “sources of truth” for the public API and states explicitly that **Swagger annotations are hints**, and that **if they disagree with the published integration docs they are not authoritative for external clients** (see the match on line 19).
+
+2. **Published integration docs under `docs/integration/`**  
+   MCP hits include **`docs/integration/orders-api.md`** (base path `/api/orders`) and **`docs/integration/pagination.md`** (example `GET /api/orders?...`). ADR 004 treats these as the **published integration** side of the split—what external clients should follow when it conflicts with Swagger.
+
+3. **Swagger / OpenAPI-related implementation and exports**  
+   Matches point to **`src/config/swagger.ts`**, **`scripts/export-spec.ts`** (writes **`docs/openapi.json`**), and **`.github/workflows/swagger-lint.yml`**. Together with **route-level Swagger-style comments** in **`src/routes/orders.ts`** (e.g. `* /api/orders:`), these are the **annotation/spec** lane—useful, but not the single authority for the public contract per ADR 004.
+
+4. **Incident and release notes that show real drift**  
+   Combine **`docs/incidents/2026-03-18-pagination-contract-confusion.md`** (e.g. cursor pagination canonical for external clients; page-based Swagger from an internal/admin line of work) and **`docs/releases/2026-03-21-v1.6.1.md`** / **`docs/releases/2026-03-15-v1.6.0.md`** (pagination docs vs Swagger not fully aligned). These explain **why** “implementation + annotations” can coexist with **integration docs** without one story being enough.
+
+5. **Optional but helpful: controller wiring**  
+   **`order-management-v2.src.controllers.orderController.listOrders`** (from `search_code_graph`) ties the **HTTP list behavior** to code; ADR-style reasoning still needs the docs above so “what runs” is not confused with “what we promise externally.”
+
+**Retrieval takeaway:** To explain that the **public order-list API** and **route annotations** can both exist without **both** being authoritative, a system should merge **ADR 004**, **`docs/integration/*` (especially orders + pagination)**, **Swagger/OpenAPI path (routes + `swagger.ts` + exported spec)**, and **incident/release text** that documents intentional or accidental mismatch—per the indexed content, that combination is what makes the non-single-authority story explicit and evidenced.
+
+13. Required fact: The dispatcher defines retryable vs non-retryable statuses, the worker decides whether to reschedule or dead-letter based on the completed attempt count, the retry investigation explains the mismatch that used to occur, and PR #241 plus its review describe the fix.
+   Model answer: Here is what the context-graph MCP retrieval supports (no repo files were read outside MCP).
+
+## Answer
+
+The **artifact chain** that supports “retry behavior depends on **dispatcher classification** and **worker state transitions**” is the **outbound webhook execution path**:
+
+1. **`src/jobs/webhookWorker.ts`** — `processWebhookBatch`  
+   - Picks jobs, moves them through statuses (`pending`/`failed` → `processing` → `succeeded`, `failed` with `nextRunAt`, or `dead`), and decides reschedule vs dead-letter using attempt counts and the dispatcher’s result (including the `Non-retryable` prefix).
+
+2. **`src/webhooks/dispatcher.ts`** — `dispatchWebhook`  
+   - **Classification**: `RETRYABLE_STATUS_CODES` vs non-retryable HTTP responses, and network errors; non-retryable cases return messages prefixed with `Non-retryable`, which the worker treats as immediately terminal.
+
+3. **`src/webhooks/backoff.ts`** — `nextAttemptDate` (and `calculateBackoffMs`)  
+   - Used **from the worker** after a failed but still-retryable outcome to set the next run time; the graph shows this is called from `processWebhookBatch`, not from the dispatcher.
+
+**Graph evidence:** `trace_call_path` from `order-management-v2.src.jobs.webhookWorker.processWebhookBatch` shows **depth-1 `CALLS`** to both `order-management-v2.src.webhooks.dispatcher.dispatchWebhook` and `order-management-v2.src.webhooks.backoff.nextAttemptDate`, which ties **classification** (dispatcher) to **persistence and scheduling** (worker + backoff).
+
+**Doc evidence:** `docs/investigations/2026-03-20-webhook-retry-timeline.md` explicitly points readers to **`src/jobs/webhookWorker.ts`** and **`src/webhooks/dispatcher.ts`** together for attempt/retry behavior (including stale `attemptCount` vs dispatcher `attemptCount + 1` exposure).
+
+**Not this chain:** `demo_tasks_readme.md`’s “**four separate artifacts**” line (around Task 2, RabbitMQ / silent event loss) is about **event publishing**, not this webhook retry/dispatcher/worker split—so it does **not** support this specific answer.
+
+**Short label:** the **webhook worker → dispatcher → backoff** chain (`webhookWorker` → `dispatchWebhook` → `nextAttemptDate`) is what the indexed code and call graph support for that conclusion.
+
+14. Required fact: The webhooks doc and issue #233 describe the missing metadata linkage problem, while the staging incident, issue #87, and error-handling doc describe a distinct signature-failure path that returns a webhook error.
+   Model answer: Here is a concise answer based only on what the context-graph MCP returned.
+
+## Artifacts that separate the two problems
+
+**1. `docs/integration/webhooks.md` (same doc, two different layers)**  
+- **Signature pipeline:** It states the endpoint must get the **raw, unparsed body**; changing how the body is serialized breaks verification and yields a **`400`** with errors like *“No signatures found matching the expected signature for payload”*. It also documents the **`stripe-signature`** header and verification with **`STRIPE_WEBHOOK_SECRET`**.  
+- **`metadata.orderId`:** Separately, it says for **`payment_intent.succeeded`** the service updates the order using **`orderId` from `paymentIntent.metadata`**, and that when creating a **`PaymentIntent`** the client **must** put the order id under **`metadata.orderId`**.  
+So: signature issues are about **transport + raw bytes + header**; missing **`metadata.orderId`** is about **event payload content after** Stripe’s event is accepted.
+
+**2. `docs/incidents/2026-03-05-stripe-signature-staging-incident.md`**  
+- Ties **signature verification failures** to **Stripe signing the original raw bytes** and a **proxy changing the payload**, i.e. the **signature / raw-body path**, not missing **`orderId`** in metadata.
+
+**3. `src/controllers/webhookController.ts` (`handleStripeWebhook`)**  
+- The handler **fails early** on a **missing `stripe-signature` header** with a **specific 400** (`'Missing stripe-signature header'`), before any logic that would use **`paymentIntent.metadata`**. That shows **header/signature gating** vs. **later metadata-dependent behavior**.
+
+**4. `src/routes/webhooks.ts` (comment surfaced in search)**  
+- Notes **raw body** is **required for Stripe signature verification**, reinforcing that **signature** is a **middleware / body-shape** concern, distinct from **application fields** like **`metadata.orderId`**.
+
+**5. Optional cross-link: `docs/integration/order-statuses.md`**  
+- Links **`PENDING → PAID`** to Stripe’s **`payment_intent.succeeded`** webhook and points at **`webhooks.md`**, aligning **lifecycle** docs with the **webhook** doc’s split between **verification** and **metadata**.
+
+Together, **`webhooks.md`** (two sections), the **incident doc** (root cause for bad signatures), and **`webhookController.ts`** (early **`stripe-signature`** check) are the main artifacts that show **missing `metadata.orderId`** is a **different class of failure** than a **broken Stripe signature pipeline**.
+
+15. Required fact: The auth doc introduces x-correlation-id, the trace-gap investigation and tracing PR show why correlation context matters across RabbitMQ, the audit hotfix preserves it for audit rows, and the replay runbook tells operators to carry the original correlation ID during manual retries.
+   Model answer: Here is an **artifact chain** that the indexed `order-management-v2` material supports, tying **audit**, **tracing**, and **webhook replay** to **correlation context** (IDs + propagated trace context), not only to business fields.
+
+### 1. Same release ties audit to correlation propagation and tracing to OTel context
+
+`docs/releases/2026-03-15-v1.6.0.md` links all three themes in one place: OpenTelemetry **context propagation** for RabbitMQ, **audit** with **tighter correlation ID propagation**, and guidance that **x-correlation-id** and **tracing** work together (tracing does not replace correlation for monitoring).
+
+### 2. Tracing: correlation ID alone ≠ full tracing; you need propagated context
+
+- `docs/guides/tracing-implementation-notes.md` — Winston **x-correlation-id** is enough for single-service HTTP; once work hits RabbitMQ you need **OTel context propagation** to follow flows like **Stripe Webhook → RabbitMQ → Inventory**.
+- `docs/investigations/2026-03-14-rabbitmq-trace-gap.md` — **x-correlation-id** helps **log correlation** but does **not** rebuild a **distributed trace tree**; the gap is **OpenTelemetry propagation through RabbitMQ headers** (i.e. not something you get from business payload alone).
+- `history/issues/142-rabbitmq-tracing-context-loss.md` — title and bullets frame **correlation context** loss across RabbitMQ; HTTP **x-correlation-id** is **not enough once work leaves the process**.
+
+Implementation matches that story: `src/events/publisher.ts` (`propagation.inject`) and `src/events/consumer.ts` (`propagation.extract`) propagate **trace context** in message **headers**, separate from message body / business data.
+
+### 3. Audit: persisted correlation alongside business state
+
+- `docs/features/audit-logging.md` — explicitly lists **“Correlation ID included for tracing across services”** as part of the audit story (not only order state / actor).
+- `src/services/auditService.ts` — `AuditParams` includes `correlationId`; `AuditLog.create` stores **`correlationId`** next to order state fields.
+- `src/services/orderService.ts` — `updateOrderStatus` resolves **`safeCorrelationId`** (argument or async context fallback) and passes it into **`logOrderStateChange`**.
+
+So audit rows are not “business data only”; they carry **correlation** for cross-service follow-up.
+
+### 4. Webhook replay / dead-letter ops: keep **x-correlation-id** for traceability
+
+- `docs/runbooks/webhook-dead-letter-replay.md` — step to **carry forward the original `x-correlation-id` when possible for traceability** (replay traceability is framed around **correlation**, not only re-sending payload).
+- `src/models/WebhookJob.ts` / `enqueueWebhook` in `src/webhooks/webhookService.ts` — jobs persist **`correlationId`** and log it; the model comment ties it to **tracing through logs**.
+
+### How this supports the claim “rely on preserving correlation context, not only business data”
+
+- **Tracing** docs and **issue #142** argue that **IDs on the HTTP edge** and **business payloads** do not by themselves restore **distributed traces** or **context across RabbitMQ**; you need **propagated OTel context** (and headers), i.e. **correlation context** in the observability sense.
+- **Audit** documentation and **audit/order services** show **correlation IDs** stored **beside** state transitions—explicitly for **tracing across services**, not as a substitute for order fields.
+- **Webhook replay** runbook and **WebhookJob** wiring treat **`x-correlation-id` / `correlationId`** as something to **preserve through retries/replay** for **traceability**, which is orthogonal to **payload** contents alone.
+
+Together, those artifacts form a coherent chain: **v1.6.0 release** + **tracing/gap docs** + **issue #142** + **audit-logging feature doc** + **webhook DLQ runbook** + **AuditLog / WebhookJob / enqueue / order update / RabbitMQ OTel inject-extract** code paths.

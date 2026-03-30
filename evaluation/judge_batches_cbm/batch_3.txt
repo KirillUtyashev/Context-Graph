@@ -1,0 +1,291 @@
+You are evaluating whether model answers contain required facts.
+For each numbered item below, reply with "HIT" or "MISS" on its own line.
+If it is ambiguous, still reply with "HIT" or "MISS" (depending on where you lean) but add a brief explanation of why.
+Do not mark a response as "MISS" if it a model failed to cite PR numbers or documentation files, but got the right answer anyway.
+Format your ENTIRE reply as a simple numbered list — nothing else:
+
+1. HIT
+2. MISS
+3. HIT
+...
+
+
+1. Required fact: A proxy re-serialized the JSON body, which changed the raw bytes and broke Stripe signature verification.
+   Model answer: Here is what the indexed incident note says.
+
+## Why staging Stripe webhooks failed on 2026-03-05 (despite “the same” JSON)
+
+**Cause:** A new **proxy** on the path to staging was **parsing** `application/json` and **re-serializing** the body before it reached the order service.
+
+**Why that breaks things:** Stripe’s `stripe-signature` is computed over the **exact raw request body bytes**. Parsing and re-serializing changes those bytes (whitespace, key order, number formatting, etc.), so the payload is no longer byte-identical to what Stripe signed—even when the JSON is **semantically** the same.
+
+So failures were due to **signature verification** failing after the proxy altered the raw payload, not due to different business meaning in the JSON.
+
+**Mitigation called out in the doc:** Bypass that transform for `/api/webhooks/stripe`, keep the route on **`express.raw({ type: 'application/json' })`**, and document that proxies/tests must not forward parsed-then-reserialized bodies for webhooks.
+
+**Lesson stated:** Webhook authenticity depends on **transport-level fidelity** (exact bytes), not only equivalent JSON.
+
+2. Required fact: No. The routing key did not change, so the required update was the exchange name to order_stream.
+   Model answer: **No.** According to the indexed migration doc for the **2026-03-12** rollout (`workspace.docs.migrations.2026-03-12-order-stream-rollout`), **only the exchange name changed** (`order_events` → `order_stream`). **The routing key `order.created` did not change**, and the exchange type/durability stayed the same.
+
+So after that date, fixing the “migration issue” means **pointing bindings / publishers / IaC at `order_stream`** (as in “Consumer Action Required” in that same doc). **Updating only the routing key and leaving the old exchange name would not fix it**—and if you changed the routing key away from `order.created`, you’d be diverging from the documented contract.
+
+The separate events migration note (`workspace.docs.integration.events-migration`) agrees: **only the exchange name changed**; **the routing key for order creation events remains `order.created`**.
+
+3. Required fact: No. The repo explicitly says to keep x-correlation-id; tracing augments it rather than replacing it.
+   Model answer: **No.** For v1.6.0 (2026-03-15), the indexed release notes say not to drop `x-correlation-id` just because OpenTelemetry is in place.
+
+The **Upgrade Notes** in the v1.6.0 doc state that if monitoring relied only on `x-correlation-id`, you should **keep** it, and that **tracing augments it rather than replacing it**.
+
+The tracing guide adds context: correlation IDs on HTTP (via `req.headers['x-correlation-id']`) were fine for single-service HTTP, but visibility was lost once work went through RabbitMQ; OTel propagation addresses that pipeline. That explains why OTel was added, not why `x-correlation-id` should be removed.
+
+**Bottom line:** Per the indexed v1.6.0 material, continue using `x-correlation-id` where you rely on it; OpenTelemetry is additive for distributed tracing (including RabbitMQ), not a replacement for that header in the documented guidance.
+
+4. Required fact: docs/integration/pagination.md
+   Model answer: Here is what the indexed docs say.
+
+**Treat the integration docs as the released external contract**, not Swagger, when they disagree on order pagination.
+
+**ADR 004** (`workspace.docs.architecture.004-public-api-contract-sources`) states that for externally supported API behavior, `docs/integration/*` is the canonical contract, and that Swagger is only a hint: if it conflicts with published integration docs, it is **not** authoritative for external clients. It also says benchmarks should reward reconciling conflicting artifacts rather than trusting the nearest snippet.
+
+The **2026-03-18 incident** (`workspace.docs.incidents.2026-03-18-pagination-contract-confusion`) records the same kind of mismatch (integration docs describing cursor/`nextCursor`/`hasMore` vs Swagger mentioning page/limit/total) and explicitly decides that **for external clients, cursor pagination from the integration docs remains canonical** and the page-based Swagger block should **not** be treated as the released contract.
+
+So on **2026-03-19**, with that ADR and incident in place, the benchmark should align with **`docs/integration/*` (and the pagination behavior described there)**, not Swagger, for the external contract.
+
+5. Required fact: The migration guide warns about the legacy internal order-events name, and the v1.6.0 release notes repeat that internal gap.
+   Model answer: From codebase-memory-mcp:
+
+**Artifact that still carries that warning:** the migration doc **`docs/migrations/2026-03-12-order-stream-rollout.md`**, in the section **“Warning About Legacy Internal Names”**. That section says internal RabbitMQ setup still uses the hyphenated legacy name `order-events` for DLQ topology constants and to treat those as implementation leftovers, not the external contract—while **`docs/releases/2026-03-15-v1.6.0.md`** (“Highlights”) states that **`order_stream`** is the canonical exchange for downstream integrations.
+
+**What the warning is about:** the indexed implementation is **`setupRabbitMQ`** in **`src/events/rabbitmqSetup.ts`**, which still defines `EXCHANGE` / `DLX` as `'order-events'` / `'order-events-dlx'`.
+
+So: the **warning** itself is the rollout migration markdown; the **legacy `order-events` usage** it describes is in **`rabbitmqSetup.ts`**.
+
+6. Required fact: Because Stripe verifies the original raw bytes, and parsing plus re-stringifying changes the payload that the signature was computed over.
+   Model answer: Here is what the indexed codebase explains.
+
+## Why verification fails after parse → re-serialize
+
+**Stripe signs the exact raw HTTP body bytes.** Verification recomputes an HMAC over those bytes and compares it to the `stripe-signature` header. Anything that replaces the original byte stream with a new one (for example `JSON.parse` then `JSON.stringify`) usually **does not reproduce the same bytes**, even when the JSON “means” the same thing—whitespace, key order, number/string encoding, and Unicode escaping can all differ.
+
+The integration doc states that the webhook route **must** get the **raw, unparsed body**, and explicitly warns that sending “a parsed JSON object re-serialized” breaks verification and yields errors like “No signatures found matching the expected signature for payload.” The staging incident note adds that **Stripe signs the original raw bytes**, and once the payload is altered (e.g. by a proxy), the service **cannot** validate `stripe-signature` anymore.
+
+**Bottom line (from this repo’s docs):** verification fails because the signature is tied to the **original** body bytes from Stripe, not to an equivalent JSON value; parse + re-serialize changes the bytes, so the computed signature no longer matches.
+
+7. Required fact: The issue reports async paths dropping the optional correlationId, orderService shows the later global fallback, and the auth docs explain that requests normally do carry x-correlation-id.
+   Model answer: Here is the evidence chain **only from codebase-memory-mcp** results.
+
+## 1. HTTP layer: header is present, not automatically on every function
+
+`correlationIdMiddleware` reads `x-correlation-id` (or generates a UUID), writes it back onto `req.headers['x-correlation-id']`, and sets the response header. That ties the ID to the **request object**, not to downstream service calls by itself.
+
+## 2. Audit persistence: whatever is passed in is what gets stored
+
+`logOrderStateChange` writes `correlationId: params.correlationId` into `AuditLog.create(...)`. The audit schema allows `correlationId` as an optional string. If `params.correlationId` is missing, the row has no correlation ID.
+
+## 3. Service layer: explicit gap between “header exists” and “audit gets an ID”
+
+`orderService.updateOrderStatus` takes an **optional** fourth argument `correlationId?: string` and includes an inline note that **correlation ID could be undefined even when middleware sets it**. It computes `safeCorrelationId = correlationId || (global as any).__CORRELATION_ID__` and passes that to `logOrderStateChange`. So audit rows only get a correlation ID if the caller passes the fourth argument **or** the global fallback is set. **Having `x-correlation-id` on the request does not, by itself, populate audit** unless something bridges headers → this parameter (or the global).
+
+## 4. Controller wiring: no automatic bridge in the indexed handler
+
+`orderController.updateOrderStatus` is a stub that returns `{ message: 'stub' }` and does not call the order service—so in that path there is no code reading `req` and passing correlation into the service.
+
+**Bottom line:** The indexed code explains “missing correlation IDs despite headers” as a **plumbing bug**: middleware ensures the header on `req`, but **audit uses `params.correlationId` from the service API**, which can stay `undefined` when callers do not pass the header through (and the global workaround is not set). That matches the service’s own “BUGFIX” comment about undefined correlation IDs despite middleware.
+
+*(Separate from audit rows: the RabbitMQ investigation doc says `x-correlation-id` still helps logs but doesn’t fix distributed trace gaps without OTel on message paths—that is about tracing trees, not the audit column.)*
+
+8. Required fact: The dispatcher marks 400 as non-retryable, and the worker treats non-retryable failures as dead immediately rather than scheduling backoff.
+   Model answer: Here is what the indexed backend code does.
+
+**400 is treated as non-retryable.** In `dispatchWebhook`, only these statuses are considered retryable: **408, 429, 500, 502, 503, 504** (`RETRYABLE_STATUS_CODES`). Anything else that is not a 2xx falls through to the “non-retryable 4xx” path: it returns `success: false` with an `errorMessage` like **`Non-retryable HTTP ... - payload rejected`**, and the comments say the worker will move the job to dead.
+
+**The worker marks the job dead immediately when that happens.** In `processWebhookBatch`, a job is dead if either `maxAttempts` is exhausted **or** `result.errorMessage` **starts with `"Non-retryable"`**. A 400 response produces that prefix, so `isDead` is true on the first failed attempt—no backoff loop.
+
+So an outbound webhook that gets **HTTP 400** does not retry forever because **400 is not in the retryable set**, and the dispatcher labels those failures **`Non-retryable`**, which the worker treats as an immediate move to **`dead`**.
+
+9. Required fact: Retries were scheduled using the stale attempt count, and the fix was applied in the worker logic in src/jobs/webhookWorker.ts as described by issue and PR #241.
+   Model answer: Here is what **codebase-memory-mcp** shows (only that source was used).
+
+## Why staging retries looked “too fast”
+
+Staging receivers saw retries **sooner than the backoff table** suggested. The indexed investigation doc explains the chain:
+
+1. A job failed on its first delivery attempt.  
+2. The worker marked the attempt as failed.  
+3. **`nextRunAt` was derived from the still-stale stored `attemptCount`** (the attempt wasn’t treated as completed before scheduling the next run).  
+4. Ops compared visible attempt numbers with the reschedule delay and saw they **didn’t line up**.
+
+The conclusion in that doc: **the bug was not the jitter/backoff formula** — it was **when the worker treated an attempt as completed** for scheduling.
+
+The worker code itself (from `processWebhookBatch` in `webhookWorker.ts`) states the concrete mistake: **`nextAttemptDate` was driven as if the attempt index was one step behind** — “attempt 0 was scheduled like attempt 1,” so **all delays were one backoff slot off**, which is why staging looked “too fast” relative to the intended table.
+
+## Where the fix was applied
+
+The fix is in **`src/jobs/webhookWorker.ts`**, inside **`processWebhookBatch`**: compute **`completedAttemptCount = job.attemptCount + 1`** first, then use that for persistence, dead-letter checks, and especially **`nextAttemptDate(completedAttemptCount)`** when rescheduling failed jobs so backoff **actually grows** with the completed attempt.
+
+Cross-checks noted in the investigation point to the same worker file and also mention **`src/webhooks/dispatcher.ts`** (attempt header behavior) and **`docs/releases/2026-03-21-v1.6.1.md`** for release packaging — the **scheduling bug fix** is anchored in **`webhookWorker.ts`** per the snippets above.
+
+10. Required fact: The issue and incident docs say the Swagger block drifted from an internal admin branch, and the public integration doc remains the canonical external cursor-based contract.
+   Model answer: Here is what the indexed repo shows.
+
+## Primary evidence (explicit “do not trust” for external clients)
+
+**`docs/incidents/2026-03-18-pagination-contract-confusion.md`** records a decision that directly answers your question:
+
+- It says two client teams built different pagination because the repo exposed **both** cursor-based and page-based guidance.
+- **Evidence** it lists: integration docs describe `cursor` / `nextCursor` / `hasMore`, while **Swagger on `src/routes/orders.ts`** describes `page`, `limit`, and approximate `total`.
+- **Decision:** for **external clients**, **cursor pagination remains canonical**. It states the **page-based Swagger block** came from an **internal admin branch** and **must not be treated as the released contract**.
+
+So the repository’s own incident write-up is the clearest evidence that external clients should **not** rely on that page-based Swagger block for `/api/orders`.
+
+## Supporting evidence (what the Swagger block actually documents)
+
+**`src/routes/orders.ts`** — the `GET /api/orders` `@swagger` block documents query parameters **`page`** and **`limit`** and describes the **`total`** field as an estimate for large collections (aligned with what the incident calls the “page-based swagger block”).
+
+Together, the **incident doc’s Decision** plus the **cross-reference to `src/routes/orders.ts` Swagger** are the repository evidence that external clients should treat **integration/pagination** (cursor) as authoritative, not that Swagger page/limit block.
+
+11. Required fact: Use the admin retry endpoint, which sets the job back to pending and nextRunAt to now but intentionally does not reset attemptCount.
+   Model answer: Here is what **codebase-memory-mcp** shows about replaying a dead webhook job **without** wiping retry history.
+
+## How to replay
+
+1. **Use the admin retry API** — After you fix the receiver or payload, call **`POST /webhooks/jobs/:id/retry`** (admin routes require auth). The runbook also suggests inspecting jobs with **`GET /webhooks/jobs`** (optionally filtered) or **`GET /webhooks/stats`** first.
+
+2. **Why history stays** — The runbook states that manual retry sets the job back to **`pending`** and **`nextRunAt = now`**, and explicitly that manual retry **does not** reset **`attemptCount`**, so operations keeps the retry history for debugging.
+
+3. **What the handler does** — The admin route handler sets `status` to `"pending"` and `nextRunAt` to `new Date()`, and **does not** reset `attemptCount` (comment: audit trail of how many times it’s been tried). It **rejects** retry when status is **`succeeded`** or **`processing`**.
+
+4. **Tracing** — The runbook says to **carry forward the original `x-correlation-id`** when possible for traceability.
+
+So: **replay via `POST /webhooks/jobs/:id/retry`**; **`attemptCount` is left intentionally unchanged**, which preserves the retry history the runbook calls out.
+
+12. Required fact: The repo treats observability as best-effort so business logic is not blocked; docs/features/audit-logging.md explains the tradeoff and src/services/auditService.ts catches and logs errors instead of throwing.
+   Model answer: Here is what the indexed codebase shows.
+
+### Why it is intentionally non-fatal
+
+1. **`logOrderStateChange` in `auditService`** — The implementation documents the rule explicitly: **do not throw from audit logging**, because **observability must not break business logic** (failures are logged, not propagated).
+
+2. **`docs/features/audit-logging.md`** — Design notes say audit writes are **non-blocking**; tradeoffs note **best-effort** logging with **no strict guarantee** that every log is persisted.
+
+So the intent is: order updates and other core flows must succeed even if the audit append fails (Mongo/network/schema issues).
+
+### Where it is enforced
+
+Enforcement is in **`workspace.src.services.auditService.logOrderStateChange`**: the `AuditLog.create(...)` path runs inside **`try` / `catch`**. On failure it calls **`logger.error('Audit logging failed', ...)`** and **does not rethrow**, so callers never see an exception from audit logging.
+
+The graph shows **`workspace.src.services.orderService.updateOrderStatus`** as the caller that **`await`s `logOrderStateChange`** after saving the order; because errors are swallowed inside `logOrderStateChange`, that await does not fail the status update when audit logging fails.
+
+13. Required fact: The RabbitMQ setup code still uses legacy hyphenated DLQ constants, and the migration guide plus PR review say those leftovers are internal implementation details rather than the external contract.
+   Model answer: Here is what the indexed codebase supports, using only codebase-memory-mcp results.
+
+## Why `order-events-dlx` still appears after a public exchange rename
+
+**1. It is a separate dead-letter exchange, not the renamed public exchange**
+
+In `workspace.src.events.rabbitmqSetup.setupRabbitMQ`, the app defines **two** exchanges:
+
+- **`order-events`** — the main topic exchange (`EXCHANGE`).
+- **`order-events-dlx`** — the dead-letter exchange (`DLX`), asserted as its own `direct` exchange and wired to the DLQ.
+
+The main queue is configured with `x-dead-letter-exchange` pointing at **`DLX`** (`order-events-dlx`), not at the main exchange name as “the renamed public” name.
+
+So the string `order-events-dlx` is there because the **DLX** is still modeled as the companion to `order-events`, independent of whatever rename applies to the “public” main exchange name in ops/docs.
+
+**2. Architecture doc explicitly treats `-dlx` as the paired DLX**
+
+`workspace.docs.architecture.003-rabbitmq-dlq` states that each primary exchange (e.g. `order-events`) has a **counterpart** `order-events-dlx` as a **domain-specific dead-letter exchange**, by design—not as a second name for the same public exchange.
+
+Together, that is the evidence: **`order-events-dlx` is the intentional DLX identifier in setup and ADR 003**, while **`order-events` is the primary exchange**; renaming the public-facing main exchange does not remove the need for a separate DLX name in internal code unless that constant (and RabbitMQ topology) is updated too.
+
+14. Required fact: The WebhookJob model defines a 30-day TTL index for status=dead, the retry strategy doc mentions dead-job cleanup by Mongo TTL, and the v1.6.1 release notes restate that dead jobs still age out automatically.
+   Model answer: Here is what **codebase-memory-mcp** returns as evidence that **dead** webhook jobs are **not kept forever** and are **removed automatically** by MongoDB.
+
+### 1. Schema: TTL index on `updatedAt` for `status: "dead"` (30 days)
+
+The `WebhookJob` Mongoose schema defines a **TTL index** on `updatedAt` with **`expireAfterSeconds` = 30 days** and a **`partialFilterExpression` so it only applies when `status` is `"dead"`**. The in-code comment states that **dead jobs are auto-purged after 30 days** so Mongo does not fill with garbage.
+
+```48:56:src/models/WebhookJob.ts
+// index so the worker query is fast. compound because we filter on both
+WebhookJobSchema.index({ status: 1, nextRunAt: 1 });
+
+// ttl index - dead jobs get auto-purged after 30 days, we dont want mongo filling up with garbage
+WebhookJobSchema.index(
+  { updatedAt: 1 },
+  { expireAfterSeconds: 60 * 60 * 24 * 30, partialFilterExpression: { status: "dead" } }
+);
+```
+
+*(Line numbers align with the indexed module `workspace.src.models.WebhookJob` as returned by `get_code_snippet`.)*
+
+### 2. Documentation: same behavior in prose
+
+`docs/webhooks/retry-strategy.md` states that **dead jobs are cleaned up by Mongo TTL after 30 days**.
+
+```5:7:docs/webhooks/retry-strategy.md
+max 8 attempts. dead jobs cleaned up by mongo TTL after 30 days.
+
+if a job goes dead it just sits there. someone needs to build an alert for that.
+```
+
+### 3. Supporting lifecycle (why the TTL applies to “dead” rows)
+
+`processWebhookBatch` sets `status` to `"dead"` when retries are exhausted (or non-retryable), which is the state the **partial TTL index** targets—so the evidence chain is: **terminal `dead` state** in the worker **+** **TTL on `updatedAt` for `dead` only** in the model.
+
+```55:71:src/jobs/webhookWorker.ts
+    const isDead =
+      completedAttemptCount >= job.maxAttempts ||
+      result.errorMessage?.startsWith("Non-retryable");
+
+    if (isDead) {
+      logger.error("Webhook job exhausted all retries, moving to dead", {
+        jobId: job._id,
+        attempts: completedAttemptCount,
+        lastError: result.errorMessage,
+      });
+      await WebhookJob.updateOne(
+        { _id: job._id },
+        {
+          $set: {
+            status: "dead",
+            lastError: result.errorMessage,
+            attemptCount: completedAttemptCount,
+          },
+        }
+      );
+```
+
+**Bottom line:** The strongest proof is the **MongoDB TTL index** in `WebhookJob.ts` (`expireAfterSeconds` + `partialFilterExpression: { status: "dead" }`), backed by **retry-strategy.md** and the worker’s transition to `"dead"`. That is **automatic expiration** of matching documents by MongoDB’s TTL monitor, not an application-level delete loop (at least not in what CBM returned for this evidence).
+
+15. Required fact: ADR 004 defines docs/integration/* as the canonical external contract, the pagination incident and issue document the drift, the PR and review clarify the fix, and the Swagger block in src/routes/orders.ts is explicitly treated as non-authoritative for external clients.
+   Model answer: Here is what **codebase-memory-mcp** returns as the proof chain (no direct file reads).
+
+### 1. ADR 004 — authority rule (integration vs Swagger vs runbooks)
+
+`workspace.docs.architecture.004-public-api-contract-sources` (`docs/architecture/004-public-api-contract-sources.md`) states that drift across integration guides, Swagger, runbooks, and release notes caused wrong pagination behavior, and **decides**:
+
+- **`docs/integration/*` is the canonical contract** for externally supported API behavior.
+- **Swagger** is only a hint; **if it conflicts with published integration docs, it is not authoritative** for external clients.
+- **Runbooks** are **operational guidance, not client contracts**.
+
+That is the document that explicitly ranks sources: integration docs (including `pagination.md` under `docs/integration/`) over conflicting Swagger and over runbooks for **client** behavior.
+
+### 2. `orders-api.md` — wires list pagination to `pagination.md`
+
+`workspace.docs.integration.orders-api` (`docs/integration/orders-api.md`) has a **Pagination** section that says to use **`pagination.md`** for list-endpoint query parameters. So the public orders list contract is not left to Swagger alone; it is pointed at the integration doc.
+
+### 3. Incident report — concrete conflict and explicit client rule
+
+`workspace.docs.incidents.2026-03-18-pagination-contract-confusion.__file__` (`docs/incidents/2026-03-18-pagination-contract-confusion.md`) records:
+
+- **Evidence**: `docs/integration/pagination.md` vs **Swagger on `src/routes/orders.ts`** (cursor vs page-based).
+- **Decision**: **For external clients, cursor pagination remains canonical**; the page-based Swagger block should **not** be treated as the released contract.
+
+### 4. Swagger location (the non-authoritative side in conflicts)
+
+`workspace.src.routes.orders.__file__` (`src/routes/orders.ts`) contains **`@swagger`** blocks—the incident ties the misleading pagination story to this file.
+
+---
+
+**Artifact chain in one line:** **ADR 004** establishes that **`docs/integration/*` wins over conflicting Swagger and over runbooks for external contracts**; **`orders-api.md` → `pagination.md`** is how orders list pagination is specified for integrators; the **2026-03-18 incident** applies that to the **`/api/orders`** Swagger vs **`pagination.md`** mismatch and **names cursor + integration docs as canonical for external clients**. Runbooks are only addressed at the general level in ADR 004 (not client contracts); **003** mentions runbooks only for DLQ operations, not pagination.
