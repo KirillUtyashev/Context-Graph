@@ -320,7 +320,7 @@ def semantic_claim_profile_key_records(
 ) -> tuple[Any, ...]:
     """Build concrete vector-store records for one semantic claim profile."""
 
-    from context_graph.profile_vectors import build_profile_key_records
+    from context_graph.backend.profile_vector_services import build_profile_key_records
     from context_graph.models.profiles import semantic_claim_profile_from_claim
 
     profile = semantic_claim_profile_from_claim(
@@ -339,7 +339,7 @@ def semantic_claim_profile_key_ids(
 ) -> tuple[str, ...]:
     """Expose stable key ids for tests and future profile indexing."""
 
-    from context_graph.profile_vectors import profile_key_id
+    from context_graph.backend.profile_vector_services import profile_key_id
     from context_graph.models.profiles import semantic_claim_profile_from_claim
 
     profile = semantic_claim_profile_from_claim(

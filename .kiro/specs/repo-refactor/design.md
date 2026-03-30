@@ -168,7 +168,7 @@ from .profiles import (
 """Runtime configuration, provider factories, and client wrappers.
 
 Sub-packages:
-- embedding/: Embedding client implementations (Bedrock, OpenAI)
+- embedding_clients/: Embedding client implementations (Bedrock, OpenAI)
 - llm/: LLM client implementations (Bedrock, OpenAI)
 - providers/: High-level factory helpers for database and AI providers
 """

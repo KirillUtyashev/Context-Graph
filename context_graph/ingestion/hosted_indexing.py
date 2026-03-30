@@ -8,7 +8,7 @@ from typing import Any
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, GitHubRepoResolver
 from context_graph.ingestion.git.github_indexer import GitHubIndexer, GitHubSyncResult
-from context_graph.profile_vectors import ProfileVectorIndexer
+from context_graph.backend.profile_vector_services import ProfileVectorIndexer
 from context_graph.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .commit_indexing import CommitIndexingService, default_repo_id

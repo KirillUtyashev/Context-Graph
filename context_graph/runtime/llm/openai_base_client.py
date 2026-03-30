@@ -24,7 +24,7 @@ import openai
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
-from context_graph.memory.prompts.models import Message
+from context_graph.prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
 from .errors import RateLimitError, RefusalError

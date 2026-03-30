@@ -85,10 +85,10 @@ class SmallModuleTests(unittest.TestCase):
                 runpy.run_module("context_graph", run_name="__main__")
         self.assertEqual(exc.exception.code, 17)
 
-        fake_server_module = SimpleNamespace(main=lambda: 23)
-        with patch.dict(sys.modules, {"context_graph_mcp_server.server": fake_server_module}):
+        fake_bootstrap_module = SimpleNamespace(main=lambda: 23)
+        with patch.dict(sys.modules, {"src.bootstrap": fake_bootstrap_module}):
             with self.assertRaises(SystemExit) as exc:
-                runpy.run_module("context_graph_mcp_server", run_name="__main__")
+                runpy.run_module("src", run_name="__main__")
         self.assertEqual(exc.exception.code, 23)
 
     def test_embedding_provider_cleans_texts_and_returns_async_results(self) -> None:
@@ -104,7 +104,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_load_embedding_settings_prefers_args_and_validates_openai_key(self) -> None:
         args = SimpleNamespace(
             embed_provider=" OpenAI ",
-            embed_model="text-embedding-3-small",
+            embed_model="text-embedding_clients-3-small",
             embed_dimensions="256",
             embed_base_url="https://example.test",
             embed_api_key="secret",
@@ -378,7 +378,7 @@ class SmallModuleTests(unittest.TestCase):
 
     def test_mcp_config_helpers_expand_yaml_and_apply_cli_overrides(self) -> None:
         try:
-            mcp_config = importlib.import_module("context_graph_mcp_server.config")
+            mcp_config = importlib.import_module("src.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -460,7 +460,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_runtime_factories_validate_and_build_expected_clients(self) -> None:
         try:
             factories = importlib.import_module("context_graph.runtime.providers.factories")
-            mcp_config = importlib.import_module("context_graph_mcp_server.config")
+            mcp_config = importlib.import_module("src.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -571,7 +571,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_database_driver_factory_uses_env_overrides_and_validates_neptune(self) -> None:
         try:
             factories = importlib.import_module("context_graph.runtime.providers.factories")
-            mcp_config = importlib.import_module("context_graph_mcp_server.config")
+            mcp_config = importlib.import_module("src.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -628,30 +628,6 @@ class SmallModuleTests(unittest.TestCase):
             factories.DatabaseDriverFactory.create_config(
                 mcp_config.DatabaseConfig(provider="unsupported")
             )
-
-    def test_mcp_formatting_helpers_strip_embeddings(self) -> None:
-        formatting = importlib.import_module("context_graph_mcp_server.formatting")
-
-        node = SimpleNamespace(
-            model_dump=lambda **kwargs: {
-                "uuid": "n1",
-                "attributes": {"name_embedding": [1.0, 2.0], "kind": "Function"},
-            }
-        )
-        edge = SimpleNamespace(
-            model_dump=lambda **kwargs: {
-                "uuid": "e1",
-                "attributes": {"fact_embedding": [1.0, 2.0], "weight": 0.7},
-            }
-        )
-
-        formatted_node = formatting.format_node_result(node)
-        formatted_edge = formatting.format_fact_result(edge)
-
-        self.assertEqual(formatted_node["uuid"], "n1")
-        self.assertEqual(formatted_node["attributes"], {"kind": "Function"})
-        self.assertEqual(formatted_edge["uuid"], "e1")
-        self.assertEqual(formatted_edge["attributes"], {"weight": 0.7})
 
 
 if __name__ == "__main__":

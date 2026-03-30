@@ -11,7 +11,7 @@ from .runtime.embeddings import load_embedding_settings, make_embedding_provider
 from .ingestion import CodebaseMemorySnapshotProducer, HostedIndexRequest, IngestionDriver, RepoCacheManager
 from context_graph.ingestion.git.github_client import GitHubApiClient
 from .runtime.llm_config import load_episode_llm_settings, make_episode_llm_client
-from .profile_vectors import (
+from .backend.profile_vector_services import (
     ProfileSearchService,
     ProfileVectorIndexer,
     SemanticProvenanceSearchService,
@@ -1174,7 +1174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         metadata = _make_metadata_store(args)
         profile_indexer = _make_profile_indexer(args, metadata=metadata)
         if profile_indexer is None:
-            raise RuntimeError("sync-profile-vectors requires embedding settings")
+            raise RuntimeError("sync-profile-vectors requires embedding_clients settings")
         indexed = profile_indexer.sync_repo(repo_id=args.repo_id, metadata_store=metadata)
         return _emit_json(
             {
@@ -1187,7 +1187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         metadata = _make_metadata_store(args)
         embedding_provider = _make_embedding_provider(args)
         if embedding_provider is None:
-            raise RuntimeError("search-profiles requires embedding settings")
+            raise RuntimeError("search-profiles requires embedding_clients settings")
         vector_store = _make_profile_vector_store(args, metadata=metadata)
         if vector_store is None:
             raise RuntimeError("unable to create a profile vector store")

@@ -18,7 +18,7 @@ llm:
 
 embedder:
   provider: "openai"
-  model: "text-embedding-3-small"
+  model: "text-embedding_clients-3-small"
   dimensions: 1536
 
   providers:
@@ -28,14 +28,9 @@ embedder:
       organization_id: ${OPENAI_ORGANIZATION_ID:}
 
 database:
-  provider: "falkordb"
+  provider: "neo4j"
 
   providers:
-    falkordb:
-      uri: ${FALKORDB_URI:redis://localhost:6379}
-      password: ${FALKORDB_PASSWORD:}
-      database: ${FALKORDB_DATABASE:default_db}
-
     neo4j:
       uri: ${NEO4J_URI:bolt://localhost:7687}
       username: ${NEO4J_USER:neo4j}

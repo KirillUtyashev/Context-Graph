@@ -94,10 +94,10 @@ class SearchQuery:
             raise ValueError("lexical search requires text")
 
         if self.mode is SearchMode.VECTOR and not self.embedding:
-            raise ValueError("vector search requires an embedding")
+            raise ValueError("vector search requires an embedding_clients")
 
         if self.mode is SearchMode.HYBRID and not (self.text or self.embedding):
-            raise ValueError("hybrid search requires text, an embedding, or both")
+            raise ValueError("hybrid search requires text, an embedding_clients, or both")
 
 
 @dataclass(frozen=True, slots=True)

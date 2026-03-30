@@ -6,6 +6,8 @@ import os
 import threading
 from typing import Any, Sequence
 
+from context_graph.runtime._env_utils import _arg_or_env
+
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
@@ -38,7 +40,7 @@ def load_embedding_settings(args: Any | None = None) -> EmbeddingSettings | None
     provider = provider.strip().lower()
     if provider not in {"openai", "bedrock"}:
         raise RuntimeError(
-            f"unsupported embedding provider {provider!r}; expected 'openai' or 'bedrock'"
+            f"unsupported embedding_clients provider {provider!r}; expected 'openai' or 'bedrock'"
         )
 
     dimensions_raw = _arg_or_env(args, "embed_dimensions", "CONTEXT_GRAPH_EMBED_DIMENSIONS")
@@ -66,20 +68,20 @@ def make_embedding_provider(settings: EmbeddingSettings | None) -> EmbeddingProv
         return None
 
     if settings.provider == "openai":
-        from .embedding.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+        from .embedding_clients.openai import OpenAIEmbedder, OpenAIEmbedderConfig
 
         client = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=settings.api_key,
                 base_url=settings.base_url,
-                embedding_model=settings.model or "text-embedding-3-small",
+                embedding_model=settings.model or "text-embedding_clients-3-small",
                 embedding_dim=settings.dimensions,
             )
         )
         return EmbeddingProvider(client)
 
     if settings.provider == "bedrock":
-        from .embedding.bedrock import BedrockTitanEmbedder, BedrockTitanEmbedderConfig
+        from .embedding_clients.bedrock import BedrockTitanEmbedder, BedrockTitanEmbedderConfig
 
         client = BedrockTitanEmbedder(
             config=BedrockTitanEmbedderConfig(
@@ -90,7 +92,7 @@ def make_embedding_provider(settings: EmbeddingSettings | None) -> EmbeddingProv
         )
         return EmbeddingProvider(client)
 
-    raise RuntimeError(f"unsupported embedding provider {settings.provider!r}")
+    raise RuntimeError(f"unsupported embedding_clients provider {settings.provider!r}")
 
 
 def _run_async(coro: Any) -> Any:
@@ -114,15 +116,6 @@ def _run_async(coro: Any) -> Any:
     if error:
         raise error[0]
     return result.get("value")
-
-
-def _arg_or_env(args: Any | None, attr: str, env_name: str) -> str | None:
-    if args is not None:
-        value = getattr(args, attr, None)
-        if value is not None and str(value):
-            return str(value)
-    value = os.getenv(env_name)
-    return value if value else None
 
 
 def _infer_embedding_provider(args: Any | None = None) -> str | None:

@@ -7,7 +7,7 @@ import re
 import threading
 from typing import Any, Mapping, Sequence
 
-from context_graph.memory.prompts.models import Message
+from context_graph.prompts.models import Message
 from pydantic import BaseModel, Field
 
 from .canonicalization import canonicalize_claim_text

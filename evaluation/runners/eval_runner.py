@@ -20,11 +20,11 @@ def load_dataset() -> list[dict[str, Any]]:
 def retrieve_context(question: str, mode: str) -> list[str]:
     _ = question
 
-    # TODO: Replace this placeholder branch with real embedding retrieval once
-    # the embedding index and search pipeline are implemented in the repo.
+    # TODO: Replace this placeholder branch with real embedding_clients retrieval once
+    # the embedding_clients index and search pipeline are implemented in the repo.
     if mode == "none":
         return []
-    if mode == "embedding":
+    if mode == "embedding_clients":
         return ["doc1", "doc2"]
 
     # TODO: Replace this placeholder branch with real graph-aware retrieval

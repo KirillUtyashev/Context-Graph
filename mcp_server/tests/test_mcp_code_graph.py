@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
 from context_graph.backend import InMemoryMetadataStore
-from context_graph_mcp_server import code_graph as code_graph_queries
-from context_graph_mcp_server import server as server_module
+from context_graph.query import code_graph as code_graph_queries
+from src.state import ServerState
+from src.tools import code_graph as code_graph_tools
 
 
 def make_code_graph_snapshot(root_path: str) -> GraphSnapshot:
@@ -236,13 +236,13 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.metadata_store.bootstrap()
         self.metadata_store.save_latest_snapshot(self.snapshot)
         self.fake_service = FakeMetadataSnapshotService(self.metadata_store)
+        self.state = ServerState(metadata_snapshot_service=self.fake_service)
 
     async def asyncTearDown(self) -> None:
         self.temp_dir.cleanup()
 
     async def test_get_code_graph_schema_wrapper_returns_structured_payload(self) -> None:
-        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
-            response = await server_module.get_code_graph_schema("demo")
+        response = await code_graph_tools.get_code_graph_schema(self.state, "demo")
 
         self.assertEqual(response["repo_id"], "demo")
         self.assertEqual(response["revision_id"], "rev-123")
@@ -251,12 +251,10 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_code_graph_wrapper_returns_error_when_snapshot_missing(self) -> None:
         empty_store = InMemoryMetadataStore()
         empty_store.bootstrap()
-        with patch.object(
-            server_module,
-            "metadata_snapshot_service",
-            FakeMetadataSnapshotService(empty_store),
-        ):
-            response = await server_module.search_code_graph("missing")
+        response = await code_graph_tools.search_code_graph(
+            ServerState(metadata_snapshot_service=FakeMetadataSnapshotService(empty_store)),
+            "missing",
+        )
 
         self.assertEqual(
             response,
@@ -264,20 +262,23 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_get_code_snippet_wrapper_returns_structured_payload(self) -> None:
-        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
-            response = await server_module.get_code_snippet("demo", "demo.app.main")
+        response = await code_graph_tools.get_code_snippet(
+            self.state,
+            "demo",
+            "demo.app.main",
+        )
 
         self.assertEqual(response["repo_id"], "demo")
         self.assertEqual(response["node"]["qualified_name"], "demo.app.main")
         self.assertNotIn("message", response)
 
     async def test_trace_call_path_wrapper_rejects_invalid_direction(self) -> None:
-        with patch.object(server_module, "metadata_snapshot_service", self.fake_service):
-            response = await server_module.trace_call_path(
-                "demo",
-                "demo.app.main",
-                direction="sideways",
-            )
+        response = await code_graph_tools.trace_call_path(
+            self.state,
+            "demo",
+            "demo.app.main",
+            direction="sideways",
+        )
 
         self.assertEqual(
             response,
@@ -288,11 +289,9 @@ class McpCodeGraphWrapperTests(unittest.IsolatedAsyncioTestCase):
         class MetadataOnlySnapshotService(FakeMetadataSnapshotService):
             pass
 
-        with patch.object(
-            server_module,
-            "metadata_snapshot_service",
-            MetadataOnlySnapshotService(self.metadata_store),
-        ):
-            response = await server_module.get_code_graph_schema("demo")
+        response = await code_graph_tools.get_code_graph_schema(
+            ServerState(metadata_snapshot_service=MetadataOnlySnapshotService(self.metadata_store)),
+            "demo",
+        )
 
         self.assertEqual(response["revision_id"], "rev-123")

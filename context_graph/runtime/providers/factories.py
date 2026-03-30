@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import os
 
-from context_graph.runtime.embedding import (
+from context_graph.runtime.embedding_clients import (
     BedrockTitanEmbedder,
     BedrockTitanEmbedderConfig,
     EmbedderClient,
     OpenAIEmbedder,
 )
-from context_graph.runtime.embedding.openai import OpenAIEmbedderConfig
+from context_graph.runtime.embedding_clients.openai import OpenAIEmbedderConfig
 from context_graph.runtime.llm import BedrockLLMClient, LLMClient, OpenAIClient
 from context_graph.runtime.llm.config import LLMConfig as RuntimeLLMConfig
 from context_graph.runtime.provider_config import (

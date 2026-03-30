@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoResolver
-from context_graph.profile_vectors import ProfileVectorIndexer
+from context_graph.backend.profile_vector_services import ProfileVectorIndexer
 from context_graph.backend import BackendDriver
 
 from .commit_indexing import CommitIndexingService

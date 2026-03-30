@@ -4,7 +4,7 @@ This directory contains the standalone MCP app for Context Graph.
 
 ## Structure
 
-- `src/context_graph_mcp_server/`: MCP implementation and tool registration
+- `src/`: MCP implementation and tool registration
 - `config/`: YAML configs and example client config
 - `tests/`: MCP app tests
 - `docker/`: container build assets
@@ -32,11 +32,11 @@ uv run --package context-graph-mcp context-graph-mcp \
 stdio:
 
 ```bash
-uv run --package context-graph-mcp python -m context_graph_mcp_server \
+uv run --package context-graph-mcp python -m src \
   --config /absolute/path/to/Context-Graph/mcp_server/config/config.yaml \
   --transport stdio
 ```
 
 ## Entry Points
 
-Use `context-graph-mcp` or `python -m context_graph_mcp_server`.
+Use `context-graph-mcp` or `python -m src`.

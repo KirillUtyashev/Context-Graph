@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
+from context_graph.runtime._env_utils import _arg_or_env
+
 
 @dataclass(frozen=True, slots=True)
 class EpisodeLLMSettings:
@@ -67,15 +69,6 @@ def make_episode_llm_client(settings: EpisodeLLMSettings | None) -> Any | None:
         return BedrockLLMClient(config=config, region_name=settings.aws_region)
 
     raise RuntimeError(f"unsupported LLM provider {settings.provider!r}")
-
-
-def _arg_or_env(args: Any | None, attr: str, env_name: str) -> str | None:
-    if args is not None:
-        value = getattr(args, attr, None)
-        if value:
-            return str(value)
-    value = os.getenv(env_name)
-    return value if value else None
 
 
 __all__ = [

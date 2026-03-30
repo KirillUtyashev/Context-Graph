@@ -5,7 +5,7 @@ import re
 from typing import Any, Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo, GitMetadata
-from context_graph.profile_vectors import ProfileVectorIndexer
+from context_graph.backend.profile_vector_services import ProfileVectorIndexer
 from context_graph.provenance import (
     ClaimBundleValidator,
     ClaimEvidenceExtractionService,

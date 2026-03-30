@@ -174,10 +174,10 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
     def bootstrap(self) -> None:
         cursor = self.connection.cursor()
         try:
-            current_dim = _current_vector_dimension(cursor, "cg_profile_keys", "embedding")
+            current_dim = _current_vector_dimension(cursor, "cg_profile_keys", "embedding_clients")
             if current_dim is not None and current_dim != self.embedding_dim:
                 logger.warning(
-                    "Rebuilding cg_profile_keys because embedding dimension changed from %s to %s",
+                    "Rebuilding cg_profile_keys because embedding_clients dimension changed from %s to %s",
                     current_dim,
                     self.embedding_dim,
                 )
@@ -197,7 +197,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                     target_node_id TEXT,
                     key_text TEXT NOT NULL,
                     key_origin TEXT NOT NULL DEFAULT 'legacy_keyword',
-                    embedding vector({self.embedding_dim}) NOT NULL,
+                    embedding_clients vector({self.embedding_dim}) NOT NULL,
                     is_active BOOLEAN NOT NULL,
                     valid_from_revision TEXT,
                     valid_to_revision TEXT,
@@ -226,7 +226,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS cg_profile_keys_embedding_hnsw_idx
-                ON cg_profile_keys USING hnsw (embedding vector_cosine_ops)
+                ON cg_profile_keys USING hnsw (embedding_clients vector_cosine_ops)
                 """
             )
             self.connection.commit()
@@ -257,7 +257,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                     target_node_id,
                     key_text,
                     key_origin,
-                    embedding,
+                    embedding_clients,
                     is_active,
                     valid_from_revision,
                     valid_to_revision,
@@ -273,7 +273,7 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                     target_node_id = excluded.target_node_id,
                     key_text = excluded.key_text,
                     key_origin = excluded.key_origin,
-                    embedding = excluded.embedding,
+                    embedding_clients = excluded.embedding_clients,
                     is_active = excluded.is_active,
                     valid_from_revision = excluded.valid_from_revision,
                     valid_to_revision = excluded.valid_to_revision,
@@ -362,12 +362,12 @@ class PgVectorProfileVectorStore(ProfileVectorStore):
                 profile_kind,
                 key_text,
                 key_origin,
-                1 - (embedding <=> CAST(%s AS vector)) AS score
+                1 - (embedding_clients <=> CAST(%s AS vector)) AS score
             FROM cg_profile_keys
             WHERE repo_id = %s
               AND (%s = FALSE OR is_active = TRUE)
               AND (%s::text[] IS NULL OR profile_kind = ANY(%s::text[]))
-            ORDER BY embedding <=> CAST(%s AS vector)
+            ORDER BY embedding_clients <=> CAST(%s AS vector)
             LIMIT %s
         """
         kinds = list(profile_kinds) if profile_kinds else None

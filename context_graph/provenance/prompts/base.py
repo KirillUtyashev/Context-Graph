@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from context_graph.memory.prompts.models import Message
+from context_graph.prompts.models import Message
 
 
 @dataclass(frozen=True, slots=True)

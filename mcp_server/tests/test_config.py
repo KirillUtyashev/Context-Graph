@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from context_graph_mcp_server import config as mcp_config
+import src.config as mcp_config
 
 
 def test_yaml_settings_expand_env_vars_and_apply_cli_overrides(tmp_path: Path) -> None:

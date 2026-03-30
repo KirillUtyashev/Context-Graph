@@ -96,7 +96,7 @@ class EmbedderConfig(BaseModel):
     """Embedder configuration."""
 
     provider: str = Field(default="openai", description="Embedder provider")
-    model: str = Field(default="text-embedding-3-small", description="Model name")
+    model: str = Field(default="text-embedding_clients-3-small", description="Model name")
     dimensions: int = Field(default=1536, description="Embedding dimensions")
     providers: EmbedderProvidersConfig = Field(default_factory=EmbedderProvidersConfig)
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from context_graph.memory.prompts.models import Message
-from context_graph.memory.prompts.prompt_helpers import to_prompt_json
+from context_graph.prompts.models import Message
+from context_graph.prompts.prompt_helpers import to_prompt_json
 
 from .base import ProvenancePromptMetadata
 

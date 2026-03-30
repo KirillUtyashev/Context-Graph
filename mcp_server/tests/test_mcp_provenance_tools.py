@@ -8,8 +8,6 @@ import unittest
 from unittest.mock import patch
 
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
-from context_graph_mcp_server import provenance_tools
-from context_graph_mcp_server import server as server_module
 from context_graph.backend import (
     BackendProvider,
     GraphRecordRef,
@@ -17,6 +15,10 @@ from context_graph.backend import (
     SearchHit,
     TraversalHit,
 )
+import src.provenance as provenance_tools
+from src.state import ServerState
+from src.tools import observations as observation_tools
+from src.tools import provenance as provenance_tool_module
 
 
 def make_code_graph_snapshot(root_path: str) -> GraphSnapshot:
@@ -1245,11 +1247,12 @@ class ProvenanceToolTests(unittest.TestCase):
 
 class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
     def test_removed_public_tools_are_not_exposed(self) -> None:
-        self.assertFalse(hasattr(server_module, "resolve_claim"))
-        self.assertFalse(hasattr(server_module, "synthesize_artifact"))
+        self.assertFalse(hasattr(provenance_tool_module, "resolve_claim"))
+        self.assertFalse(hasattr(observation_tools, "synthesize_artifact"))
 
     async def test_get_node_neighborhood_wrapper_requires_exact_node_id(self) -> None:
-        response = await server_module.get_node_neighborhood(
+        response = await provenance_tool_module.get_node_neighborhood(
+            ServerState(),
             node_id="",
             repo_id="demo",
         )
@@ -1265,7 +1268,8 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_get_timeline_wrapper_requires_positive_limit(self) -> None:
-        response = await server_module.get_timeline(
+        response = await provenance_tool_module.get_timeline(
+            ServerState(),
             target_id="claim:1",
             repo_id=None,
             limit=0,
@@ -1276,8 +1280,14 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_agent_observation_wrapper_fills_internal_defaults_for_persist_helper(self) -> None:
         runtime = FakeRuntime()
         config = SimpleNamespace(namespace=SimpleNamespace(group_id="main"))
+        state = ServerState(
+            config=config,
+            backend_runtime=runtime,
+            metadata_snapshot_service=object(),
+        )
 
-        async def fake_persist(request):
+        async def fake_persist(persist_state, request):
+            self.assertIs(persist_state, state)
             self.assertEqual(request.repo_id, "demo")
             self.assertEqual(request.observation_kind, "agent_note")
             self.assertEqual(request.title, "Auth regression")
@@ -1298,22 +1308,13 @@ class ProvenanceToolWrapperTests(unittest.IsolatedAsyncioTestCase):
                 "persisted": True,
             }
 
-        with patch.object(server_module, "backend_runtime", runtime), patch.object(
-            server_module,
-            "metadata_snapshot_service",
-            object(),
-            create=True,
-        ), patch.object(
-            server_module,
-            "config",
-            config,
-            create=True,
-        ), patch.object(
-            server_module,
+        with patch.object(
+            observation_tools,
             "_persist_agent_observation_request",
             fake_persist,
         ):
-            response = await server_module.record_agent_observation(
+            response = await observation_tools.record_agent_observation(
+                state,
                 "demo",
                 "Investigated auth regression symptoms.",
                 observation_kind="agent_note",
