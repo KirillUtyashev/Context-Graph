@@ -25,18 +25,12 @@ from context_graph.ingestion.git.structural_planner import GitHubStructuralPlann
 from context_graph.ingestion.hosted_indexing import HostedIndexingService
 from context_graph.ingestion import diff_snapshots
 from context_graph.ingestion.models import ManagedRepo
-from context_graph.metadata import (
-    InMemoryMetadataStore as LegacyInMemoryMetadataStore,
-    PostgresMetadataStore as LegacyPostgresMetadataStore,
-    SQLiteMetadataStore as LegacySQLiteMetadataStore,
-)
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
 from context_graph.profile_vectors import (
-    InMemoryProfileVectorStore as LegacyInMemoryProfileVectorStore,
     ProfileSearchService,
     ProfileVectorIndexer,
 )
-from context_graph.profiles import (
+from context_graph.models.profiles import (
     PROFILE_KEY_ORIGIN_RAW_TEXT,
     ProfileDeactivation,
     ProfileKeyDefinition,
@@ -45,8 +39,8 @@ from context_graph.profiles import (
     SEMANTIC_RELATION_PROFILE_KIND,
     semantic_relation_profile_from_spec,
 )
-from context_graph.query_parser import QueryParseResult
-from context_graph.storage.backend import (
+from context_graph.query.parser import QueryParseResult
+from context_graph.backend import (
     BackendFeatureNotImplementedError,
     EdgeRecord,
     GraphRecordRef,
@@ -76,11 +70,11 @@ from context_graph.storage.backend import (
     create_profile_vector_store,
     create_profile_vector_store_from_metadata,
 )
-from context_graph.storage.backend.sync_bridge import BackendSyncBridge
-from context_graph.storage.backend.neo4j.driver import Neo4jBackendDriver
-from context_graph.storage.backend.neo4j.search import Neo4jSearchOperations
-from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver
-from context_graph.storage.backend.neptune.search import (
+from context_graph.backend import BackendSyncBridge
+from context_graph.backend.neo4j import Neo4jBackendDriver
+from context_graph.backend.neo4j import Neo4jSearchOperations
+from context_graph.backend.neptune.driver import NeptuneBackendDriver
+from context_graph.backend.neptune.search import (
     NEPTUNE_NODE_AOSS_INDEX,
     NeptuneSearchOperations,
 )
@@ -2549,17 +2543,9 @@ class ProfileVectorBackendTests(unittest.TestCase):
         self.assertTrue(store.needs_resync)
 
 
-class CompatibilityWrapperTests(unittest.TestCase):
-    def test_metadata_wrappers_reexport_backend_classes(self):
-        self.assertIs(LegacyInMemoryMetadataStore, InMemoryMetadataStore)
-        self.assertIs(LegacySQLiteMetadataStore, SQLiteMetadataStore)
-        self.assertIs(LegacyPostgresMetadataStore, PostgresMetadataStore)
-
-    def test_profile_vector_wrappers_reexport_backend_classes(self):
-        self.assertIs(LegacyInMemoryProfileVectorStore, InMemoryProfileVectorStore)
-
+class ProfileServiceIntegrationTests(unittest.TestCase):
     def test_profile_services_still_work_with_backend_store_interfaces(self):
-        metadata = LegacyInMemoryMetadataStore()
+        metadata = InMemoryMetadataStore()
         profile = ProfileRecord(
             profile_id="profile:demo:semantic:1",
             repo_id="demo",
@@ -2583,7 +2569,7 @@ class CompatibilityWrapperTests(unittest.TestCase):
         )
         metadata.upsert_profiles((profile,))
 
-        vector_store = LegacyInMemoryProfileVectorStore()
+        vector_store = InMemoryProfileVectorStore()
         indexer = ProfileVectorIndexer(
             vector_store=vector_store,
             embedding_provider=FakeEmbeddingProvider(),
@@ -2664,7 +2650,7 @@ class BackendSyncBridgeTests(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_profile_services_can_filter_to_relation_profiles(self):
-        metadata = LegacyInMemoryMetadataStore()
+        metadata = InMemoryMetadataStore()
         profile = semantic_relation_profile_from_spec(
             RelationProfileSpec(
                 repo_id="demo",
@@ -2682,7 +2668,7 @@ class BackendSyncBridgeTests(unittest.TestCase):
         assert profile is not None
         metadata.upsert_profiles((profile,))
 
-        vector_store = LegacyInMemoryProfileVectorStore()
+        vector_store = InMemoryProfileVectorStore()
         indexer = ProfileVectorIndexer(
             vector_store=vector_store,
             embedding_provider=FakeEmbeddingProvider(),

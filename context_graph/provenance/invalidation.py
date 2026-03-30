@@ -9,18 +9,17 @@ import inspect
 import json
 from typing import Any
 
-from context_graph.models import GraphSnapshot
-from context_graph.profiles import ProfileDeactivation, ProfileRecord
-from context_graph.storage.backend import (
+from context_graph.models.graph import GraphSnapshot
+from context_graph.models.profiles import ProfileDeactivation, ProfileRecord
+from context_graph.backend import (
     BackendDriver,
     MutationPlan,
-    merge_mutation_plans,
     run_backend_coroutine_sync,
 )
 
 from .canonicalization import canonical_claim_key
 from .claim_planner import ClaimMutationPlanner, ClaimPlanningSession
-from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
+from .evidence_planner import EvidenceMutationPlanner
 from .models import EvidenceRecord, Observation, PersistedEvidenceFact, PersistedEvidenceRecord
 from .services import (
     ClaimProfileKeyGenerationService,

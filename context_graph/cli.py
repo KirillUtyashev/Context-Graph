@@ -7,27 +7,29 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from .embeddings import load_embedding_settings, make_embedding_provider
+from .runtime.embeddings import load_embedding_settings, make_embedding_provider
 from .ingestion import CodebaseMemorySnapshotProducer, HostedIndexRequest, IngestionDriver, RepoCacheManager
 from context_graph.ingestion.git.github_client import GitHubApiClient
-from .llm import load_episode_llm_settings, make_episode_llm_client
-from .metadata import MetadataStore, PostgresMetadataStore, SQLiteMetadataStore
+from .runtime.llm_config import load_episode_llm_settings, make_episode_llm_client
 from .profile_vectors import (
-    AuroraProfileVectorStore,
-    InMemoryProfileVectorStore,
     ProfileSearchService,
     ProfileVectorIndexer,
     SemanticProvenanceSearchService,
 )
-from .query_parser import QueryParser
-from .storage.backend import (
+from .query.parser import QueryParser
+from context_graph.backend import (
+    AuroraProfileVectorStore,
     BackendSyncBridge,
     EdgeRecord,
+    InMemoryProfileVectorStore,
+    MetadataStore,
     MutationPlan,
     Neo4jConfig,
     NeptuneConfig,
     NodeRecord,
+    PostgresMetadataStore,
     SearchDocumentRecord,
+    SQLiteMetadataStore,
     create_driver,
 )
 
@@ -600,34 +602,6 @@ def _add_embed_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _make_episode_processor(
-    args,
-    *,
-    metadata: MetadataStore | None = None,
-    graph_sink=None,
-    embedding_provider=None,
-) :
-    from .episode_processor import EpisodeProcessor
-    from .graph_read import GraphReadRepository
-
-    metadata = metadata or _make_metadata_store(args)
-    embedding_provider = embedding_provider or _make_embedding_provider(args)
-    graph_sink = graph_sink or _make_sink(args, embedding_provider=embedding_provider)
-    llm_settings = load_episode_llm_settings(args)
-    llm_client = make_episode_llm_client(llm_settings)
-    profile_indexer = _make_profile_indexer(
-        args,
-        metadata=metadata,
-        embedding_provider=embedding_provider,
-    )
-    return EpisodeProcessor(
-        graph_sink=graph_sink,
-        read_repository=GraphReadRepository(metadata_store=metadata, graph_sink=graph_sink),
-        llm_client=llm_client,
-        profile_indexer=profile_indexer,
-    )
-
-
 def _make_embedding_provider(args):
     settings = load_embedding_settings(args)
     return make_embedding_provider(settings)
@@ -735,7 +709,7 @@ def _load_episode_text(args) -> str:
 
 
 def _now_iso() -> str:
-    from .models import utc_now_iso
+    from .models.graph import utc_now_iso
 
     return utc_now_iso()
 

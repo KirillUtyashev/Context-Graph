@@ -5,16 +5,20 @@ on:
     branches: ["main", "repo-indexing"]
     paths:
       - "context_graph/**"
+      - "mcp_server/**"
       - "tests/**"
       - "pyproject.toml"
+      - "docker-compose.yml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
       - ".github/scripts/render_coverage_badge.py"
   pull_request:
     paths:
       - "context_graph/**"
+      - "mcp_server/**"
       - "tests/**"
       - "pyproject.toml"
+      - "docker-compose.yml"
       - "README.md"
       - ".github/workflows/test-coverage.yml"
       - ".github/scripts/render_coverage_badge.py"
@@ -39,15 +43,23 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --all-packages --dev --no-editable
 
-      - name: Run tests with coverage
+      - name: Run core tests with coverage
         run: |
           uv run python -m pytest \
             --cov=context_graph \
             --cov-report=xml \
             --cov-report=term-missing \
             tests | tee coverage-report.txt
+
+      - name: Run MCP app tests
+        run: uv run --package context-graph-mcp python -m pytest mcp_server/tests
+
+      - name: Verify standalone MCP package entrypoints
+        run: |
+          uv run --package context-graph-mcp context-graph-mcp --help
+          uv run --package context-graph-mcp python -m context_graph_mcp_server --help
 
       - name: Render coverage badge
         run: |

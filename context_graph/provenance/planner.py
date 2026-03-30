@@ -8,8 +8,8 @@ import json
 from typing import Any
 
 from context_graph.ingestion.git.git_metadata import CommitInfo
-from context_graph.models import GraphSnapshot
-from context_graph.storage.backend import (
+from context_graph.models.graph import GraphSnapshot
+from context_graph.backend import (
     EdgeRecord,
     MutationPlan,
     NodeRecord,

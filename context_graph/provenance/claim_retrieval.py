@@ -6,15 +6,15 @@ from dataclasses import dataclass
 import re
 from typing import TYPE_CHECKING, Any, Sequence
 
-from context_graph.query_parser import QueryParseResult, QueryParser
+from context_graph.query.parser import QueryParseResult, QueryParser
 
 from .canonicalization import canonicalize_claim_text
 
 if TYPE_CHECKING:
-    from context_graph.embeddings import EmbeddingProvider
-    from context_graph.metadata import MetadataStore
-    from context_graph.profiles import ProfileRecord
-    from context_graph.storage.backend.profile_vectors import ProfileVectorStore
+    from context_graph.runtime.embeddings import EmbeddingProvider
+    from context_graph.models.profiles import ProfileRecord
+    from context_graph.backend import MetadataStore
+    from context_graph.backend import ProfileVectorStore
     from .models import ClaimRecord
 
 
@@ -240,7 +240,7 @@ class ClaimSemanticRetrievalService:
         about_record_ids: Sequence[str] = (),
         support_texts: Sequence[str] = (),
     ) -> "ProfileRecord":
-        from context_graph.profiles import semantic_claim_profile_from_claim
+        from context_graph.models.profiles import semantic_claim_profile_from_claim
 
         return semantic_claim_profile_from_claim(
             claim,
@@ -257,7 +257,7 @@ class ClaimSemanticRetrievalService:
         active_only: bool = True,
         llm_enabled: bool = True,
     ) -> ClaimSemanticSearchResult:
-        from context_graph.profiles import SEMANTIC_CLAIM_PROFILE_KIND
+        from context_graph.models.profiles import SEMANTIC_CLAIM_PROFILE_KIND
 
         parse_result = self.query_parser.parse(query, llm_enabled=llm_enabled)
         keywords = list(parse_result.high_level_keywords) or [query]
@@ -321,7 +321,7 @@ def semantic_claim_profile_key_records(
     """Build concrete vector-store records for one semantic claim profile."""
 
     from context_graph.profile_vectors import build_profile_key_records
-    from context_graph.profiles import semantic_claim_profile_from_claim
+    from context_graph.models.profiles import semantic_claim_profile_from_claim
 
     profile = semantic_claim_profile_from_claim(
         claim,
@@ -340,7 +340,7 @@ def semantic_claim_profile_key_ids(
     """Expose stable key ids for tests and future profile indexing."""
 
     from context_graph.profile_vectors import profile_key_id
-    from context_graph.profiles import semantic_claim_profile_from_claim
+    from context_graph.models.profiles import semantic_claim_profile_from_claim
 
     profile = semantic_claim_profile_from_claim(
         claim,

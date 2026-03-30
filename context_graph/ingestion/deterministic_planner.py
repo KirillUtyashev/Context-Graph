@@ -16,8 +16,8 @@ from context_graph.code_identity import (
     SnapshotCodeResolver,
 )
 from context_graph.ingestion.git.git_metadata import CommitInfo
-from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
-from context_graph.storage.backend import (
+from context_graph.models.graph import CanonicalEdge, CanonicalNode, GraphSnapshot, SnapshotDiff
+from context_graph.backend import (
     EdgeRecord,
     merge_mutation_plans,
     MutationPlan,

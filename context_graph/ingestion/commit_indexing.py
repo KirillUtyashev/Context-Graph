@@ -27,15 +27,20 @@ from context_graph.provenance.source_adapters import (
     MarkdownObservationAdapter,
     build_commit_observation,
 )
-from context_graph.query_parser import QueryParser
-from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
+from context_graph.query.parser import QueryParser
+from context_graph.backend import (
+    BackendDriver,
+    MetadataStore,
+    MutationPlan,
+    RepoIndexState,
+    merge_mutation_plans,
+)
 
 from .deterministic_planner import DeterministicMutationPlanner
 from .models import CommitIndexResult
 from .snapshot_builder import CodebaseMemorySnapshotProducer
 from .temporal import TemporalGraphWriter
-from ..metadata import MetadataStore, RepoIndexState
-from ..models import CanonicalNode, GraphSnapshot, SnapshotApplyResult
+from ..models.graph import CanonicalNode, GraphSnapshot, SnapshotApplyResult
 
 
 def default_repo_id(value: str) -> str:

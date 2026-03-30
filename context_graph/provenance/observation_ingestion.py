@@ -6,14 +6,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from context_graph.models import GraphSnapshot
-from context_graph.profiles import (
+from context_graph.models.graph import GraphSnapshot
+from context_graph.models.profiles import (
     ProfileDeactivation,
     ProfileRecord,
     SEMANTIC_RELATION_PROFILE_KIND,
     semantic_observation_profile_from_observation,
 )
-from context_graph.storage.backend import (
+from context_graph.backend import (
     BackendDriver,
     BackendSyncBridge,
     EdgeRecord,

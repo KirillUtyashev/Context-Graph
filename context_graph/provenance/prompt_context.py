@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from context_graph.code_identity import SnapshotCodeResolver
-from context_graph.models import CanonicalNode, GraphSnapshot
+from context_graph.models.graph import CanonicalNode, GraphSnapshot
 
 from .hint_enrichment import collect_observation_grounding_hints
 from .models import Observation

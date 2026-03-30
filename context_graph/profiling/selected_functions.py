@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import io
 import json
 from pathlib import Path
@@ -25,12 +25,12 @@ from context_graph.ingestion.deterministic_planner import DeterministicMutationP
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 from context_graph.ingestion.git.github_indexer import GitHubIndexer
 from context_graph.ingestion.git.git_metadata import CommitInfo
-from context_graph.metadata import InMemoryMetadataStore, RepoIndexState
-from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot, utc_now_iso
+from context_graph.models.graph import CanonicalEdge, CanonicalNode, GraphSnapshot, utc_now_iso
 from context_graph.provenance.invalidation import CurrentEvidenceReader
 from context_graph.provenance.models import ClaimEvidenceExtractionResponse
 from context_graph.provenance.services import FactConflictResolutionService
-from context_graph.server.mcp.code_graph import trace_call_path
+from context_graph.query.code_graph import trace_call_path
+from context_graph.backend import InMemoryMetadataStore, RepoIndexState
 
 TARGET_APPLY_COMMIT = "apply_commit"
 TARGET_PLAN_SNAPSHOT_DIFF = "plan_snapshot_diff"
@@ -374,7 +374,7 @@ def _prepare_apply_commit(scale: ScaleConfig) -> PreparedWorkload:
             "claims": [
                 {
                     "claim_text": "profile-demo.module_0.func_0 was updated in this commit.",
-                    "claim_kind": "change_claim",
+                    "claim_subkind": "fix_or_mitigation",
                     "about_hints": ["profile-demo.module_0.func_0"],
                     "confidence": "high",
                     "derivation_kind": "direct_from_observation",
@@ -1099,4 +1099,3 @@ def _canonical_claim_key(*, claim_kind: str, claim_text: str) -> str:
     from context_graph.provenance.canonicalization import canonical_claim_key
 
     return canonical_claim_key(claim_kind=claim_kind, claim_text=claim_text)
-

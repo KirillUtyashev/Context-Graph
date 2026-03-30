@@ -1,10 +1,4 @@
-"""Compatibility layer for profile-vector storage and search services.
-
-The storage implementations and record types now live under
-`context_graph.storage.backend.profile_vectors`. This module retains the current
-service layer and historical import path while delegating storage to the new
-backend package.
-"""
+"""Semantic profile indexing helpers and search services."""
 
 from __future__ import annotations
 
@@ -13,29 +7,20 @@ import hashlib
 import sys
 from typing import Sequence
 
-from .embeddings import EmbeddingProvider
-from .metadata import MetadataStore
-from .profiles import (
+from .runtime.embeddings import EmbeddingProvider
+from .models.profiles import (
     ProfileDeactivation,
     ProfileRecord,
     SEMANTIC_CLAIM_PROFILE_KIND,
     SEMANTIC_OBSERVATION_PROFILE_KIND,
 )
-from .query_parser import QueryParseResult, QueryParser
-from .storage.backend.profile_vectors import (
-    AuroraProfileVectorStore,
-    InMemoryProfileVectorConfig,
-    InMemoryProfileVectorStore,
-    PgVectorProfileVectorConfig,
-    PgVectorProfileVectorStore,
+from .query.parser import QueryParseResult, QueryParser
+from context_graph.backend.metadata import MetadataStore
+from context_graph.backend.profile_vectors import (
     ProfileKeyRecord,
     ProfileVectorHit,
     ProfileVectorStore,
-    create_profile_vector_store,
-    create_profile_vector_store_from_metadata,
 )
-
-BaseProfileVectorStore = ProfileVectorStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,22 +277,11 @@ def _dedupe_query_texts(values: Sequence[str]) -> list[str]:
 
 
 __all__ = [
-    "AuroraProfileVectorStore",
-    "BaseProfileVectorStore",
-    "InMemoryProfileVectorConfig",
-    "InMemoryProfileVectorStore",
-    "PgVectorProfileVectorConfig",
-    "PgVectorProfileVectorStore",
-    "ProfileKeyRecord",
     "ProfileSearchResult",
     "ProfileSearchService",
-    "ProfileVectorHit",
     "ProfileVectorIndexer",
-    "ProfileVectorStore",
     "SemanticProvenanceSearchResult",
     "SemanticProvenanceSearchService",
     "build_profile_key_records",
-    "create_profile_vector_store",
-    "create_profile_vector_store_from_metadata",
     "profile_key_id",
 ]

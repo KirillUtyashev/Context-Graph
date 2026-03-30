@@ -7,8 +7,8 @@ import json
 from os.path import basename
 
 from context_graph.code_identity import SnapshotCodeResolver
-from context_graph.models import GraphSnapshot
-from context_graph.storage.backend import (
+from context_graph.models.graph import GraphSnapshot
+from context_graph.backend import (
     EdgeRecord,
     MutationPlan,
     NodeRecord,

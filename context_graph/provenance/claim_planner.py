@@ -9,15 +9,15 @@ import inspect
 import json
 from typing import Any
 
-from context_graph.models import GraphSnapshot
-from context_graph.profiles import (
+from context_graph.models.graph import GraphSnapshot
+from context_graph.models.profiles import (
     ProfileDeactivation,
     ProfileRecord,
     RelationProfileSpec,
     semantic_claim_profile_from_claim,
     semantic_relation_profile_from_spec,
 )
-from context_graph.storage.backend import (
+from context_graph.backend import (
     BackendDriver,
     EdgeRecord,
     MutationPlan,
@@ -36,9 +36,7 @@ from .debug import emit_provenance_debug
 from .evidence_planner import EvidenceFactState, EvidenceMutationPlanner
 from .models import (
     ClaimRecord,
-    ClaimResolutionResponse,
     Observation,
-    PersistedClaimRecord,
     PersistedEvidenceRecord,
     claim_record_id,
 )

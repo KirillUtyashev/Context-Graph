@@ -3,19 +3,17 @@ from __future__ import annotations
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoResolver
 from context_graph.profile_vectors import ProfileVectorIndexer
-from context_graph.storage.backend import BackendDriver
+from context_graph.backend import BackendDriver
 
 from .commit_indexing import CommitIndexingService
 from .deterministic_planner import DeterministicMutationPlanner
 from .hosted_indexing import (
     HostedIndexingService,
-    branch_hint_for_request as _branch_hint,
-    repo_lock_key as _repo_lock_key,
 )
 from .models import CommitIndexResult, DeterministicHostedIndexResult, HostedIndexRequest
 from .repo_cache import RepoCacheManager
 from .snapshot_builder import CodebaseMemorySnapshotProducer
-from ..metadata import MetadataStore
+from context_graph.backend import MetadataStore
 
 
 class IngestionDriver:

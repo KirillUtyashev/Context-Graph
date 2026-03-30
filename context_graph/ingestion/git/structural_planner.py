@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-from context_graph.storage.backend import (
+from context_graph.backend import (
     EdgeRecord,
     MutationPlan,
     NodeRecord,

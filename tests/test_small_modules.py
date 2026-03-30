@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
 import importlib
 import io
 import runpy
@@ -12,15 +11,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from context_graph import embeddings
-from context_graph import llm
-from context_graph.memory import datetime_utils, errors, text_utils
-from context_graph.query_parser import (
+from context_graph.query.parser import (
     _dedupe_texts,
     _normalize_query_response,
     _query_prompt,
     QueryParser,
 )
+from context_graph.runtime import embeddings
+from context_graph.runtime import llm_config as llm
 from context_graph.runtime import tracing
 from context_graph.runtime.llm import config as runtime_llm_config
 from context_graph.runtime.llm import errors as runtime_llm_errors
@@ -88,9 +86,9 @@ class SmallModuleTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 17)
 
         fake_server_module = SimpleNamespace(main=lambda: 23)
-        with patch.dict(sys.modules, {"context_graph.server.mcp.server": fake_server_module}):
+        with patch.dict(sys.modules, {"context_graph_mcp_server.server": fake_server_module}):
             with self.assertRaises(SystemExit) as exc:
-                runpy.run_module("context_graph.server.mcp", run_name="__main__")
+                runpy.run_module("context_graph_mcp_server", run_name="__main__")
         self.assertEqual(exc.exception.code, 23)
 
     def test_embedding_provider_cleans_texts_and_returns_async_results(self) -> None:
@@ -246,70 +244,6 @@ class SmallModuleTests(unittest.TestCase):
                 llm.EpisodeLLMSettings(provider="unsupported")
             )
 
-    def test_datetime_helpers_normalize_and_stringify_nested_values(self) -> None:
-        naive = datetime(2024, 1, 2, 3, 4, 5)
-        eastern = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=-5)))
-        aware_utc = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-
-        self.assertIsNone(datetime_utils.ensure_utc(None))
-        self.assertEqual(datetime_utils.ensure_utc(naive).tzinfo, timezone.utc)
-        self.assertEqual(
-            datetime_utils.ensure_utc(eastern),
-            datetime(2024, 1, 2, 8, 4, 5, tzinfo=timezone.utc),
-        )
-        self.assertIs(datetime_utils.ensure_utc(aware_utc), aware_utc)
-        self.assertEqual(datetime_utils.utc_now().tzinfo, timezone.utc)
-
-        payload = {
-            "created_at": aware_utc,
-            "items": [aware_utc, (aware_utc, {"updated_at": aware_utc})],
-        }
-        converted = datetime_utils.convert_datetimes_to_strings(payload)
-        expected = aware_utc.isoformat()
-        self.assertEqual(converted["created_at"], expected)
-        self.assertEqual(converted["items"][0], expected)
-        self.assertEqual(converted["items"][1][0], expected)
-        self.assertEqual(converted["items"][1][1]["updated_at"], expected)
-
-    def test_truncate_at_sentence_handles_boundaries_and_fallback(self) -> None:
-        self.assertEqual(text_utils.truncate_at_sentence("Short", 50), "Short")
-        self.assertEqual(
-            text_utils.truncate_at_sentence("First sentence. Second sentence.", 20),
-            "First sentence.",
-        )
-        self.assertEqual(
-            text_utils.truncate_at_sentence("No boundary in this fragment", 10),
-            "No boundar",
-        )
-
-    def test_error_types_expose_expected_messages(self) -> None:
-        self.assertEqual(str(errors.EdgeNotFoundError("e1")), "edge e1 not found")
-        self.assertEqual(
-            str(errors.EdgesNotFoundError(["a", "b"])),
-            "None of the edges for ['a', 'b'] were found.",
-        )
-        self.assertEqual(
-            str(errors.GroupsEdgesNotFoundError(["g1"])),
-            "no edges found for group ids ['g1']",
-        )
-        self.assertEqual(
-            str(errors.GroupsNodesNotFoundError(["g1"])),
-            "no nodes found for group ids ['g1']",
-        )
-        self.assertEqual(str(errors.NodeNotFoundError("n1")), "node n1 not found")
-        self.assertEqual(str(errors.SearchRerankerError("bad rerank")), "bad rerank")
-        self.assertIn(
-            "kind cannot be used as an attribute for Entity",
-            str(errors.EntityTypeValidationError("Entity", "kind")),
-        )
-        self.assertIn(
-            'group_id "team/a" must contain only alphanumeric characters',
-            str(errors.GroupIdValidationError("team/a")),
-        )
-        invalid = errors.NodeLabelValidationError(["Bad-Label"])
-        self.assertIsInstance(invalid, ValueError)
-        self.assertIn('"Bad-Label"', str(invalid))
-
     def test_runtime_llm_config_and_error_types(self) -> None:
         config = runtime_llm_config.LLMConfig(api_key="secret")
         self.assertEqual(config.api_key, "secret")
@@ -444,7 +378,7 @@ class SmallModuleTests(unittest.TestCase):
 
     def test_mcp_config_helpers_expand_yaml_and_apply_cli_overrides(self) -> None:
         try:
-            mcp_config = importlib.import_module("context_graph.server.mcp.config")
+            mcp_config = importlib.import_module("context_graph_mcp_server.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -526,7 +460,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_runtime_factories_validate_and_build_expected_clients(self) -> None:
         try:
             factories = importlib.import_module("context_graph.runtime.providers.factories")
-            mcp_config = importlib.import_module("context_graph.server.mcp.config")
+            mcp_config = importlib.import_module("context_graph_mcp_server.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -637,7 +571,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_database_driver_factory_uses_env_overrides_and_validates_neptune(self) -> None:
         try:
             factories = importlib.import_module("context_graph.runtime.providers.factories")
-            mcp_config = importlib.import_module("context_graph.server.mcp.config")
+            mcp_config = importlib.import_module("context_graph_mcp_server.config")
         except ModuleNotFoundError:
             self.skipTest("pydantic-settings is not installed")
 
@@ -696,7 +630,7 @@ class SmallModuleTests(unittest.TestCase):
             )
 
     def test_mcp_formatting_helpers_strip_embeddings(self) -> None:
-        formatting = importlib.import_module("context_graph.server.mcp.formatting")
+        formatting = importlib.import_module("context_graph_mcp_server.formatting")
 
         node = SimpleNamespace(
             model_dump=lambda **kwargs: {

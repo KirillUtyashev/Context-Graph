@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from context_graph.code_identity import SnapshotCodeResolver
-from context_graph.models import GraphSnapshot
+from context_graph.models.graph import GraphSnapshot
 
 from .hint_enrichment import EnrichedAboutHint, infer_hint_kind, normalize_hint_value
 

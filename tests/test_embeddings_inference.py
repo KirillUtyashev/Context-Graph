@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from context_graph import embeddings
 from context_graph.cli import _make_profile_indexer
-from context_graph.metadata import InMemoryMetadataStore
+from context_graph.runtime import embeddings
+from context_graph.backend import InMemoryMetadataStore
 
 
 class EmbeddingInferenceTests(unittest.TestCase):

@@ -6,8 +6,8 @@ import shutil
 from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubRepoRef
 from .models import ManagedRepo
-from ..metadata import RepoSourceState
 from ..models import utc_now_iso
+from context_graph.backend import RepoSourceState
 
 
 class RepoCacheManager:

@@ -5,9 +5,8 @@ from .deterministic_planner import (
     DeterministicMutationPlanner,
     DeterministicSnapshotPlan,
 )
-from ..metadata import MetadataStore
 from ..models import GraphSnapshot, SnapshotApplyResult, SnapshotDiff
-from ..storage.backend import BackendDriver, BackendSyncBridge, MutationPlan
+from context_graph.backend import BackendDriver, BackendSyncBridge, MetadataStore, MutationPlan
 
 
 class TemporalGraphWriter:

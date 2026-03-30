@@ -9,7 +9,7 @@ import hashlib
 import json
 from typing import Any
 
-from context_graph.models import GraphSnapshot
+from context_graph.models.graph import GraphSnapshot
 from context_graph.profile_vectors import ProfileVectorIndexer
 from context_graph.provenance import (
     ClaimBundleValidator,
@@ -31,11 +31,11 @@ from context_graph.provenance.observation_ingestion import (
 )
 from context_graph.provenance.source_adapters import build_github_observations
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, collect_unique_numbers
-from context_graph.metadata import MetadataStore
-from context_graph.query_parser import QueryParser
-from context_graph.storage.backend import (
+from context_graph.query.parser import QueryParser
+from context_graph.backend import (
     BackendDriver,
     BackendSyncBridge,
+    MetadataStore,
     merge_mutation_plans,
     MutationPlan,
 )

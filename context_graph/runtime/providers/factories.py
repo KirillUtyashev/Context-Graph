@@ -14,14 +14,14 @@ from context_graph.runtime.embedding import (
 from context_graph.runtime.embedding.openai import OpenAIEmbedderConfig
 from context_graph.runtime.llm import BedrockLLMClient, LLMClient, OpenAIClient
 from context_graph.runtime.llm.config import LLMConfig as RuntimeLLMConfig
-from context_graph.server.mcp.config import (
+from context_graph.runtime.provider_config import (
     BedrockEmbedderProviderConfig,
     DatabaseConfig,
     EmbedderConfig,
     LLMConfig,
     Neo4jProviderConfig,
 )
-from context_graph.storage.backend import Neo4jConfig, NeptuneConfig
+from context_graph.backend import Neo4jConfig, NeptuneConfig
 
 
 def _validate_api_key(provider_name: str, api_key: str | None, logger: logging.Logger) -> str:

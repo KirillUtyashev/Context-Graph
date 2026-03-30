@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from context_graph.code_identity import SnapshotCodeResolver
-from context_graph.models import GraphSnapshot
+from context_graph.models.graph import GraphSnapshot
 
 from .debug import emit_provenance_debug
 from .grounding import resolve_about_record_ids

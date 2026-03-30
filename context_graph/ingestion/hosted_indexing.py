@@ -9,14 +9,14 @@ from context_graph.ingestion.git.git_metadata import GitMetadata
 from context_graph.ingestion.git.github_client import GitHubApiClient, GitHubRepoRef, GitHubRepoResolver
 from context_graph.ingestion.git.github_indexer import GitHubIndexer, GitHubSyncResult
 from context_graph.profile_vectors import ProfileVectorIndexer
-from context_graph.storage.backend import BackendDriver, merge_mutation_plans, MutationPlan
+from context_graph.backend import BackendDriver, merge_mutation_plans, MutationPlan
 
 from .commit_indexing import CommitIndexingService, default_repo_id
 from .deterministic_planner import DeterministicMutationPlanner
 from .models import DeterministicHostedIndexResult, HostedIndexRequest
 from .repo_cache import RepoCacheManager
 from .snapshot_builder import CodebaseMemorySnapshotProducer
-from ..metadata import MetadataStore, RepoSourceState
+from context_graph.backend import MetadataStore, RepoSourceState
 from ..models import utc_now_iso
 
 

@@ -9,7 +9,7 @@ import re
 from typing import Any, Sequence
 
 from context_graph.ingestion.git.git_metadata import CommitInfo
-from context_graph.models import GraphSnapshot
+from context_graph.models.graph import GraphSnapshot
 
 from .models import (
     ObservationKind,

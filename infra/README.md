@@ -25,28 +25,22 @@ This directory provisions AWS infrastructure for the Context Graph.
 
 ## Lambda source code location + deployment
 
-Lambda source lives outside `infra/`:
-
-- `lambda_augment/`
-- `lambda_retrieve/`
-- `lambda_bedrock_proxy/`
-
-Terraform packages these directories when you run `terraform apply`.
-
-We also include a GitHub Actions workflow (`.github/workflows/deploy-lambdas.yml`) that can redeploy Lambda code on push (defaults to `dev`), or via manual dispatch for `prod`.
+The Terraform stacks still contain legacy lambda references. This repo no longer ships a matching
+top-level lambda source tree or deploy workflow, so lambda deployment should be treated as a
+follow-up cleanup/migration task rather than a working source of truth.
 
 ## MCP server code location + deployment
 
 The MCP server app code lives outside `infra/`:
 
-- `mcp_server/` (FastAPI app)
+- `mcp_server/` (standalone MCP app)
 
 Terraform only provisions the EC2 instance + systemd unit + SSM permissions.
 
 Deployment happens via GitHub Actions + SSM:
 
 - `.github/workflows/deploy-mcp-server.yml`
-  - On push to `main` touching `mcp_server/**`: deploys **dev**
+  - On push to `main` touching `mcp_server/**` or `context_graph/**`: deploys **dev**
   - Manual dispatch can deploy **prod**
 
 ## Remote Terraform state (one-time bootstrap)

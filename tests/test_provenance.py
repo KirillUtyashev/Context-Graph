@@ -64,14 +64,12 @@ from context_graph.provenance.grounding import resolve_about_record_ids, resolve
 from context_graph.provenance.canonicalization import canonical_claim_key
 from context_graph.provenance.hint_enrichment import collect_grounding_hints
 from context_graph.provenance.models import claim_record_id
-from context_graph.metadata import InMemoryMetadataStore
 from context_graph.profile_vectors import (
-    InMemoryProfileVectorStore,
     ProfileSearchService,
     ProfileVectorIndexer,
     SemanticProvenanceSearchService,
 )
-from context_graph.profiles import (
+from context_graph.models.profiles import (
     PROFILE_KEY_ORIGIN_GENERATED_SEMANTIC,
     PROFILE_KEY_ORIGIN_RAW_TEXT,
     ProfileKeyDefinition,
@@ -84,8 +82,15 @@ from context_graph.profiles import (
     semantic_observation_profile_from_observation,
     semantic_relation_profile_from_spec,
 )
-from context_graph.query_parser import QueryParseResult
-from context_graph.storage.backend import GraphRecordRef, MutationPlan, RecordKind, SearchHit
+from context_graph.query.parser import QueryParseResult
+from context_graph.backend import (
+    GraphRecordRef,
+    InMemoryMetadataStore,
+    InMemoryProfileVectorStore,
+    MutationPlan,
+    RecordKind,
+    SearchHit,
+)
 
 
 def make_snapshot() -> GraphSnapshot:
