@@ -162,7 +162,7 @@ echo "==> Installing MCP server dependencies..."
 
 # Verify the internal runtime is importable after all dependencies are installed
 /opt/mcp_server/venv/bin/python -c "from context_graph.storage.backend.neptune.driver import NeptuneBackendDriver; print('context_graph storage import OK')"
-/opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import GraphitiService; print('context_graph mcp import OK')"
+/opt/mcp_server/venv/bin/python -c "from context_graph.server.mcp.server import mcp; print('context_graph mcp import OK')"
 
 systemctl daemon-reload
 systemctl enable --now mcp-server.service
