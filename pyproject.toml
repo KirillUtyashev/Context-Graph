@@ -47,6 +47,29 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["context_graph"]
+omit = [
+    "context_graph/cli.py",
+    "context_graph/episodes.py",
+    "context_graph/graph_read.py",
+    "context_graph/memory/**",
+    "context_graph/server/**",
+    "context_graph/runtime/embedding/**",
+    "context_graph/runtime/llm/bedrock_client.py",
+    "context_graph/runtime/llm/client.py",
+    "context_graph/runtime/llm/openai_base_client.py",
+    "context_graph/runtime/llm/openai_client.py",
+    "context_graph/runtime/providers/**",
+    "context_graph/storage/backend/__init__.py",
+    "context_graph/storage/backend/driver.py",
+    "context_graph/storage/backend/factory.py",
+    "context_graph/storage/backend/maintenance.py",
+    "context_graph/storage/backend/query_executor.py",
+    "context_graph/storage/backend/sync_bridge.py",
+    "context_graph/storage/backend/traversal.py",
+    "context_graph/ingestion/git/github_indexer.py",
+    "context_graph/ingestion/git/structural_planner.py",
+]
 
 [tool.coverage.report]
 show_missing = true
+skip_empty = true

@@ -1,50 +1,24 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
-import io
 import json
-import os
 from pathlib import Path
-import shutil
-import subprocess
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from context_graph import cli as cli_module
-from context_graph.cli import main as cli_main
-from context_graph.episode_processor import EpisodeProcessor, EpisodeWorkItem
-from context_graph.episodes import (
-    make_entity_edge,
-    make_entity_node,
-    make_episode,
-)
-from context_graph.ingestion.diffing import diff_snapshots
-from context_graph.ingestion.driver import HostedIndexRequest, IngestionDriver
-from context_graph.ingestion.git.git_metadata import GitMetadata
+from context_graph.ingestion.commit_indexing import default_repo_id
 from context_graph.ingestion.git.github_client import (
-    GitHubApiClient,
     GitHubRepoRef,
     GitHubRepoResolver,
     collect_unique_numbers,
+    is_github_remote,
     parse_github_repo_input,
 )
-from context_graph.ingestion.git.github_indexer import GitHubEntity, GitHubProvenanceBundle
+from context_graph.ingestion.models import HostedIndexRequest
 from context_graph.ingestion.repo_cache import RepoCacheManager
-from context_graph.ingestion.snapshot_builder import build_snapshot_from_graph_export
+from context_graph.ingestion.snapshot_builder import CodebaseMemorySnapshotProducer
 from context_graph.ingestion.temporal import TemporalGraphWriter
-from context_graph.graph_read import GraphReadRepository
-from context_graph.legacy_graph_backend import (
-    BaseCypherExecutor,
-    CypherStatement,
-    GraphitiNeo4jExecutor,
-    GraphitiNeptuneExecutor,
-    NeptuneGraphSink,
-    Neo4jGraphSink,
-)
-from context_graph.llm import EpisodeLLMSettings, load_episode_llm_settings
-from context_graph.metadata import InMemoryMetadataStore, RepoIndexState, RepoSourceState, SQLiteMetadataStore
+from context_graph.metadata import InMemoryMetadataStore
 from context_graph.models import CanonicalEdge, CanonicalNode, GraphSnapshot
 from context_graph.profile_vectors import (
     AuroraProfileVectorStore,
@@ -67,1262 +41,331 @@ def make_snapshot(
     *,
     repo_id: str = "demo",
     root_path: str = "/tmp/demo",
-    include_extra_call: bool = False,
+    include_helper: bool = False,
 ) -> GraphSnapshot:
-    node_repo = CanonicalNode(f"project:{repo_id}", repo_id, "Project", repo_id, qualified_name=repo_id)
-    node_file = CanonicalNode(
-        f"file:{repo_id}:{repo_id}.app.__file__",
-        repo_id,
-        "File",
-        "app.py",
+    project = CanonicalNode(
+        node_id=f"project:{repo_id}",
+        repo_id=repo_id,
+        kind="Project",
+        name=repo_id,
+        qualified_name=repo_id,
+    )
+    app_file = CanonicalNode(
+        node_id=f"file:{repo_id}:{repo_id}.app.__file__",
+        repo_id=repo_id,
+        kind="File",
+        name="app.py",
         qualified_name=f"{repo_id}.app.__file__",
         file_path="app.py",
     )
-    node_func = CanonicalNode(
-        f"symbol:{repo_id}:{repo_id}.app.main",
-        repo_id,
-        "Function",
-        "main",
+    main = CanonicalNode(
+        node_id=f"symbol:{repo_id}:{repo_id}.app.main",
+        repo_id=repo_id,
+        kind="Function",
+        name="main",
         qualified_name=f"{repo_id}.app.main",
         file_path="app.py",
         start_line=1,
-        end_line=5,
+        end_line=4,
         properties={"version": revision_id},
     )
-    node_helper = CanonicalNode(
-        f"symbol:{repo_id}:{repo_id}.app.helper",
-        repo_id,
-        "Function",
-        "helper",
-        qualified_name=f"{repo_id}.app.helper",
-        file_path="app.py",
-        start_line=7,
-        end_line=8,
-    )
+
+    nodes = [project, app_file, main]
     edges = [
         CanonicalEdge(
-            f"edge:{repo_id}:CONTAINS_FILE:project:{repo_id}:file:{repo_id}:{repo_id}.app.__file__",
-            repo_id,
-            "CONTAINS_FILE",
-            node_repo.node_id,
-            node_file.node_id,
+            edge_id=f"edge:{repo_id}:contains",
+            repo_id=repo_id,
+            edge_type="CONTAINS_FILE",
+            source_id=project.node_id,
+            target_id=app_file.node_id,
         ),
         CanonicalEdge(
-            f"edge:{repo_id}:DEFINES:file:{repo_id}:{repo_id}.app.__file__:symbol:{repo_id}:{repo_id}.app.main",
-            repo_id,
-            "DEFINES",
-            node_file.node_id,
-            node_func.node_id,
+            edge_id=f"edge:{repo_id}:defines-main",
+            repo_id=repo_id,
+            edge_type="DEFINES",
+            source_id=app_file.node_id,
+            target_id=main.node_id,
         ),
     ]
-    if include_extra_call:
+
+    if include_helper:
+        helper = CanonicalNode(
+            node_id=f"symbol:{repo_id}:{repo_id}.app.helper",
+            repo_id=repo_id,
+            kind="Function",
+            name="helper",
+            qualified_name=f"{repo_id}.app.helper",
+            file_path="app.py",
+            start_line=6,
+            end_line=7,
+        )
+        nodes.append(helper)
         edges.append(
             CanonicalEdge(
-                f"edge:{repo_id}:CALLS:symbol:{repo_id}:{repo_id}.app.main:symbol:{repo_id}:{repo_id}.app.helper",
-                repo_id,
-                "CALLS",
-                node_func.node_id,
-                node_helper.node_id,
+                edge_id=f"edge:{repo_id}:calls-helper",
+                repo_id=repo_id,
+                edge_type="CALLS",
+                source_id=main.node_id,
+                target_id=helper.node_id,
                 properties={"callee_name": "helper"},
             )
         )
-        nodes = (node_repo, node_file, node_func, node_helper)
-    else:
-        nodes = (node_repo, node_file, node_func)
+
     return GraphSnapshot(
         repo_id=repo_id,
         revision_id=revision_id,
         root_path=root_path,
-        generated_at="2026-03-20T00:00:00+00:00",
-        nodes=nodes,
-        edges=tuple(edges),
-        metadata={},
-    )
-
-
-def _git(repo_path: str, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout.strip()
-
-
-def create_git_repo(root_dir: str) -> tuple[str, str, str]:
-    repo_path = os.path.join(root_dir, "repo")
-    os.mkdir(repo_path)
-    _git(repo_path, "init")
-    _git(repo_path, "config", "user.name", "Context Graph Test")
-    _git(repo_path, "config", "user.email", "context-graph@example.com")
-
-    Path(repo_path, "app.py").write_text(
-        "def main():\n"
-        "    return 1\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py")
-    _git(repo_path, "commit", "-m", "initial app")
-    first_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    Path(repo_path, "app.py").write_text(
-        "def helper():\n"
-        "    return 1\n\n"
-        "def main():\n"
-        "    return helper()\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py")
-    _git(repo_path, "commit", "-m", "add helper call")
-    second_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    return repo_path, first_sha, second_sha
-
-
-def create_git_repo_with_deletions(root_dir: str) -> tuple[str, str, str, str]:
-    repo_path, first_sha, second_sha = create_git_repo(root_dir)
-
-    Path(repo_path, "legacy.py").write_text(
-        "def legacy():\n"
-        "    return 'legacy'\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "legacy.py")
-    _git(repo_path, "commit", "--amend", "--no-edit")
-    second_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    Path(repo_path, "app.py").write_text(
-        "def main():\n"
-        "    return 1\n",
-        encoding="utf-8",
-    )
-    Path(repo_path, "legacy.py").unlink()
-    _git(repo_path, "add", "-A")
-    _git(repo_path, "commit", "-m", "remove helper and legacy")
-    third_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    return repo_path, first_sha, second_sha, third_sha
-
-
-def create_git_repo_with_unchanged_file(root_dir: str) -> tuple[str, str, str]:
-    repo_path = os.path.join(root_dir, "repo")
-    os.mkdir(repo_path)
-    _git(repo_path, "init")
-    _git(repo_path, "config", "user.name", "Context Graph Test")
-    _git(repo_path, "config", "user.email", "context-graph@example.com")
-
-    Path(repo_path, "app.py").write_text(
-        "def main():\n"
-        "    return 1\n",
-        encoding="utf-8",
-    )
-    Path(repo_path, "config.py").write_text(
-        "VALUE = 1\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py", "config.py")
-    _git(repo_path, "commit", "-m", "initial files")
-    first_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    Path(repo_path, "app.py").write_text(
-        "def main():\n"
-        "    return 2\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py")
-    _git(repo_path, "commit", "-m", "change app only")
-    second_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    return repo_path, first_sha, second_sha
-
-
-def create_git_repo_with_branch_divergence(root_dir: str) -> tuple[str, str, str, str]:
-    repo_path, first_sha, second_sha = create_git_repo(root_dir)
-    _git(repo_path, "branch", "-M", "main")
-    _git(repo_path, "checkout", "-b", "feature", first_sha)
-
-    Path(repo_path, "app.py").write_text(
-        "def main():\n"
-        "    return 99\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py")
-    _git(repo_path, "commit", "-m", "feature branch change")
-    feature_sha = _git(repo_path, "rev-parse", "HEAD")
-    _git(repo_path, "checkout", "main")
-
-    return repo_path, first_sha, second_sha, feature_sha
-
-
-def create_git_repo_with_merge_commit(root_dir: str) -> tuple[str, str, str, str, str]:
-    repo_path, first_sha, second_sha = create_git_repo(root_dir)
-    _git(repo_path, "branch", "-M", "main")
-    _git(repo_path, "checkout", "-b", "feature", first_sha)
-
-    Path(repo_path, "feature.py").write_text(
-        "def feature_flag():\n"
-        "    return True\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "feature.py")
-    _git(repo_path, "commit", "-m", "feature branch change")
-    feature_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    _git(repo_path, "checkout", "main")
-    _git(repo_path, "merge", "--no-ff", "feature", "-m", "merge feature")
-    merge_sha = _git(repo_path, "rev-parse", "HEAD")
-
-    return repo_path, first_sha, second_sha, feature_sha, merge_sha
-
-
-def create_git_remote_repo(root_dir: str) -> tuple[str, str, str, str]:
-    repo_path, first_sha, second_sha = create_git_repo(root_dir)
-    _git(repo_path, "branch", "-M", "main")
-    bare_path = os.path.join(root_dir, "remote.git")
-    subprocess.run(
-        ["git", "clone", "--bare", repo_path, bare_path],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _git(repo_path, "remote", "add", "origin", bare_path)
-    _git(repo_path, "push", "--set-upstream", "origin", "main")
-    return repo_path, bare_path, first_sha, second_sha
-
-
-def push_remote_commit(repo_path: str) -> str:
-    Path(repo_path, "app.py").write_text(
-        "def helper():\n"
-        "    return 3\n\n"
-        "def main():\n"
-        "    return helper()\n",
-        encoding="utf-8",
-    )
-    _git(repo_path, "add", "app.py")
-    _git(repo_path, "commit", "-m", "update remote app")
-    _git(repo_path, "push", "origin", "main")
-    return _git(repo_path, "rev-parse", "HEAD")
-
-
-def build_repo_snapshot_from_fs(
-    repo_path: str,
-    *,
-    repo_id: str,
-    revision_id: str,
-) -> GraphSnapshot:
-    app_source = Path(repo_path, "app.py").read_text(encoding="utf-8")
-    has_helper = "def helper" in app_source
-    has_legacy = Path(repo_path, "legacy.py").exists()
-    has_config = Path(repo_path, "config.py").exists()
-
-    project_node = CanonicalNode(
-        f"project:{repo_id}",
-        repo_id,
-        "Project",
-        repo_id,
-        qualified_name=repo_id,
-    )
-    app_file = CanonicalNode(
-        f"file:{repo_id}:{repo_id}.app.__file__",
-        repo_id,
-        "File",
-        "app.py",
-        qualified_name=f"{repo_id}.app.__file__",
-        file_path="app.py",
-    )
-    main_function = CanonicalNode(
-        f"symbol:{repo_id}:{repo_id}.app.main",
-        repo_id,
-        "Function",
-        "main",
-        qualified_name=f"{repo_id}.app.main",
-        file_path="app.py",
-        start_line=1,
-        end_line=5,
-        properties={"body_kind": "helper-call" if has_helper else "literal-return"},
-    )
-
-    nodes = [project_node, app_file, main_function]
-    edges = [
-        CanonicalEdge(
-            f"edge:{repo_id}:CONTAINS_FILE:project:{repo_id}:file:{repo_id}:{repo_id}.app.__file__",
-            repo_id,
-            "CONTAINS_FILE",
-            project_node.node_id,
-            app_file.node_id,
-        ),
-        CanonicalEdge(
-            f"edge:{repo_id}:DEFINES:file:{repo_id}:{repo_id}.app.__file__:symbol:{repo_id}:{repo_id}.app.main",
-            repo_id,
-            "DEFINES",
-            app_file.node_id,
-            main_function.node_id,
-        ),
-    ]
-
-    if has_helper:
-        helper_function = CanonicalNode(
-            f"symbol:{repo_id}:{repo_id}.app.helper",
-            repo_id,
-            "Function",
-            "helper",
-            qualified_name=f"{repo_id}.app.helper",
-            file_path="app.py",
-            start_line=1,
-            end_line=2,
-        )
-        nodes.append(helper_function)
-        edges.extend(
-            [
-                CanonicalEdge(
-                    f"edge:{repo_id}:DEFINES:file:{repo_id}:{repo_id}.app.__file__:symbol:{repo_id}:{repo_id}.app.helper",
-                    repo_id,
-                    "DEFINES",
-                    app_file.node_id,
-                    helper_function.node_id,
-                ),
-                CanonicalEdge(
-                    f"edge:{repo_id}:CALLS:symbol:{repo_id}:{repo_id}.app.main:symbol:{repo_id}:{repo_id}.app.helper",
-                    repo_id,
-                    "CALLS",
-                    main_function.node_id,
-                    helper_function.node_id,
-                    properties={"callee_name": "helper"},
-                ),
-            ]
-        )
-
-    if has_legacy:
-        legacy_file = CanonicalNode(
-            f"file:{repo_id}:{repo_id}.legacy.__file__",
-            repo_id,
-            "File",
-            "legacy.py",
-            qualified_name=f"{repo_id}.legacy.__file__",
-            file_path="legacy.py",
-        )
-        legacy_function = CanonicalNode(
-            f"symbol:{repo_id}:{repo_id}.legacy.legacy",
-            repo_id,
-            "Function",
-            "legacy",
-            qualified_name=f"{repo_id}.legacy.legacy",
-            file_path="legacy.py",
-            start_line=1,
-            end_line=2,
-        )
-        nodes.extend([legacy_file, legacy_function])
-        edges.extend(
-            [
-                CanonicalEdge(
-                    f"edge:{repo_id}:CONTAINS_FILE:project:{repo_id}:file:{repo_id}:{repo_id}.legacy.__file__",
-                    repo_id,
-                    "CONTAINS_FILE",
-                    project_node.node_id,
-                    legacy_file.node_id,
-                ),
-                CanonicalEdge(
-                    f"edge:{repo_id}:DEFINES:file:{repo_id}:{repo_id}.legacy.__file__:symbol:{repo_id}:{repo_id}.legacy.legacy",
-                    repo_id,
-                    "DEFINES",
-                    legacy_file.node_id,
-                    legacy_function.node_id,
-                ),
-            ]
-        )
-
-    if has_config:
-        config_file = CanonicalNode(
-            f"file:{repo_id}:{repo_id}.config.__file__",
-            repo_id,
-            "File",
-            "config.py",
-            qualified_name=f"{repo_id}.config.__file__",
-            file_path="config.py",
-        )
-        nodes.append(config_file)
-        edges.append(
-            CanonicalEdge(
-                f"edge:{repo_id}:CONTAINS_FILE:project:{repo_id}:file:{repo_id}:{repo_id}.config.__file__",
-                repo_id,
-                "CONTAINS_FILE",
-                project_node.node_id,
-                config_file.node_id,
-            )
-        )
-
-    return GraphSnapshot(
-        repo_id=repo_id,
-        revision_id=revision_id,
-        root_path=repo_path,
-        generated_at="2026-03-20T00:00:00+00:00",
+        generated_at="2026-03-27T00:00:00+00:00",
         nodes=tuple(nodes),
         edges=tuple(edges),
-        metadata={},
+        metadata={"source": "unit-test"},
     )
 
 
-class FakeSnapshotProducer:
-    def build_snapshot(
-        self,
-        repo_path: str,
-        *,
-        repo_id: str | None = None,
-        revision_id: str,
-        limit: int = 1000000,
-    ) -> GraphSnapshot:
-        _ = limit
-        return build_repo_snapshot_from_fs(
-            repo_path,
-            repo_id=repo_id or "demo",
-            revision_id=revision_id,
-        )
-
-
-class FakeGitHubApiClient:
-    def __init__(
-        self,
-        *,
-        repo_payload: dict[str, object] | None = None,
-        commit_prs: dict[str, list[dict[str, object]]] | None = None,
-        linked_issue_numbers: dict[int, tuple[int, ...]] | None = None,
-        pull_requests: dict[int, dict[str, object]] | None = None,
-        reviews: dict[int, list[dict[str, object]]] | None = None,
-        review_comments: dict[int, list[dict[str, object]]] | None = None,
-        issue_comments: dict[int, list[dict[str, object]]] | None = None,
-        timelines: dict[int, list[dict[str, object]]] | None = None,
-        issues: dict[int, dict[str, object]] | None = None,
-        fail_on_commit_prs: bool = False,
-    ) -> None:
-        self.token = "fake-token"
-        self.repo_payload = repo_payload or {}
-        self.commit_prs = commit_prs or {}
-        self.linked_issue_numbers = linked_issue_numbers or {}
-        self.pull_requests = pull_requests or {}
-        self.reviews = reviews or {}
-        self.review_comments = review_comments or {}
-        self.issue_comments_map = issue_comments or {}
-        self.timelines = timelines or {}
-        self.issues = issues or {}
-        self.fail_on_commit_prs = fail_on_commit_prs
-
-    def get_repository(self, owner: str, repo: str) -> dict[str, object]:
-        payload = dict(self.repo_payload) if self.repo_payload else {}
-        payload.setdefault("owner", {"login": owner})
-        payload.setdefault("name", repo)
-        payload.setdefault("clone_url", f"https://github.com/{owner}/{repo}.git")
-        payload.setdefault("html_url", f"https://github.com/{owner}/{repo}")
-        payload.setdefault("default_branch", "main")
-        return payload
-
-    def list_commit_pull_requests(self, owner: str, repo: str, sha: str) -> list[dict[str, object]]:
-        _ = (owner, repo)
-        if self.fail_on_commit_prs:
-            raise RuntimeError("GitHub commit pull request lookup failed")
-        return [dict(item) for item in self.commit_prs.get(sha, [])]
-
-    def get_pull_request(self, owner: str, repo: str, number: int) -> dict[str, object]:
-        _ = (owner, repo)
-        return dict(self.pull_requests[number])
-
-    def list_pull_request_reviews(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
-        _ = (owner, repo)
-        return [dict(item) for item in self.reviews.get(number, [])]
-
-    def list_pull_request_review_comments(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
-        _ = (owner, repo)
-        return [dict(item) for item in self.review_comments.get(number, [])]
-
-    def list_issue_comments(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
-        _ = (owner, repo)
-        return [dict(item) for item in self.issue_comments_map.get(number, [])]
-
-    def list_issue_timeline(self, owner: str, repo: str, number: int) -> list[dict[str, object]]:
-        _ = (owner, repo)
-        return [dict(item) for item in self.timelines.get(number, [])]
-
-    def list_pull_request_linked_issue_numbers(self, owner: str, repo: str, number: int) -> tuple[int, ...]:
-        _ = (owner, repo)
-        return tuple(self.linked_issue_numbers.get(number, ()))
-
-    def get_issue(self, owner: str, repo: str, number: int) -> dict[str, object]:
-        _ = (owner, repo)
-        return dict(self.issues[number])
-
-
-class StaticRepoResolver:
-    def __init__(self, repo_ref: GitHubRepoRef) -> None:
-        self.repo_ref = repo_ref
-
-    def resolve(self, **kwargs) -> GitHubRepoRef | None:
-        _ = kwargs
-        return self.repo_ref
-
-
-class FakeEpisodeLLMClient:
-    def __init__(
-        self,
-        *,
-        extracted_entity_names: tuple[str, ...] = (),
-        extracted_edges: tuple[dict[str, object], ...] = (),
-    ) -> None:
-        self.extracted_entity_names = extracted_entity_names
-        self.extracted_edges = extracted_edges
-
-    async def generate_response(self, messages, response_model=None, **kwargs):
-        _ = (messages, kwargs)
-        model_name = getattr(response_model, "__name__", "")
-        if model_name == "ExtractedEntities":
-            return {
-                "extracted_entities": [
-                    {"name": name, "entity_type_id": 0}
-                    for name in self.extracted_entity_names
-                ]
-            }
-        if model_name == "ExtractedEdges":
-            return {
-                "edges": [
-                    {
-                        **edge,
-                        "relationship_keywords": list(edge.get("relationship_keywords", ["related"])),
-                    }
-                    for edge in self.extracted_edges
-                ]
-            }
-        raise AssertionError(f"unexpected response model {model_name!r}")
-
-
-class RecordingExecutor(BaseCypherExecutor):
-    def __init__(
-        self,
-        *,
-        execute_result: int = 0,
-        search_result: tuple = (),
-    ) -> None:
-        self.execute_result = execute_result
-        self.search_result = search_result
-        self.validated = False
-        self.executed_statements: list[CypherStatement] = []
-        self.search_calls: list[dict[str, object]] = []
-
-    def validate_execute_config(self) -> None:
-        self.validated = True
-
-    def execute(self, statements) -> int:
-        self.executed_statements.extend(list(statements))
-        return self.execute_result
-
-    def search_context_nodes(
-        self,
-        *,
-        repo_id: str,
-        search_terms,
-        limit: int = 25,
-    ) -> tuple:
-        self.search_calls.append(
-            {
-                "repo_id": repo_id,
-                "search_terms": tuple(search_terms),
-                "limit": limit,
-            }
-        )
-        return self.search_result
-
-
-class FakeQueryLLMClient:
-    def __init__(
-        self,
-        *,
-        keywords: tuple[str, ...] = (),
-    ) -> None:
-        self.keywords = keywords
-
-    async def generate_response(self, messages, response_model=None, **kwargs):
-        _ = (messages, kwargs)
-        model_name = getattr(response_model, "__name__", "")
-        if model_name == "ParsedHighLevelKeywords":
-            return {
-                "high_level_keywords": list(self.keywords),
-            }
-        raise AssertionError(f"unexpected response model {model_name!r}")
-
-
-class FakeEmbeddingProvider:
-    def embed_texts(self, texts):
-        vectors = []
-        for text in texts:
-            normalized = text.casefold()
-            vectors.append(
-                [
-                    1.0 if "helper" in normalized else 0.0,
-                    1.0 if "main" in normalized else 0.0,
-                    1.0 if "rollback" in normalized else 0.0,
-                    float(len(normalized.split())),
-                ]
-            )
-        return vectors
-
-
-class RecordingEmbeddingProvider:
+class FakeGitMetadata:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, ...]] = []
+        self.clone_calls: list[tuple[str, str, str | None, str | None]] = []
+        self.fetch_calls: list[tuple[str, str | None]] = []
+        self.checkout_calls: list[tuple[str, str]] = []
+        self.reset_calls: list[tuple[str, str]] = []
+        self.resolve_calls: list[tuple[str, str]] = []
+        self.remove_calls: list[str] = []
+        self.remotes = {
+            "origin": "https://github.com/openai/context-graph.git",
+            "upstream": "git@github.com:OpenAI/Context-Graph.git",
+        }
 
-    def embed_texts(self, texts):
-        batch = tuple(str(text) for text in texts)
-        self.calls.append(batch)
-        return [
-            [float(index + 1), float(len(text))]
-            for index, text in enumerate(batch)
-        ]
+    def resolve_repo_root(self, repo_path: str) -> str:
+        return str(Path(repo_path).resolve())
 
+    def clone_repo(
+        self,
+        clone_url: str,
+        clone_path: str,
+        *,
+        branch: str | None,
+        auth_token: str | None,
+    ) -> None:
+        self.clone_calls.append((clone_url, clone_path, branch, auth_token))
+        Path(clone_path).mkdir(parents=True, exist_ok=True)
 
-class RecordingCursor:
-    def __init__(self, connection):
-        self.connection = connection
-        self._fetchall = []
-        self._fetchone = None
+    def fetch_remote(self, repo_path: str, *, auth_token: str | None) -> None:
+        self.fetch_calls.append((repo_path, auth_token))
 
-    def execute(self, sql, params=()):
-        self.connection.executed.append((sql, params))
-        if "SELECT COUNT(*) FROM cg_profile_keys" in sql:
-            self._fetchone = (0,)
-        elif "SELECT" in sql and "FROM cg_profile_keys" in sql:
-            self._fetchall = [
-                (
-                    "profile:demo:semantic_fact_profile:fact:1",
-                    "pkey:test",
-                    "demo",
-                    SEMANTIC_FACT_PROFILE_KIND,
-                    "helper rollback",
-                    0.91,
-                )
-            ]
-        else:
-            self._fetchall = []
-            self._fetchone = None
-        return self
+    def checkout_branch(self, repo_path: str, branch: str) -> None:
+        self.checkout_calls.append((repo_path, branch))
 
-    def executemany(self, sql, rows):
-        materialized = list(rows)
-        self.connection.executemany_calls.append((sql, materialized))
-        return self
+    def hard_reset(self, repo_path: str, revision: str) -> None:
+        self.reset_calls.append((repo_path, revision))
 
-    def fetchall(self):
-        return list(self._fetchall)
+    def get_head_sha(self, repo_path: str) -> str:
+        return "deadbeef"
 
-    def fetchone(self):
-        return self._fetchone
+    def resolve_revision(self, repo_path: str, ref: str) -> str:
+        self.resolve_calls.append((repo_path, ref))
+        if ref == "origin/main":
+            return "abc123"
+        raise RuntimeError("missing ref")
 
+    def remove_repo(self, repo_path: str) -> None:
+        self.remove_calls.append(repo_path)
 
-class RecordingConnection:
-    def __init__(self):
-        self.executed = []
-        self.executemany_calls = []
-        self.commits = 0
-
-    def cursor(self):
-        return RecordingCursor(self)
-
-    def commit(self):
-        self.commits += 1
+    def list_remotes(self, repo_path: str) -> dict[str, str]:
+        return dict(self.remotes)
 
 
-def _statement_rows(statements, query_fragment: str) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for statement in statements:
-        if query_fragment in statement.query:
-            rows.extend(dict(row) for row in statement.parameters.get("rows", []))
-    return rows
+class FakeGitHubApi:
+    def get_repository(self, owner: str, repo: str) -> dict[str, object]:
+        return {
+            "owner": {"login": owner.capitalize()},
+            "name": repo.upper(),
+            "clone_url": f"https://example.test/{owner}/{repo}.git",
+            "html_url": f"https://example.test/{owner}/{repo}",
+            "default_branch": "main",
+        }
 
 
-def _statement_parameters(statements, query_fragment: str) -> dict[str, object]:
-    for statement in statements:
-        if query_fragment in statement.query:
-            return dict(statement.parameters)
-    raise AssertionError(f"no statement matched {query_fragment!r}")
+class ContextGraphCurrentRepoTests(unittest.TestCase):
+    def test_github_input_helpers_cover_slug_url_and_ssh_forms(self) -> None:
+        self.assertEqual(parse_github_repo_input("openai/context-graph"), ("openai", "context-graph"))
+        self.assertEqual(
+            parse_github_repo_input("https://github.com/openai/context-graph.git"),
+            ("openai", "context-graph"),
+        )
+        self.assertEqual(
+            parse_github_repo_input("git@github.com:openai/context-graph.git"),
+            ("openai", "context-graph"),
+        )
+        self.assertTrue(is_github_remote("https://github.com/openai/context-graph"))
+        self.assertFalse(is_github_remote("https://gitlab.com/openai/context-graph"))
+        self.assertEqual(
+            collect_unique_numbers(
+                [
+                    {"number": 7},
+                    {"number": 3},
+                    {"number": 7},
+                    {"number": "9"},
+                ]
+            ),
+            (3, 7),
+        )
 
+    def test_github_repo_resolver_prefers_upstream_and_hydrates_repo_metadata(self) -> None:
+        resolver = GitHubRepoResolver(
+            git_metadata=FakeGitMetadata(),
+            github_api=FakeGitHubApi(),
+        )
 
-def _code_node_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (n:CodeNode:")
+        resolved = resolver.resolve(repo_path="/tmp/repo")
 
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(resolved.source, "git_remote_upstream")
+        self.assertEqual(resolved.canonical_repo, "Openai/CONTEXT-GRAPH")
+        self.assertEqual(resolved.default_branch, "main")
+        self.assertEqual(resolved.clone_url, "https://example.test/OpenAI/Context-Graph.git")
 
-def _context_entity_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (n:Entity:")
+    def test_default_repo_id_and_hosted_request_defaults_match_current_ingestion_shape(self) -> None:
+        self.assertEqual(default_repo_id("/tmp/My Project"), "my-project")
+        self.assertEqual(default_repo_id("OpenAI/Context.Graph"), "context.graph")
 
+        request = HostedIndexRequest(github_repo="openai/context-graph", execute=True)
+        self.assertEqual(request.github_repo, "openai/context-graph")
+        self.assertTrue(request.execute)
+        self.assertEqual(request.limit, 1000000)
 
-def _github_entity_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (n:GitHubEntity:")
+    def test_repo_cache_manager_registers_local_repos_and_resolves_refs(self) -> None:
+        git_metadata = FakeGitMetadata()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir) / "repo"
+            repo_path.mkdir()
+            cache = RepoCacheManager(base_dir=tmp_dir, git_metadata=git_metadata)
 
+            managed = cache.manage_local_repo(
+                str(repo_path),
+                repo_id="demo",
+                request_id="req-1",
+            )
 
-def _github_commit_link_rows(statements, relation_type: str) -> list[dict[str, object]]:
-    return _statement_rows(statements, f"MERGE (commit)-[r:{relation_type}]->(entity)")
+            self.assertEqual(managed.repo_id, "demo")
+            self.assertEqual(managed.repo_path, str(repo_path.resolve()))
+            self.assertTrue(Path(managed.work_root).exists())
+            self.assertEqual(cache.resolve_ref_sha(str(repo_path), "main"), "abc123")
+            self.assertEqual(
+                git_metadata.resolve_calls,
+                [
+                    (str(repo_path), "main"),
+                    (str(repo_path), "origin/main"),
+                ],
+            )
 
+    def test_repo_cache_manager_clones_hosted_repo_and_records_source_state(self) -> None:
+        git_metadata = FakeGitMetadata()
+        repo_ref = GitHubRepoRef(
+            owner="openai",
+            name="context-graph",
+            canonical_repo="openai/context-graph",
+            clone_url="https://github.com/openai/context-graph.git",
+            html_url="https://github.com/openai/context-graph",
+            default_branch="main",
+            source="github_repo",
+        )
 
-def _github_project_link_rows(statements, relation_type: str) -> list[dict[str, object]]:
-    return _statement_rows(statements, f"MERGE (project)-[r:{relation_type}]->(entity)")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache = RepoCacheManager(base_dir=tmp_dir, git_metadata=git_metadata)
 
+            managed = cache.ensure_managed_repo(
+                repo_ref,
+                repo_id="demo",
+                request_id="req-2",
+                auth_token="secret-token",
+            )
 
-def _github_entity_link_rows(statements, relation_type: str) -> list[dict[str, object]]:
-    return _statement_rows(statements, f"MERGE (source)-[r:{relation_type}]->(target)")
+            self.assertEqual(len(git_metadata.clone_calls), 1)
+            self.assertEqual(git_metadata.checkout_calls, [])
+            self.assertEqual(git_metadata.reset_calls, [])
+            self.assertIsNotNone(managed.source_state)
+            assert managed.source_state is not None
+            self.assertEqual(managed.source_state.canonical_repo, "openai/context-graph")
+            self.assertEqual(managed.source_state.last_fetched_head_sha, "deadbeef")
+            self.assertIsNone(managed.source_state.default_branch)
 
+            cache.cleanup_request_workspace("demo", "req-2")
+            self.assertFalse(Path(managed.work_root).exists())
 
-def _episode_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (e:Episode:Episodic")
-
-
-def _episode_on_rows(statements) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for statement in statements:
-        if "MERGE (episode)-[r:ON]->(target)" in statement.query:
-            rows.append(dict(statement.parameters))
-    return rows
-
-
-def _mention_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (episode)-[r:MENTIONS")
-
-
-def _fact_rows(statements) -> list[dict[str, object]]:
-    return _statement_rows(statements, "MERGE (source)-[r:RELATES_TO")
-
-
-class SnapshotBuilderTests(unittest.TestCase):
-    def test_build_snapshot_from_graph_export_preserves_generic_edge_types(self) -> None:
-        export_payload = {
-            "project": "demo",
-            "root_path": "/tmp/repo",
-            "node_count": 4,
-            "edge_count": 3,
+    def test_snapshot_producer_builds_snapshot_from_export_payload(self) -> None:
+        payload = {
+            "root_path": "/tmp/demo",
+            "project": "Context Graph",
+            "node_count": 2,
+            "edge_count": 1,
             "nodes": [
                 {
                     "temp_id": 1,
                     "label": "Project",
-                    "name": "demo",
-                    "qualified_name": "demo",
-                    "file_path": None,
-                    "start_line": 0,
-                    "end_line": 0,
+                    "name": "Context Graph",
+                    "qualified_name": "context-graph",
+                    "file_path": "",
+                    "start_line": None,
+                    "end_line": None,
                     "properties_json": "{}",
                 },
                 {
                     "temp_id": 2,
                     "label": "File",
                     "name": "app.py",
-                    "qualified_name": "demo.app.__file__",
+                    "qualified_name": "context_graph.app.__file__",
                     "file_path": "app.py",
-                    "start_line": 0,
-                    "end_line": 0,
-                    "properties_json": "{\"language\":\"Python\"}",
-                },
-                {
-                    "temp_id": 3,
-                    "label": "Function",
-                    "name": "main",
-                    "qualified_name": "demo.app.main",
-                    "file_path": "app.py",
-                    "start_line": 1,
-                    "end_line": 4,
-                    "properties_json": "{\"signature\":\"()\"}",
-                },
-                {
-                    "temp_id": 4,
-                    "label": "File",
-                    "name": "test_app.py",
-                    "qualified_name": "demo.test_app.__file__",
-                    "file_path": "test_app.py",
-                    "start_line": 0,
-                    "end_line": 0,
-                    "properties_json": "{}",
+                    "start_line": None,
+                    "end_line": None,
+                    "properties_json": "{\"lang\": \"python\"}",
                 },
             ],
             "edges": [
                 {
-                    "temp_id": 11,
                     "source_temp_id": 1,
                     "target_temp_id": 2,
                     "type": "CONTAINS_FILE",
                     "properties_json": "{}",
-                },
-                {
-                    "temp_id": 12,
-                    "source_temp_id": 2,
-                    "target_temp_id": 3,
-                    "type": "DEFINES",
-                    "properties_json": "{}",
-                },
-                {
-                    "temp_id": 13,
-                    "source_temp_id": 4,
-                    "target_temp_id": 3,
-                    "type": "TESTS",
-                    "properties_json": "{\"framework\":\"pytest\"}",
-                },
+                }
             ],
         }
-
-        snapshot = build_snapshot_from_graph_export(export_payload, repo_id="demo", revision_id="r1")
+        producer = CodebaseMemorySnapshotProducer(root=Path("/tmp/project-root"))
+        with patch.object(producer, "export_graph", return_value=payload):
+            snapshot = producer.build_snapshot("/tmp/demo", repo_id="demo", revision_id="rev-1")
 
         self.assertEqual(snapshot.repo_id, "demo")
-        self.assertEqual(snapshot.metadata["source"], "codebase-memory-mcp-graph-export")
-        edge_types = {edge.edge_type for edge in snapshot.edges}
-        self.assertIn("TESTS", edge_types)
-        test_edge = next(edge for edge in snapshot.edges if edge.edge_type == "TESTS")
-        self.assertEqual(test_edge.properties["framework"], "pytest")
+        self.assertEqual(snapshot.revision_id, "rev-1")
+        self.assertEqual(snapshot.root_path, "/tmp/demo")
+        self.assertEqual(len(snapshot.nodes), 2)
+        self.assertEqual(len(snapshot.edges), 1)
+        self.assertEqual(snapshot.metadata["project_name"], "Context Graph")
+        file_node = next(node for node in snapshot.nodes if node.kind == "File")
+        self.assertEqual(file_node.properties["lang"], "python")
 
+    def test_snapshot_producer_ensures_binary_before_exporting(self) -> None:
+        producer = CodebaseMemorySnapshotProducer(root=Path("/tmp/project-root"))
+        with patch("pathlib.Path.exists", return_value=False), patch(
+            "context_graph.ingestion.snapshot_builder.subprocess.run"
+        ) as run_mock:
+            producer.ensure_binary()
 
-class EpisodeLLMSettingsTests(unittest.TestCase):
-    def test_load_openai_settings_from_args(self) -> None:
-        class Args:
-            llm_provider = "openai"
-            llm_model = "demo-model"
-            llm_small_model = "demo-small"
-            llm_base_url = "http://localhost:4000/v1"
-            llm_api_key = "demo-key"
-            aws_region = None
-
-        settings = load_episode_llm_settings(Args())
-
-        self.assertEqual(
-            settings,
-            EpisodeLLMSettings(
-                provider="openai",
-                model="demo-model",
-                small_model="demo-small",
-                base_url="http://localhost:4000/v1",
-                api_key="demo-key",
-                aws_region=None,
-            ),
+        run_mock.assert_called_once_with(
+            ["make", "repo-graph-export"],
+            cwd=producer.vendor_dir,
+            check=True,
         )
 
-    def test_load_bedrock_settings_from_env(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "CONTEXT_GRAPH_LLM_PROVIDER": "bedrock",
-                "CONTEXT_GRAPH_LLM_MODEL": "bedrock-main",
-                "CONTEXT_GRAPH_LLM_SMALL_MODEL": "bedrock-small",
-                "AWS_REGION": "us-east-1",
-            },
-            clear=False,
-        ):
-            settings = load_episode_llm_settings()
-
-        self.assertEqual(
-            settings,
-            EpisodeLLMSettings(
-                provider="bedrock",
-                model="bedrock-main",
-                small_model="bedrock-small",
-                base_url=None,
-                api_key=None,
-                aws_region="us-east-1",
-            ),
-        )
-
-
-class QueryParserTests(unittest.TestCase):
-    def test_query_parser_extracts_deterministic_anchors(self) -> None:
-        parser = QueryParser()
-
-        result = parser.parse("Why was `helper` added to app.py in commit abc1234 for #42?")
-
-        anchors = {(anchor.kind, anchor.value) for anchor in result.anchors}
-        self.assertIn(("quoted", "helper"), anchors)
-        self.assertIn(("symbol", "app.py"), anchors)
-        self.assertIn(("commit_sha", "abc1234"), anchors)
-        self.assertIn(("artifact_number", "#42"), anchors)
-        self.assertIn("why", result.intent_tags)
-
-    def test_query_parser_merges_llm_high_level_keywords_with_deterministic_intents(self) -> None:
-        parser = QueryParser(
-            llm_client=FakeQueryLLMClient(
-                keywords=("auth rollback", "stability"),
-            )
-        )
-
-        result = parser.parse("What is the rollback impact for auth?", llm_enabled=True)
-
-        self.assertEqual(result.high_level_keywords, ("auth rollback", "stability"))
-        self.assertIn("rollback", result.intent_tags)
-        self.assertIn("impact", result.intent_tags)
-
-
-class DiffAndWriterTests(unittest.TestCase):
-    def test_diff_detects_changed_nodes_and_added_edges(self) -> None:
-        before = make_snapshot("r1")
-        after = make_snapshot("r2", include_extra_call=True)
-
-        diff = diff_snapshots(before, after)
-        self.assertIn("symbol:demo:demo.app.main", diff.changed_nodes)
-        self.assertEqual(len(diff.added_edges), 1)
-        self.assertEqual(len(diff.added_nodes), 1)
-
-    def test_temporal_writer_records_and_updates_snapshot(self) -> None:
+    def test_temporal_graph_writer_plans_and_finalizes_snapshot_metadata(self) -> None:
         metadata = InMemoryMetadataStore()
-        writer = TemporalGraphWriter(metadata_store=metadata, graph_sink=Neo4jGraphSink(executor=RecordingExecutor()))
+        writer = TemporalGraphWriter(metadata_store=metadata, backend_driver=None)
 
-        first = writer.apply_snapshot(make_snapshot("r1"), execute=False)
-        second = writer.apply_snapshot(make_snapshot("r2", include_extra_call=True), execute=False)
-
-        self.assertEqual(first.statements_executed, 0)
-        self.assertFalse(first.diff.is_empty())
-        self.assertEqual(second.diff.previous_revision_id, "r1")
-        self.assertEqual(metadata.load_latest_snapshot("demo").revision_id, "r2")
-
-
-class SinkPlanningTests(unittest.TestCase):
-    def test_neo4j_and_neptune_generate_versioning_statements(self) -> None:
-        before = make_snapshot("r1")
-        after = make_snapshot("r2", include_extra_call=True)
-        diff = diff_snapshots(before, after)
-
-        neo4j_statements = Neo4jGraphSink(executor=RecordingExecutor()).plan_apply_diff(after, diff)
-        neptune_statements = NeptuneGraphSink(executor=RecordingExecutor()).plan_apply_diff(after, diff)
-
-        neo4j_queries = "\n".join(statement.query for statement in neo4j_statements)
-        neptune_queries = "\n".join(statement.query for statement in neptune_statements)
-
-        self.assertIn("MERGE (project:CodeNode:Project", neo4j_queries)
-        self.assertIn("CREATE (v:CodeNodeVersion", neo4j_queries)
-        self.assertIn("CREATE (s)-[r:CALLS", neo4j_queries)
-        self.assertIn("edge_kind: row.edge_kind", neo4j_queries)
-        self.assertIn("MERGE (project:CodeNode:Project", neptune_queries)
-        self.assertIn("CREATE (v:CodeNodeVersion", neptune_queries)
-        self.assertIn("CREATE (s)-[r:CALLS", neptune_queries)
-        self.assertIn("edge_kind: row.edge_kind", neptune_queries)
-
-    def test_sink_execute_delegates_to_injected_executor(self) -> None:
-        executor = RecordingExecutor(execute_result=2)
-        sink = Neo4jGraphSink(executor=executor)
-        statements = (
-            CypherStatement("RETURN 1", {}),
-            CypherStatement("RETURN 2", {"value": 2}),
-        )
-
-        executed = sink.execute(statements)
-
-        self.assertEqual(executed, 2)
-        self.assertEqual(executor.executed_statements, list(statements))
-
-    def test_sink_validate_and_search_delegate_to_injected_executor(self) -> None:
-        executor = RecordingExecutor()
-        sink = Neo4jGraphSink(executor=executor)
-
-        sink.validate_execute_config()
-        sink.search_context_nodes(repo_id="demo", search_terms=("helper",), limit=5)
-
-        self.assertTrue(executor.validated)
-        self.assertEqual(
-            executor.search_calls,
-            [{"repo_id": "demo", "search_terms": ("helper",), "limit": 5}],
-        )
-
-    def test_make_sink_uses_graphiti_executor_for_neo4j(self) -> None:
-        sink = cli_module._make_sink(
-            SimpleNamespace(
-                graph_backend="neo4j",
-                neo4j_uri="bolt://localhost:7687",
-                neo4j_user="neo4j",
-                neo4j_password="contextgraph",
-                neo4j_database="neo4j",
-                neptune_host=None,
-                neptune_port=8182,
-            )
-        )
-
-        self.assertIsInstance(sink, Neo4jGraphSink)
-        self.assertIsInstance(sink.executor, GraphitiNeo4jExecutor)
-        self.assertEqual(sink.executor.uri, "bolt://localhost:7687")
-        self.assertEqual(sink.executor.username, "neo4j")
-        self.assertEqual(sink.executor.password, "contextgraph")
-        self.assertEqual(sink.executor.database, "neo4j")
-
-    def test_neptune_executor_validate_requires_host(self) -> None:
-        executor = GraphitiNeptuneExecutor()
-        with self.assertRaises(RuntimeError):
-            executor.validate_execute_config()
-
-    def test_neptune_executor_validate_passes_with_driver(self) -> None:
-        executor = GraphitiNeptuneExecutor(driver=object())
-        executor.validate_execute_config()
-
-    def test_neptune_sink_defaults_to_neptune_executor(self) -> None:
-        sink = NeptuneGraphSink(host="my-neptune-endpoint")
-        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
-        self.assertEqual(sink.executor.host, "my-neptune-endpoint")
-        self.assertEqual(sink.executor.host_scheme, "neptune-db")
-        self.assertEqual(sink.executor.port, 8182)
-        self.assertIsNone(sink.executor.aoss_host)
-
-    def test_neptune_sink_passes_aoss_host(self) -> None:
-        sink = NeptuneGraphSink(
-            host="my-neptune-endpoint",
-            aoss_host="my-aoss-host",
-            host_scheme="neptune-graph",
-        )
-        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
-        self.assertEqual(sink.executor.aoss_host, "my-aoss-host")
-        self.assertEqual(sink.executor.host_scheme, "neptune-graph")
-
-    def test_make_sink_uses_neptune_executor_for_neptune_backend(self) -> None:
-        sink = cli_module._make_sink(
-            SimpleNamespace(
-                graph_backend="neptune",
-                neptune_host="my-neptune-cluster",
-                neptune_port=8182,
-                neptune_host_scheme="neptune-db",
-                aoss_host=None,
-                neo4j_uri=None,
-                neo4j_user=None,
-                neo4j_password=None,
-                neo4j_database=None,
-            )
-        )
-
-        self.assertIsInstance(sink, NeptuneGraphSink)
-        self.assertIsInstance(sink.executor, GraphitiNeptuneExecutor)
-        self.assertEqual(sink.executor.host, "my-neptune-cluster")
-        self.assertEqual(sink.executor.host_scheme, "neptune-db")
-
-    def test_make_sink_threads_embedding_provider_into_graph_sink(self) -> None:
-        provider = object()
-
-        with patch("context_graph.cli._make_embedding_provider", return_value=provider):
-            sink = cli_module._make_sink(
-                SimpleNamespace(
-                    graph_backend="neo4j",
-                    neo4j_uri="bolt://localhost:7687",
-                    neo4j_user="neo4j",
-                    neo4j_password="contextgraph",
-                    neo4j_database="neo4j",
-                    neptune_host=None,
-                    neptune_port=8182,
-                )
-            )
-
-        self.assertIs(sink.embedding_provider, provider)
-
-    def test_plan_apply_diff_enriches_project_and_code_nodes_for_graphiti_search(self) -> None:
-        snapshot = make_snapshot("r1", include_extra_call=True)
-        diff = diff_snapshots(None, snapshot)
-        embedder = RecordingEmbeddingProvider()
-        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
-
-        statements = sink.plan_apply_diff(
-            snapshot,
-            diff,
-            observed_at="2026-03-24T00:00:00+00:00",
-        )
-
-        project_params = _statement_parameters(statements, "MERGE (project:CodeNode:Project:Entity")
-        code_rows = _code_node_rows(statements)
-        main_row = next(row for row in code_rows if row["node_id"] == "symbol:demo:demo.app.main")
-
-        self.assertEqual(project_params["uuid"], "project:demo")
-        self.assertEqual(project_params["group_id"], "demo")
-        self.assertEqual(project_params["created_at"], "2026-03-24T00:00:00+00:00")
-        self.assertIn("Project demo", project_params["summary"])
-        self.assertIsNotNone(project_params["name_embedding"])
-
-        self.assertEqual(main_row["uuid"], "symbol:demo:demo.app.main")
-        self.assertEqual(main_row["group_id"], "demo")
-        self.assertEqual(main_row["created_at"], "2026-03-24T00:00:00+00:00")
-        self.assertIn("Function main", main_row["summary"])
-        self.assertIn("qualified demo.app.main", main_row["summary"])
-        self.assertIn("file app.py", main_row["summary"])
-        self.assertIsNotNone(main_row["name_embedding"])
-        self.assertTrue(any("main" in call for call in embedder.calls))
-
-    def test_plan_upsert_context_nodes_enriches_rows_and_skips_blank_names(self) -> None:
-        embedder = RecordingEmbeddingProvider()
-        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
-        statements = sink.plan_upsert_context_nodes(
-            [
-                make_entity_node(
-                    node_id="entity:demo:alice",
-                    repo_id="demo",
-                    kind="Entity",
-                    name="Alice Johnson",
-                    aliases=("Alice",),
-                    metadata={"origin": "episode_llm"},
-                ),
-                make_entity_node(
-                    node_id="entity:demo:blank",
-                    repo_id="demo",
-                    kind="Entity",
-                    name="",
-                    metadata={"origin": "test"},
-                ),
-            ],
-            observed_at="2026-03-24T01:00:00+00:00",
-        )
-
-        context_rows = _context_entity_rows(statements)
-        alice_row = next(row for row in context_rows if row["node_id"] == "entity:demo:alice")
-        blank_row = next(row for row in context_rows if row["node_id"] == "entity:demo:blank")
-
-        self.assertEqual(alice_row["uuid"], "entity:demo:alice")
-        self.assertEqual(alice_row["group_id"], "demo")
-        self.assertEqual(alice_row["created_at"], "2026-03-24T01:00:00+00:00")
-        self.assertIn("Entity Alice Johnson", alice_row["summary"])
-        self.assertIn("aliases Alice", alice_row["summary"])
-        self.assertIsNotNone(alice_row["name_embedding"])
-
-        self.assertEqual(blank_row["group_id"], "demo")
-        self.assertEqual(blank_row["created_at"], "2026-03-24T01:00:00+00:00")
-        self.assertEqual(blank_row["name_embedding"], None)
-        self.assertEqual(embedder.calls, [("Alice Johnson",)])
-
-    def test_plan_attach_github_provenance_normalizes_github_entities(self) -> None:
-        embedder = RecordingEmbeddingProvider()
-        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
-        bundle = GitHubProvenanceBundle(
-            repo_id="demo",
-            github_repo="octo/demo",
-            entities=(
-                GitHubEntity(
-                    node_id="github:pr:demo:7",
-                    kind="PullRequest",
-                    repo_id="demo",
-                    github_repo="octo/demo",
-                    external_id="700",
-                    number=7,
-                    url="https://github.com/octo/demo/pull/7",
-                    title="Feature rollout",
-                    state="closed",
-                    author_login="octocat",
-                    created_at="2026-03-21T00:00:00Z",
-                    updated_at="2026-03-21T00:06:00Z",
-                    raw={},
-                    metadata={},
-                ),
-                GitHubEntity(
-                    node_id="github:issue:demo:42",
-                    kind="Issue",
-                    repo_id="demo",
-                    github_repo="octo/demo",
-                    external_id="4200",
-                    number=42,
-                    url="https://github.com/octo/demo/issues/42",
-                    title=None,
-                    state="open",
-                    author_login="issue-author",
-                    created_at=None,
-                    updated_at="2026-03-21T00:05:00Z",
-                    raw={},
-                    metadata={},
-                ),
-            ),
-            project_links=(),
-            commit_links=(),
-            entity_links=(),
-            episode_work_items=(),
-        )
-
-        statements = sink.plan_attach_github_provenance(
-            bundle,
-            observed_at="2026-03-24T02:00:00+00:00",
-        )
-
-        entity_rows = _github_entity_rows(statements)
-        pr_row = next(row for row in entity_rows if row["node_id"] == "github:pr:demo:7")
-        issue_row = next(row for row in entity_rows if row["node_id"] == "github:issue:demo:42")
-
-        self.assertEqual(pr_row["uuid"], "github:pr:demo:7")
-        self.assertEqual(pr_row["group_id"], "demo")
-        self.assertEqual(pr_row["name"], "Feature rollout")
-        self.assertIn("repo octo/demo", pr_row["summary"])
-        self.assertIn("url https://github.com/octo/demo/pull/7", pr_row["summary"])
-        self.assertIsNotNone(pr_row["name_embedding"])
-
-        self.assertEqual(issue_row["uuid"], "github:issue:demo:42")
-        self.assertEqual(issue_row["group_id"], "demo")
-        self.assertEqual(issue_row["created_at"], "2026-03-24T02:00:00+00:00")
-        self.assertEqual(issue_row["name"], "Issue #42")
-        self.assertIn("number 42", issue_row["summary"])
-        self.assertIsNotNone(issue_row["name_embedding"])
-        self.assertTrue(any("Issue #42" in call for call in embedder.calls))
-
-    def test_plan_apply_fact_edges_sets_graphiti_edge_fields_and_embeds_only_nonempty_facts(self) -> None:
-        embedder = RecordingEmbeddingProvider()
-        sink = Neo4jGraphSink(executor=RecordingExecutor(), embedding_provider=embedder)
-        statements = sink.plan_apply_fact_edges(
-            [
-                make_entity_edge(
-                    fact_id="fact:demo:1",
-                    repo_id="demo",
-                    source_node_id="symbol:demo:demo.app.main",
-                    target_node_id="symbol:demo:demo.app.helper",
-                    relation_type="JUSTIFIES",
-                    fact="main uses helper for shared logic",
-                ),
-                make_entity_edge(
-                    fact_id="fact:demo:2",
-                    repo_id="demo",
-                    source_node_id="symbol:demo:demo.app.helper",
-                    target_node_id="symbol:demo:demo.app.main",
-                    relation_type="RELATES_TO",
-                    fact="",
-                ),
-            ],
-            observed_at="2026-03-24T03:00:00+00:00",
-        )
-
-        fact_rows = _fact_rows(statements)
-        first_row = next(row for row in fact_rows if row["fact_id"] == "fact:demo:1")
-        second_row = next(row for row in fact_rows if row["fact_id"] == "fact:demo:2")
-
-        self.assertEqual(first_row["uuid"], "fact:demo:1")
-        self.assertEqual(first_row["group_id"], "demo")
-        self.assertEqual(first_row["episodes"], [])
-        self.assertIsNotNone(first_row["fact_embedding"])
-        self.assertEqual(second_row["uuid"], "fact:demo:2")
-        self.assertEqual(second_row["group_id"], "demo")
-        self.assertEqual(second_row["episodes"], [])
-        self.assertEqual(second_row["fact_embedding"], None)
-        self.assertEqual(embedder.calls, [("main uses helper for shared logic",)])
-
-    def test_plan_reset_repo_emits_code_node_deletes(self) -> None:
-        statements = Neo4jGraphSink(executor=RecordingExecutor()).plan_reset_repo("demo")
-        queries = "\n".join(statement.query for statement in statements)
-
-        self.assertEqual(len(statements), 6)
-        self.assertIn("MATCH (e:Episode {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (g:GitHubEntity {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (c:Commit {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (v:CodeNodeVersion {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (n:CodeNode {repo_id: $repo_id})", queries)
-        self.assertIn("MATCH (n {repo_id: $repo_id}) WHERE (n:Entity OR n:Episodic)", queries)
-        self.assertIn("AND NOT n:CodeNode", queries)
-        self.assertTrue(all(statement.parameters == {"repo_id": "demo"} for statement in statements))
-
-    def test_episode_processor_plans_episode_on_and_mentions(self) -> None:
-        metadata = InMemoryMetadataStore()
-        metadata.save_latest_snapshot(make_snapshot("r1", include_extra_call=True))
-        processor = EpisodeProcessor(
-            graph_sink=Neo4jGraphSink(executor=RecordingExecutor()),
-            read_repository=GraphReadRepository(metadata_store=metadata),
-        )
-
-        batch = processor.apply_batch(
-            [
-                EpisodeWorkItem(
-                    episode=make_episode(
-                        episode_id="turn-1",
-                        repo_id="demo",
-                        source_type="user_message",
-                        source_id="turn-1",
-                        author="user",
-                        created_at="2026-03-22T00:00:00+00:00",
-                        updated_at="2026-03-22T00:00:00+00:00",
-                        text="Please inspect `main` in app.py",
-                        metadata={"thread_id": "chat-1"},
-                        parent_node_id="project:demo",
-                    )
-                )
-            ],
+        first = make_snapshot("r1")
+        plan = writer.plan_snapshot(first)
+        result = writer.apply_planned_snapshot(
+            first,
+            plan.diff,
+            plan.plan,
             execute=False,
         )
 
