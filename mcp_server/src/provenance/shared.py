@@ -241,7 +241,7 @@ def _normalize_sources(sources: list[str]) -> list[str]:
     normalized = []
     seen: set[str] = set()
     for source in sources:
-        normalized_source = _normalize_text(source).lower()
+        normalized_source = (_normalize_text(source) or "").lower()
         if not normalized_source:
             continue
         if normalized_source not in SOURCE_RECORD_TYPES:

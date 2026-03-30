@@ -1,10 +1,7 @@
 # Additive Backend Interface
 
-This package introduces a new provider-agnostic storage backend at
-[context_graph/storage/backend](/Users/utya.kirill/Desktop/UOFT/Context-Graph/context_graph/storage/backend).
-It is additive and intentionally separate from the archived Graphiti storage
-code in
-[context_graph/storage/graph/graphiti-backend](/Users/utya.kirill/Desktop/UOFT/Context-Graph/context_graph/storage/graph/graphiti-backend).
+This package provides the provider-agnostic storage backend at
+[context_graph/backend](../context_graph/backend).
 
 ## What It Does
 
@@ -100,7 +97,7 @@ It stores:
 
 Canonical names live under:
 
-- `context_graph.storage.backend.metadata`
+- `context_graph.backend.metadata`
 
 Compatibility aliases remain available from:
 
@@ -114,7 +111,7 @@ embeddings and returns `ProfileVectorHit` results used by the existing
 
 Canonical names live under:
 
-- `context_graph.storage.backend.profile_vectors`
+- `context_graph.backend.profile_vectors`
 
 Canonical PostgreSQL naming is:
 

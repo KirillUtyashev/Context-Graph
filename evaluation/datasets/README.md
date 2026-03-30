@@ -35,7 +35,7 @@ The evaluation pipeline is intentionally stubbed for now.
 - No real LLM generation
 
 The runner uses placeholder retrieval modes defined in
-[`evaluation/runners/eval_runner.py`](/home/dkucz/Context-Graph/evaluation/runners/eval_runner.py):
+[`evaluation/runners/eval_runner.py`](../runners/eval_runner.py):
 
 - `none` -> `[]`
 - `embedding` -> `["doc1", "doc2"]`
@@ -62,7 +62,7 @@ This will:
 ## Metrics
 
 The current metrics live in
-[`evaluation/metrics/metrics.py`](/home/dkucz/Context-Graph/evaluation/metrics/metrics.py):
+[`evaluation/metrics/metrics.py`](../metrics/metrics.py):
 
 - `file_hit_rate`: `1` if all gold docs are retrieved, else `0`
 - `fact_hit_rate`: `1` if `gold_answer` is a substring of the generated answer, else `0`

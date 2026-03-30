@@ -1,13 +1,13 @@
 # Graph Correctness Tests
 
-Tests the Trail ingestion pipeline by firing Cypher queries directly against a local Neo4j instance
+Tests the Context Graph ingestion pipeline by firing Cypher queries directly against a local Neo4j instance
 after ingesting [`context-graph-test-harness-new2`](https://github.com/patelhrid/context-graph-test-harness-new2).
 
 ---
 
 ## Prerequisites
 
-- Docker Desktop running with the Trail stack started (Neo4j + Postgres)
+- Docker Desktop running with the Context Graph stack started (Neo4j + Postgres)
 - Python 3.12 (the `context_graph` package requires 3.12, **not** 3.10)
 - A GitHub personal access token with `repo` read scope
 - `pip install -r graph_tests/requirements.txt` (uses the Python 3.10 test runner — that is fine, only the ingest uses 3.12)
@@ -15,7 +15,7 @@ after ingesting [`context-graph-test-harness-new2`](https://github.com/patelhrid
 ### Start the local stack
 
 ```bash
-docker compose -f context_graph/docker-compose.local.yml up -d
+docker compose up -d
 ```
 
 Services started:

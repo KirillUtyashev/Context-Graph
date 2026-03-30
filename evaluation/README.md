@@ -35,13 +35,13 @@ This gives us a stable place to define:
 
 ## Main Files
 
-- [`evaluation/runners/eval_runner.py`](/home/dkucz/Context-Graph/evaluation/runners/eval_runner.py)
+- [`evaluation/runners/eval_runner.py`](runners/eval_runner.py)
   Loads the dataset, runs stub retrieval, generates placeholder answers, saves results, and computes metrics.
-- [`evaluation/metrics/metrics.py`](/home/dkucz/Context-Graph/evaluation/metrics/metrics.py)
+- [`evaluation/metrics/metrics.py`](metrics/metrics.py)
   Defines simple placeholder metrics for retrieval and answer checking.
-- [`evaluation/datasets/gold_eval_set.json`](/home/dkucz/Context-Graph/evaluation/datasets/gold_eval_set.json)
+- [`evaluation/datasets/gold_eval_set.json`](datasets/gold_eval_set.json)
   Small local gold dataset used by the scaffold.
-- [`evaluation/datasets/README.md`](/home/dkucz/Context-Graph/evaluation/datasets/README.md)
+- [`evaluation/datasets/README.md`](datasets/README.md)
   Dataset-specific notes and schema details.
 
 ## Stub Retrieval Modes

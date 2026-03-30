@@ -127,11 +127,17 @@ class NamespaceConfig(BaseModel):
             self.episode_id_prefix = ""
 
 
+class StandaloneLLMConfig(LLMConfig):
+    """LLM configuration for the standalone MCP server."""
+
+    small_model: str | None = Field(default=None, description="Small model name")
+
+
 class MCPServerConfig(BaseSettings):
     """MCP server configuration with YAML and environment support."""
 
     server: ServerConfig = Field(default_factory=ServerConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
+    llm: StandaloneLLMConfig = Field(default_factory=StandaloneLLMConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     namespace: NamespaceConfig = Field(default_factory=NamespaceConfig)
@@ -185,6 +191,7 @@ __all__ = [
     "OpenAIProviderConfig",
     "PydanticBaseSettingsSource",
     "ServerConfig",
+    "StandaloneLLMConfig",
     "VoyageProviderConfig",
     "YamlSettingsSource",
     "default_config_path",

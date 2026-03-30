@@ -4,6 +4,12 @@
 
 Context Graph is a repository intelligence system that combines deterministic code indexing with claim-centric provenance retrieval for agent workflows.
 
+## Prerequisites
+
+- **Python ≥ 3.12**
+- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager used for dependency management
+- **Docker** — required for local infrastructure (Postgres, Neo4j, etc.)
+
 ## Repo Layout
 
 - `context_graph/`: core library, ingestion pipeline, provenance pipeline, storage backends
@@ -12,6 +18,10 @@ Context Graph is a repository intelligence system that combines deterministic co
 - `docs/`: architecture, ingestion, MCP, local dev, and deployment guides
 - `infra/`: Terraform and deployment infrastructure
 - `scripts/`: operational scripts and deploy helpers
+- `tools/`: profiling utilities and developer tooling
+- `evaluation/`: evaluation scaffold, runners, metrics, and gold datasets
+- `graph_tests/`: graph correctness and ingestion pipeline tests
+- `codebase_memory_pipeline/`: vendored C reference pipeline for codebase memory extraction
 
 ## Quick Start
 
@@ -55,17 +65,35 @@ uv run --package context-graph-mcp context-graph-mcp \
 - [MCP Server](docs/mcp.md)
 - [Local Development](docs/local-dev.md)
 - [Deployment](docs/deployment.md)
+- [Provenance](docs/provenance.md)
+- [Backend](docs/backend.md)
+- [Ingestion Internals](docs/ingestion-internals.md)
 
 ## Testing
 
 Run the core test suite:
 
 ```bash
-uv run python -m pytest --cov=context_graph --cov-report=term-missing tests
+uv run python -m pytest tests --cov=context_graph --cov-report=term-missing
 ```
 
 Run the MCP app test suite:
 
 ```bash
-uv run --package context-graph-mcp python -m pytest mcp_server/tests
+PYTHONPATH=mcp_server uv run python -m pytest mcp_server/tests
 ```
+
+## Contributing
+
+Contributions are welcome! To get started:
+
+1. Fork the repository and create a feature branch.
+2. Install dependencies with `uv sync --all-packages --dev --no-editable`.
+3. Run the test suite with `uv run python -m pytest tests` to make sure everything passes.
+4. Open a pull request with a clear description of your changes.
+
+Please keep pull requests focused and include tests for new functionality.
+
+## License
+
+This project does not yet include a LICENSE file. Please contact the maintainers for licensing information.

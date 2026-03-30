@@ -20,19 +20,20 @@ This directory contains the standalone test suite for the `src` package (distrib
 From the repo root:
 
 ```bash
-uv run pytest -q mcp_server/tests
+PYTHONPATH=mcp_server uv run python -m pytest -q mcp_server/tests
 ```
 
 Run one file:
 
 ```bash
-uv run pytest -q mcp_server/tests/test_mcp_provenance_tools.py
+PYTHONPATH=mcp_server uv run python -m pytest -q mcp_server/tests/test_mcp_provenance_tools.py
 ```
 
 Run the MCP tests together with the root repo tests:
 
 ```bash
-uv run pytest -q tests mcp_server/tests
+uv run python -m pytest -q tests
+PYTHONPATH=mcp_server uv run python -m pytest -q mcp_server/tests
 ```
 
 ## Notes

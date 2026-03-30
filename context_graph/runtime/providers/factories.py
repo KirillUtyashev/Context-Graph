@@ -50,7 +50,7 @@ class LLMClientFactory:
                 api_key=api_key,
                 base_url=config.providers.openai.api_url,
                 model=config.model,
-                small_model=config.model,
+                small_model=getattr(config, "small_model", None) or config.model,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
             )
@@ -64,7 +64,7 @@ class LLMClientFactory:
             logger.info("Creating Bedrock client (IAM auth)")
             llm_config = RuntimeLLMConfig(
                 model=config.model,
-                small_model=config.model,
+                small_model=getattr(config, "small_model", None) or config.model,
                 temperature=config.temperature if config.temperature is not None else 1.0,
                 max_tokens=config.max_tokens,
             )

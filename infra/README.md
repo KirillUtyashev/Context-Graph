@@ -15,13 +15,12 @@ This directory provisions AWS infrastructure for the Context Graph.
 - Neptune (Gremlin) inside the VPC
   - For storing the graph itself
 - EC2 `t3.micro` MCP server instance
-  - Public ingress on port `8000` (course-project-simple)
+  - Public ingress on port `8000`
   - Managed via SSM (no SSH keys needed)
 - 2 AWS Lambda functions with Lambda Function URLs (no API Gateway)
   - `augment`: GitHub webhook receiver / augmentation entrypoint
   - `retrieve`: Called by the tool to traverse the graph
   - `bedrock-proxy`: Public internet endpoint that calls Bedrock with HTTP Basic Auth
-    - Mostly for manual calling
 
 ## Lambda source code location + deployment
 
@@ -159,5 +158,5 @@ curl -u "<user>:<pass>" \
 
 ## Notes
 
-- Neptune is VPC-only, so we query it from the EC2 MCP instance or from VPC-attached Lambdas.
-- Aurora is private, so we connect to it from the EC2 MCP instance (or later via a dedicated bastion)
+- Neptune is VPC-only, so queries run from the EC2 MCP instance or from VPC-attached Lambdas.
+- Aurora is private, accessible from the EC2 MCP instance.

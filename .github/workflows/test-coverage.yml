@@ -45,21 +45,27 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages --dev --no-editable
 
-      - name: Run core tests with coverage
+      - name: Run package tests with combined coverage
+        shell: bash
         run: |
+          set -euo pipefail
+          rm -f .coverage coverage.xml coverage-report.txt
           uv run python -m pytest \
+            tests \
             --cov=context_graph \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            tests | tee coverage-report.txt
-
-      - name: Run MCP app tests
-        run: uv run --package context-graph-mcp python -m pytest mcp_server/tests
+            --cov-report=
+          PYTHONPATH=mcp_server uv run python -m pytest \
+            mcp_server/tests \
+            --cov=mcp_server/src \
+            --cov-append \
+            --cov-report=
+          uv run coverage xml -o coverage.xml
+          uv run coverage report | tee coverage-report.txt
 
       - name: Verify standalone MCP package entrypoints
         run: |
-          uv run --package context-graph-mcp context-graph-mcp --help
-          uv run --package context-graph-mcp python -m context_graph_mcp_server --help
+          PYTHONPATH=mcp_server uv run python -m src --help
+          PYTHONPATH=mcp_server uv run python -c "from src.bootstrap import main; print(callable(main))"
 
       - name: Render coverage badge
         run: |
@@ -70,8 +76,16 @@ jobs:
       - name: Build PR coverage comment
         if: github.event_name == 'pull_request'
         run: |
+          COVERAGE_PERCENT=$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("coverage.xml").getroot()
+          print(round(float(root.attrib.get("line-rate", "0")) * 100))
+          PY
+          )
           {
-            echo "## Test Coverage"
+            echo "## Combined Project Coverage"
+            echo
+            echo "Coverage across \`context_graph\` and \`mcp_server/src\`: ${COVERAGE_PERCENT}%"
             echo
             echo '```text'
             cat coverage-report.txt
