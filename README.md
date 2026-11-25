@@ -4,6 +4,10 @@
 
 Context Graph is a repository intelligence system that combines deterministic code indexing with claim-centric provenance retrieval for agent workflows.
 
+## Architecture Overview
+
+![Context Graph architecture showing the definition, ingestion, storage, intelligence, agent input, and query layers](docs/images/context-graph-architecture.png)
+
 ## Prerequisites
 
 - **Python ≥ 3.12**
