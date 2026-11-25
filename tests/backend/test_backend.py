@@ -2749,6 +2749,7 @@ class CLISearchProfilesCommandTests(unittest.TestCase):
         )
         assert relation_profile is not None
         relation_hit = SimpleNamespace(
+            profile_id=relation_profile.profile_id,
             score=0.91,
             key_text=relation_profile.value_text,
             key_origin=PROFILE_KEY_ORIGIN_RAW_TEXT,
@@ -2761,7 +2762,10 @@ class CLISearchProfilesCommandTests(unittest.TestCase):
                     high_level_keywords=(),
                     intent_tags=(),
                 ),
-                hits=(relation_hit,),
+                hits=(
+                    SimpleNamespace(profile_id="missing-profile", score=0.99, key_text="stale", key_origin="raw"),
+                    relation_hit,
+                ),
                 profiles=(relation_profile,),
             )
         )
@@ -2796,4 +2800,6 @@ class CLISearchProfilesCommandTests(unittest.TestCase):
 
         self.assertEqual(payload["requested_profile_kinds"], [SEMANTIC_RELATION_PROFILE_KIND])
         self.assertEqual(payload["profiles"][0]["profile_kind"], SEMANTIC_RELATION_PROFILE_KIND)
+        self.assertEqual(payload["profiles"][0]["score"], relation_hit.score)
+        self.assertEqual(payload["profiles"][0]["matched_key_text"], relation_hit.key_text)
         fused_ctor.assert_not_called()

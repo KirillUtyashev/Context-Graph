@@ -74,7 +74,7 @@ def make_embedding_provider(settings: EmbeddingSettings | None) -> EmbeddingProv
             config=OpenAIEmbedderConfig(
                 api_key=settings.api_key,
                 base_url=settings.base_url,
-                embedding_model=settings.model or "text-embedding_clients-3-small",
+                embedding_model=settings.model or "text-embedding-3-small",
                 embedding_dim=settings.dimensions,
             )
         )

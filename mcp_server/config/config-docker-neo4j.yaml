@@ -18,7 +18,7 @@ llm:
 
 embedder:
   provider: "openai"
-  model: "text-embedding_clients-3-small"
+  model: "text-embedding-3-small"
   dimensions: 1536
 
   providers:

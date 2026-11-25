@@ -104,7 +104,7 @@ class SmallModuleTests(unittest.TestCase):
     def test_load_embedding_settings_prefers_args_and_validates_openai_key(self) -> None:
         args = SimpleNamespace(
             embed_provider=" OpenAI ",
-            embed_model="text-embedding_clients-3-small",
+            embed_model="text-embedding-3-small",
             embed_dimensions="256",
             embed_base_url="https://example.test",
             embed_api_key="secret",
@@ -710,9 +710,11 @@ class SmallModuleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = importlib.import_module("pathlib").Path(temp_dir)
+            (root / "codebase_memory_pipeline").mkdir()
             producer = snapshot_builder.CodebaseMemorySnapshotProducer(root=root)
 
             def fake_subprocess_run(command, cwd, check, **kwargs):
+                self.assertTrue(cwd.is_dir(), f"Exporter directory does not exist: {cwd}")
                 if command[0] == "make":
                     producer.binary.parent.mkdir(parents=True, exist_ok=True)
                     producer.binary.write_text("#!/bin/sh\n", encoding="utf-8")

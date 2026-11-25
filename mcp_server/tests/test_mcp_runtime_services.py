@@ -102,7 +102,8 @@ class FakeSemanticProvenanceSearchService:
 
 
 class FakeHit:
-    def __init__(self, score: float, key_text: str, key_origin: str) -> None:
+    def __init__(self, score: float, key_text: str, key_origin: str, profile_id: str = "profile:1") -> None:
+        self.profile_id = profile_id
         self.score = score
         self.key_text = key_text
         self.key_origin = key_origin
@@ -446,6 +447,43 @@ def test_search_profiles_sync_covers_resync_branches_and_error_paths(
     monkeypatch.setattr(service, "_rollback_profile_search_connections", lambda: rollback_calls.append("rollback"))
     assert service.search_profiles_sync(query="jwt", repo_id="demo") == []
     assert rollback_calls == ["rollback"]
+
+
+@pytest.mark.parametrize("profile_kinds", [None, ("semantic_claim_profile",)])
+def test_search_profiles_sync_matches_profiles_by_id(monkeypatch, profile_kinds) -> None:
+    first = make_profile_result().profiles[0]
+    second = FakeProfile(
+        **{
+            **first.__dict__,
+            "profile_id": "profile:2",
+            "profile_target_id": "claim:2",
+            "value_text": "A different claim.",
+        }
+    )
+    result = SimpleNamespace(
+        hits=(
+            FakeHit(0.99, "stale key", "raw", profile_id="missing"),
+            FakeHit(0.91, "first key", "raw", profile_id=first.profile_id),
+            FakeHit(0.81, "second key", "raw", profile_id=second.profile_id),
+        ),
+        profiles=(second, first),
+    )
+    service = metadata_module.MetadataSnapshotService(MCPServerConfig())
+    monkeypatch.setattr(service, "initialize_profile_search", lambda: True)
+    service._metadata = SimpleNamespace(connection=None)
+    search_service = SimpleNamespace(search=lambda **kwargs: result)
+    service._profile_search_service = search_service
+    service._base_profile_search_service = search_service
+
+    rows = service.search_profiles_sync(query="jwt", repo_id="demo", profile_kinds=profile_kinds)
+
+    assert [
+        (row["profile_id"], row["profile_target_id"], row["value_text"], row["score"], row["matched_key_text"])
+        for row in rows
+    ] == [
+        (first.profile_id, first.profile_target_id, first.value_text, 0.91, "first key"),
+        (second.profile_id, second.profile_target_id, second.value_text, 0.81, "second key"),
+    ]
 
 
 def test_metadata_snapshot_service_connection_helpers_cover_abort_detection() -> None:

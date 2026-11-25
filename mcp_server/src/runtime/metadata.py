@@ -260,6 +260,7 @@ class MetadataSnapshotService:
                     profile_kinds=profile_kinds,
                     query_texts=query_texts,
                 )
+            profiles_by_id = {profile.profile_id: profile for profile in result.profiles}
             return [
                 {
                     "profile_id": profile.profile_id,
@@ -276,7 +277,8 @@ class MetadataSnapshotService:
                     "matched_key_origin": hit.key_origin,
                     "metadata": profile.metadata if isinstance(profile.metadata, dict) else {},
                 }
-                for hit, profile in zip(result.hits, result.profiles)
+                for hit in result.hits
+                if (profile := profiles_by_id.get(hit.profile_id)) is not None
             ]
         except Exception as exc:
             self._rollback_profile_search_connections()

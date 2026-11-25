@@ -2,44 +2,34 @@
 
 ## Setup
 
-```bash
-uv sync --all-packages --dev --no-editable
-cp .env.example .env
-docker compose up -d
-```
-
-Use `--no-editable` here. On Python 3.13, `uv` workspace editable installs currently land in hidden `.pth` files, and the interpreter skips those files during startup. Non-editable installs avoid that issue and make both `context_graph` and `context_graph_mcp_server` importable from the CLI and from outside the repo root.
+Follow the [Quick Start in the README](../README.md#quick-start) for the complete walkthrough: install dependencies, copy the tracked `.env.example`, set your OpenAI API key, start the databases, index a repository, and launch the MCP server. Run all commands from the repository root.
 
 Local infrastructure includes:
 
 - Postgres + pgvector on `localhost:5433`
 - Neo4j on `localhost:7687`
 
-## Index a Repo
+The root `.env.example` supplies both metadata DSNs (`CONTEXT_GRAPH_METADATA_DSN` for the CLI and `POSTGRES_DSN` for the MCP server), Neo4j credentials, and model settings. Keep the two DSNs pointed at the same database. `uv run --env-file .env` explicitly loads these settings for each command.
+
+## Working on the Code
+
+After changing Python code, refresh the non-editable workspace installation before starting the MCP server:
 
 ```bash
-python -m context_graph apply-latest-commit \
-  /absolute/path/to/repo \
-  --repo-id demo-repo \
-  --metadata-backend postgres \
-  --metadata-dsn postgresql://context_graph:context_graph@localhost:5433/context_graph \
-  --graph-backend neo4j \
-  --neo4j-uri bolt://localhost:7687 \
-  --neo4j-user neo4j \
-  --neo4j-password contextgraph \
-  --execute
+uv sync --all-packages --dev --no-editable
 ```
 
-## Run the MCP Server
+Use `uv run --no-sync` for subsequent commands to preserve that installation. Run both test suites with:
 
 ```bash
-uv run --package context-graph-mcp context-graph-mcp \
-  --config /absolute/path/to/Context-Graph/mcp_server/config/config.yaml \
-  --transport http
+uv run --no-sync python -m pytest tests
+PYTHONPATH=mcp_server uv run --no-sync python -m pytest mcp_server/tests
 ```
 
-Health check:
+The MCP test command uses `PYTHONPATH=mcp_server` to import the local server sources.
 
-```bash
-curl -i http://localhost:8000/health
-```
+## Troubleshooting
+
+- If indexing cannot connect to Postgres or Neo4j, check `docker compose ps` and confirm `.env` matches `docker-compose.yml`.
+- If the native indexer cannot build, confirm `make`, a C11/C++17 compiler, and zlib development headers are installed. You can build it directly with `make -C codebase_memory_pipeline repo-graph-export`.
+- See the [benchmarking guide](../evaluation/MCP_RUN_GUIDE.md) for evaluation commands.

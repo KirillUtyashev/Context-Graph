@@ -163,10 +163,10 @@ class ProfileSearchService:
             for profile in self.metadata_store.load_profiles(repo_id, active_only=active_only)
             if not allowed_kinds or profile.profile_kind in allowed_kinds
         }
+        ordered_hits = tuple(hit for hit in ordered_hits if hit.profile_id in profile_map)
         profiles = tuple(
             profile_map[hit.profile_id]
             for hit in ordered_hits
-            if hit.profile_id in profile_map
         )
         return ProfileSearchResult(
             parse_result=parse_result,

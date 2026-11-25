@@ -10,6 +10,17 @@ from context_graph.backend import InMemoryMetadataStore
 
 
 class EmbeddingInferenceTests(unittest.TestCase):
+    def test_openai_embedding_defaults_use_supported_model(self) -> None:
+        from context_graph.runtime.embedding_clients.openai import OpenAIEmbedderConfig
+        from context_graph.runtime.provider_config import EmbedderConfig
+
+        self.assertEqual(OpenAIEmbedderConfig().embedding_model, "text-embedding-3-small")
+        self.assertEqual(EmbedderConfig().model, "text-embedding-3-small")
+        provider = embeddings.make_embedding_provider(
+            embeddings.EmbeddingSettings(provider="openai", api_key="test-key")
+        )
+        self.assertEqual(provider.client.config.embedding_model, "text-embedding-3-small")
+
     def test_load_embedding_settings_infers_openai_from_llm_provider(self) -> None:
         args = SimpleNamespace(
             embed_provider=None,

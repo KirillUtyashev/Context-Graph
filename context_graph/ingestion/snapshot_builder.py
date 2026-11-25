@@ -15,7 +15,7 @@ class CodebaseMemorySnapshotProducer:
 
     def __init__(self, *, root: Optional[Path] = None) -> None:
         self.root = root or Path(__file__).resolve().parent.parent.parent
-        self.vendor_dir = self.root / "vendor" / "codebase_memory_pipeline"
+        self.vendor_dir = self.root / "codebase_memory_pipeline"
         self.binary = self.vendor_dir / "build" / "repo-graph-export"
 
     def ensure_binary(self) -> None:

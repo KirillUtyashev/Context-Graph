@@ -1225,6 +1225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 limit=args.limit,
                 active_only=not args.include_inactive,
             )
+        profiles_by_id = {profile.profile_id: profile for profile in result.profiles}
         return _emit_json(
             {
                 "repo_id": args.repo_id,
@@ -1252,7 +1253,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "matched_key_origin": hit.key_origin,
                         "metadata": dict(profile.metadata),
                     }
-                    for hit, profile in zip(result.hits, result.profiles)
+                    for hit in result.hits
+                    if (profile := profiles_by_id.get(hit.profile_id)) is not None
                 ],
             }
         )

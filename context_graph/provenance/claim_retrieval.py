@@ -286,8 +286,8 @@ class ClaimSemanticRetrievalService:
             for profile in self.metadata_store.load_profiles(repo_id, active_only=active_only)
             if profile.profile_kind == SEMANTIC_CLAIM_PROFILE_KIND
         }
-        profiles = tuple(
-            profile_map[hit.profile_id]
+        matched_hits = tuple(
+            (hit, profile_map[hit.profile_id])
             for hit in ordered_hits
             if hit.profile_id in profile_map
         )
@@ -302,12 +302,12 @@ class ClaimSemanticRetrievalService:
                 key_text=hit.key_text,
                 key_origin=hit.key_origin,
             )
-            for hit, profile in zip(ordered_hits, profiles)
+            for hit, profile in matched_hits
         )
         return ClaimSemanticSearchResult(
             parse_result=parse_result,
             hits=hydrated_hits,
-            profiles=profiles,
+            profiles=tuple(profile for _, profile in matched_hits),
         )
 
 
